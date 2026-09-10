@@ -1,0 +1,145 @@
+{
+  "VERSION": "2026-09-10-r9.2-r5-stage1-strict-llm",
+  "files": {
+    "cache": "cache_tavily.sqlite",
+    "master": "Consolidado Base de Produtos Enriquecida.xlsx",
+    "final": "Base Final Produtos Enriquecida.xlsx",
+    "classification_db": "pipeline_v3.sqlite",
+    "output": "Classificacao_v3.xlsx",
+    "inventory_output": "Inventario_v3.xlsx",
+    "input": "Base de Produtos.xlsx",
+    "collection_report": "Coleta_Tavily_v3.xlsx",
+    "precollection_report": "Pre_Coleta_Normalizacao_v3.xlsx",
+    "pending_with_cache": "Pendentes_Com_Cache.xlsx",
+    "pending_without_cache": "Pendentes_Sem_Cache.xlsx",
+    "baseline_backup_dir": "Backups_Baseline",
+    "baseline_audit": "Auditoria_Baseline_R9_2.csv"
+  },
+  "evidence": {
+    "max_results": 5,
+    "content_chars": 2400
+  },
+  "identity": {
+    "regional_suffixes": [
+      "AR",
+      "BR",
+      "B1",
+      "B2",
+      "B3",
+      "B4"
+    ]
+  },
+  "tavily": {
+    "requests_per_minute": 30,
+    "retries": 4,
+    "retry_backoff_seconds": [
+      2,
+      5,
+      10,
+      20
+    ],
+    "timeout_seconds": 60,
+    "search_depth": "basic",
+    "max_results": 5,
+    "include_raw_content": "markdown"
+  },
+  "llm": {
+    "route": [
+      "groq",
+      "nvidia",
+      "openrouter"
+    ],
+    "switch_only_on_quota_exhaustion": true
+  },
+  "groq": {
+    "model": "openai/gpt-oss-120b",
+    "base_url": "https://api.groq.com/openai/v1",
+    "requests_per_minute": 30,
+    "tokens_per_minute": 8000,
+    "requests_per_day": 1000,
+    "tokens_per_day": 200000,
+    "max_api_calls_per_run": 100,
+    "max_total_tokens_per_run": 150000,
+    "retry_attempts": 4,
+    "retry_backoff_seconds": [
+      2,
+      5,
+      10,
+      20
+    ],
+    "timeout_seconds": 90,
+    "max_output_tokens": 1024,
+    "reasoning_effort": "low",
+    "evidence_content_chars": 550,
+    "max_llm_sources": 3,
+    "operational_requests_per_minute": 3.0,
+    "max_aliases_per_type": 5,
+    "max_negative_aliases_per_type": 3,
+    "json_retry_max_completion_tokens": 2048,
+    "tpm_safety_margin": 0.88
+  },
+  "nvidia": {
+    "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "operational_requests_per_minute": 3.0,
+    "max_api_calls_per_run": 1000,
+    "max_total_tokens_per_run": 0,
+    "retry_attempts": 4,
+    "retry_backoff_seconds": [
+      2,
+      5,
+      10,
+      20
+    ],
+    "timeout_seconds": 90,
+    "max_output_tokens": 1024,
+    "json_retry_max_completion_tokens": 2048,
+    "reasoning_effort": "low",
+    "evidence_content_chars": 550,
+    "max_llm_sources": 3,
+    "max_aliases_per_type": 5,
+    "max_negative_aliases_per_type": 3,
+    "model_candidates": [
+      "nvidia/nemotron-3.5-lightning-30b-a3b",
+      "meta/llama-3.3-70b-instruct",
+      "openai/gpt-oss-20b",
+      "meta/llama-3.1-8b-instruct"
+    ]
+  },
+  "openrouter": {
+    "model": "openai/gpt-oss-120b:free",
+    "base_url": "https://openrouter.ai/api/v1",
+    "require_free_model": true,
+    "requests_per_minute": 0,
+    "tokens_per_minute": 0,
+    "requests_per_day": 0,
+    "tokens_per_day": 0,
+    "operational_requests_per_minute": 3.0,
+    "max_api_calls_per_run": 1000,
+    "max_total_tokens_per_run": 0,
+    "retry_attempts": 4,
+    "retry_backoff_seconds": [
+      2,
+      5,
+      10,
+      20
+    ],
+    "timeout_seconds": 90,
+    "max_output_tokens": 1024,
+    "json_retry_max_completion_tokens": 2048,
+    "reasoning_effort": "low",
+    "evidence_content_chars": 550,
+    "max_llm_sources": 3,
+    "max_aliases_per_type": 5,
+    "max_negative_aliases_per_type": 3
+  },
+  "recovery": {
+    "reprocess_stale_auto_approved": true,
+    "rule_metadata_source": "Consolidado",
+    "hard_lock_review_bi_value": "OK"
+  },
+  "quality_gates": {
+    "source": "regras_negocio.json",
+    "fail_before_classification": true
+  }
+}

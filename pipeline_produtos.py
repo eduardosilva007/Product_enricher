@@ -1,0 +1,5720 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.2
+
+Arquitetura:
+    Stage 0 - Evidence Store (Tavily RAW)
+    Stage 1 - Regras determinísticas do JSON
+    Stage 2 - Groq -> NVIDIA -> OpenRouter somente para AMBIGUOUS / UNRESOLVED
+    Stage 3 - Validação estrita da saída LLM
+    Stage 4 - Taxonomia determinística do JSON
+
+Princípios:
+- Tavily RAW é a única fonte factual web.
+- regras_negocio.json é a fonte única semântica: regras + quality gates.
+- Stage 1 usa o comportamento comprovado do R5: aliases JSON formam candidatos; resolução automática exige evidência explícita/repetida.
+- O LLM recebe contexto relevante extraído do JSON por produto.
+- O LLM escolhe apenas PRODUCT_TYPE e POWER dentro do contrato fechado.
+- Category General e FAMILY sempre vêm do JSON, nunca do LLM.
+- Status=Manual/Revisão=MANUAL são FULL LOCK.
+- Revisão B.I=OK é HARD LOCK absoluto e vence inclusive --reprocess.
+- Cache/checkpoint são separados por provider/model/prompt/rules/raw_hash.
+- Base Final preserva 100% das chaves; Revisão B.I é exclusivamente humana.
+- Novos/reprocessados mantêm Revisão B.I vazia até o double check.
+- Erro operacional de API nunca vira REVIEW nem falta de cache.
+- CLASSIFY não consulta Tavily.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import logging
+import os
+import re
+import random
+import sqlite3
+import sys
+import time
+import unicodedata
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import quote
+
+PIPELINE_VERSION = "3.9.2"
+PROMPT_VERSION = "2026-09-10-v13-r5-stage1-strict-llm-unified"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
+BUILD_LABEL = "v3.9.2-R9.2 R5 Stable Stage1 + Strict LLM Gate + Unified Rules"
+
+LOG = logging.getLogger("pipeline_v3")
+
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def safe(v: Any) -> str:
+    if v is None:
+        return ""
+    try:
+        if isinstance(v, float) and v != v:
+            return ""
+    except Exception:
+        pass
+    return str(v).strip()
+
+
+def read_json(path: Path) -> Dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        obj = json.load(f)
+    if not isinstance(obj, dict):
+        raise ValueError(f"JSON deve ser objeto: {path}")
+    return obj
+
+
+def stable_json_hash(obj: Any) -> str:
+    raw = json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def file_hash(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def strip_accents(text: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", safe(text)) if not unicodedata.combining(c))
+
+
+def norm_text(text: str) -> str:
+    """Normalização semântica Unicode.
+
+    Preserva letras/números não latinos (ex.: cirílico) usados em aliases do
+    próprio JSON. A chave de negócio continua usando compact() e permanece
+    conservadora/ASCII para Marca+Modelo.
+    """
+    t = strip_accents(text).casefold()
+    t = t.replace("_", " ")
+    t = re.sub(r"[^\w]+", " ", t, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def compact(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", strip_accents(text).casefold())
+
+
+def business_key(brand: str, model: str) -> str:
+    """Chave AGRESSIVA usada somente para deduplicação/cache.
+
+    Remove acentos, espaços, hífens, pontos, barras, underscores, parênteses e
+    demais pontuações. NÃO usa fuzzy matching e NÃO substitui Marca/Modelo
+    originais na base ou nos relatórios.
+    """
+    return f"{compact(brand)}|{compact(model)}"
+
+
+def canonical_display(text: str) -> str:
+    """Representação canônica para auditoria, sem substituir o original."""
+    t = strip_accents(text).upper().strip()
+    return re.sub(r"\s+", " ", t)
+
+
+@lru_cache(maxsize=4096)
+def alias_pattern(alias: str) -> re.Pattern:
+    parts = [re.escape(x) for x in re.split(r"\s+", strip_accents(alias).casefold().strip()) if x]
+    body = r"\s+".join(parts)
+    return re.compile(rf"(?<![a-z0-9]){body}(?![a-z0-9])", re.I)
+
+
+def contains_alias(text_normish: str, alias: str) -> bool:
+    return bool(alias_pattern(alias).search(strip_accents(text_normish).casefold()))
+
+
+def contains_alias_prepared(text_folded: str, alias: str) -> bool:
+    """Alias search when text was already strip_accents(...).casefold()."""
+    return bool(alias_pattern(alias).search(text_folded))
+
+
+def find_col(df: Any, names: Sequence[str], required: bool = True) -> Optional[str]:
+    by_norm = {norm_text(str(c)): c for c in df.columns}
+    for name in names:
+        if norm_text(name) in by_norm:
+            return by_norm[norm_text(name)]
+    if required:
+        raise ValueError(f"Coluna não encontrada. Esperado um de: {names}")
+    return None
+
+
+def setup_logging(verbose: bool = False) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def load_env_file(path: Path) -> Dict[str, Any]:
+    """Carrega .env local sem dependência externa e sem sobrescrever o ambiente.
+
+    Retorna metadados seguros para diagnóstico. O valor das chaves nunca é logado.
+    """
+    info: Dict[str, Any] = {
+        "path": str(path),
+        "exists": path.exists(),
+        "loaded_keys": [],
+        "skipped_existing": [],
+    }
+    if not path.exists():
+        return info
+
+    for line in path.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        # Aceita também "export KEY=VALUE".
+        if line.lower().startswith("export "):
+            line = line[7:].strip()
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+
+        # Remove aspas externas simples/duplas.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+
+        if not key:
+            continue
+
+        if key in os.environ:
+            info["skipped_existing"].append(key)
+            continue
+
+        os.environ[key] = value
+        info["loaded_keys"].append(key)
+
+    return info
+
+
+# -----------------------------------------------------------------------------
+# Proteções operacionais / APIs
+# -----------------------------------------------------------------------------
+class OperationalPause(RuntimeError):
+    """Pausa segura da execução por quota, autenticação ou indisponibilidade."""
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+class RateLimiter:
+    """Controla rajadas por requests/minute no processo local."""
+    def __init__(self, requests_per_minute: float):
+        rpm = max(0.0, float(requests_per_minute or 0))
+        self.interval = (60.0 / rpm) if rpm > 0 else 0.0
+        self._last = 0.0
+
+    def wait(self) -> float:
+        if self.interval <= 0:
+            return 0.0
+        now = time.monotonic()
+        remaining = (self._last + self.interval) - now
+        if self._last and remaining > 0:
+            time.sleep(remaining)
+        self._last = time.monotonic()
+        return max(0.0, remaining)
+
+
+def classify_api_error(exc: Exception) -> str:
+    """Converte erros HTTP/SDK em estados operacionais discretos."""
+    code = getattr(exc, "code", None)
+    msg = safe(getattr(exc, "message", "")) or safe(exc)
+    folded = msg.casefold()
+
+    if code == 401 or any(x in folded for x in ["unauthorized", "api key not valid", "invalid api key"]):
+        return "AUTH"
+    if code == 403 or any(x in folded for x in ["permission_denied", "forbidden"]):
+        return "PERMISSION"
+    if code == 429:
+        # A API usa 429 tanto para rate-limit quanto para quota diária.
+        if any(x in folded for x in ["quota_exceeded", "daily quota", "requests per day", "rpd"]):
+            return "QUOTA"
+        return "RATE_LIMIT"
+    if code in {408, 500, 502, 503, 504} or any(
+        x in folded for x in ["service_unavailable", "deadline_exceeded", "timeout", "timed out"]
+    ):
+        return "TRANSIENT"
+    return "OTHER"
+
+
+def should_checkpoint_record(rec: Dict[str, Any]) -> bool:
+    """Falha operacional de API nunca vira checkpoint final de classificação."""
+    stage = safe(rec.get("Stage")).upper()
+    return stage != "API_PAUSED" and not stage.endswith("_ERROR")
+
+
+# -----------------------------------------------------------------------------
+# Regras
+# -----------------------------------------------------------------------------
+class Rules:
+    def __init__(self, path: Path):
+        self.path = path
+        self.raw = read_json(path)
+        self.version = safe(self.raw.get("VERSION")) or "unknown"
+        # Checkpoint hash contém apenas semântica realmente executável.
+        # VERSION, DESIGN_PRINCIPLES, SCHEMA_VERSION e QUALITY_GATES são
+        # auditáveis, mas não devem forçar reprocessamento quando a lógica não mudou.
+        semantic_keys = (
+            "PRODUCT_TYPES", "POWER_RULES", "TAXONOMY_PAIRS", "TAXONOMY_RULES",
+            "TYPE_POLICY", "RESOLUTION_POLICY", "CLASSIFICATION_POLICY",
+            "SOURCE_RULES", "COMPONENT_CONTEXT_RULES",
+            "COMPOSITE_TYPE_RULES",
+        )
+        semantic_payload = {k: self.raw.get(k) for k in semantic_keys}
+        self.hash = stable_json_hash(semantic_payload)
+        self.quality_gates = self.raw.get("QUALITY_GATES", {}) or {}
+        self.quality_hash = stable_json_hash(self.quality_gates)
+        self.types: Dict[str, Dict[str, Any]] = self.raw.get("PRODUCT_TYPES", {}) or {}
+        self.power_rules: Dict[str, Dict[str, Any]] = self.raw.get("POWER_RULES", {}) or {}
+        self.taxonomy_rules: List[Dict[str, Any]] = self.raw.get("TAXONOMY_RULES", []) or []
+        self.valid_pairs = {
+            (safe(x.get("category_general")), safe(x.get("family")))
+            for x in (self.raw.get("TAXONOMY_PAIRS", []) or [])
+        }
+        self.type_policy = self.raw.get("TYPE_POLICY", {}) or {}
+        self.resolution_policy = self.raw.get("RESOLUTION_POLICY", {}) or {}
+        self.classification_policy = self.raw.get("CLASSIFICATION_POLICY", {}) or {}
+        self.composite_rules = self.raw.get("COMPOSITE_TYPE_RULES", []) or []
+        self.component_context = self.raw.get("COMPONENT_CONTEXT_RULES", {}) or {}
+        self.source_rules = self.raw.get("SOURCE_RULES", {}) or {}
+        self.component_types = set(self.type_policy.get("component_primary_types", []) or [])
+        self.passive_types = set(self.type_policy.get("passive_power_types", []) or [])
+        self.output_voltage_not_input_power_types = set(
+            self.type_policy.get("output_voltage_not_input_power_types", []) or []
+        )
+        self.specificity_groups: List[List[str]] = self.type_policy.get("specificity_groups", []) or []
+        self.specificity_rank: Dict[str, int] = {}
+        for group in self.specificity_groups:
+            n = len(group)
+            for i, typ in enumerate(group):
+                typ = safe(typ)
+                if typ:
+                    self.specificity_rank[typ] = max(self.specificity_rank.get(typ, 0), n - i)
+        self.allowed_powers = list(self.power_rules.keys()) + ["UNKNOWN"]
+        self.alias_collision_policy = {
+            norm_text(k): safe(v)
+            for k, v in (self.resolution_policy.get("alias_collision_policy", {}) or {}).items()
+        }
+        self.alias_to_types: Dict[str, List[str]] = defaultdict(list)
+        self._compiled_aliases: Dict[str, List[Tuple[str, re.Pattern]]] = {}
+        self._compiled_negative: Dict[str, List[Tuple[str, re.Pattern]]] = {}
+        self._compile()
+
+    def _compile(self) -> None:
+        for t, data in self.types.items():
+            self._compiled_aliases[t] = [(a, alias_pattern(a)) for a in (data.get("aliases", []) or []) if safe(a)]
+            self._compiled_negative[t] = [(a, alias_pattern(a)) for a in (data.get("negative_aliases", []) or []) if safe(a)]
+            for a in (data.get("aliases", []) or []):
+                na = norm_text(a)
+                if na:
+                    self.alias_to_types[na].append(t)
+
+    def validate(self) -> List[str]:
+        errors: List[str] = []
+        if not self.types:
+            errors.append("PRODUCT_TYPES vazio")
+        if not self.power_rules:
+            errors.append("POWER_RULES vazio")
+        if not self.valid_pairs:
+            errors.append("TAXONOMY_PAIRS vazio")
+
+        for t, data in self.types.items():
+            pos = {norm_text(x) for x in data.get("aliases", []) or []}
+            neg = {norm_text(x) for x in data.get("negative_aliases", []) or []}
+            both = sorted(x for x in pos & neg if x)
+            if both:
+                errors.append(f"{t}: alias positivo e negativo ao mesmo tempo: {both[:5]}")
+            fp = data.get("fallback_pair")
+            if fp:
+                if not isinstance(fp, list) or len(fp) != 2 or (safe(fp[0]), safe(fp[1])) not in self.valid_pairs:
+                    errors.append(f"{t}: fallback_pair inválido: {fp}")
+
+        for r in self.taxonomy_rules:
+            t = safe(r.get("primary_type"))
+            if t not in self.types:
+                errors.append(f"TAXONOMY_RULE desconhece type={t}")
+            pair = (safe(r.get("category_general")), safe(r.get("family")))
+            if pair not in self.valid_pairs:
+                errors.append(f"TAXONOMY_RULE par inválido: {pair}")
+            p = safe(r.get("power")) or "*"
+            if p != "*" and p not in self.allowed_powers:
+                errors.append(f"TAXONOMY_RULE power inválido: {p}")
+
+        for t in sorted(self.output_voltage_not_input_power_types):
+            if t not in self.types:
+                errors.append(
+                    f"TYPE_POLICY.output_voltage_not_input_power_types desconhece type={t}"
+                )
+
+        for fld in ("negative_page_terms", "negative_title_terms"):
+            vals = self.source_rules.get(fld, []) or []
+            if not isinstance(vals, list):
+                errors.append(f"SOURCE_RULES.{fld} deve ser lista")
+
+        # Gate anti-regressão: não aceitar tipo de combo kit com alias genérico.
+        # "combo kit" sozinho aparece em muitos kits de uma única ferramenta e
+        # aumentou candidatos conflitantes no piloto v2.5.
+        power_tool_kit = self.types.get("POWER TOOL KIT", {}) or {}
+        kit_aliases = {
+            norm_text(x) for x in (power_tool_kit.get("aliases", []) or [])
+        }
+        if "combo kit" in kit_aliases:
+            errors.append(
+                "POWER TOOL KIT contém alias genérico 'combo kit'; "
+                "exija frase explícita de power/tool combo ou regra composta."
+            )
+
+        # Gate anti-regressão: a v2.5 removeu globalmente as tensões de CORDED e
+        # isso afetou famílias não relacionadas. A exceção agora é type-aware.
+        corded = self.power_rules.get("CORDED", {}) or {}
+        common_mains = {norm_text(x) for x in (corded.get("voltage_keywords", []) or [])}
+        if not {"110v", "120v", "220v", "230v"}.issubset(common_mains):
+            errors.append(
+                "POWER_RULES.CORDED perdeu tensões de rede básicas; "
+                "use exceção type-aware para geradores em vez de remover globalmente."
+            )
+
+        # R9: o JSON não pode declarar políticas que o executor ignora silenciosamente.
+        required_policy_sections = ["RESOLUTION_POLICY", "CLASSIFICATION_POLICY"]
+        for section in required_policy_sections:
+            if not self.raw.get(section):
+                errors.append(f"{section} ausente/vazio; R9.2 exige política executável.")
+        llm_gate = self.classification_policy.get("llm_resolution_gate", {}) or {}
+        for key in (
+            "allow_only_stage1_type_candidates",
+            "allow_only_stage1_power_candidates",
+            "require_cited_source_support",
+            "require_title_support_or_min_sources",
+            "block_multi_primary_title_conflict",
+            "no_candidate_means_no_llm",
+        ):
+            if key not in llm_gate:
+                errors.append(f"CLASSIFICATION_POLICY.llm_resolution_gate.{key} ausente")
+        for key in (
+            "allow_only_stage1_type_candidates",
+            "allow_only_stage1_power_candidates",
+            "require_cited_source_support",
+            "block_multi_primary_title_conflict",
+            "no_candidate_means_no_llm",
+        ):
+            if llm_gate.get(key) is not True:
+                errors.append(f"LLM_SAFETY_GATE_DISABLED: {key} deve ser true")
+        if safe(llm_gate.get("require_identity_at_least")) not in {"PROBABLE", "STRONG"}:
+            errors.append("LLM_SAFETY_GATE_WEAK: require_identity_at_least deve ser PROBABLE ou STRONG")
+        qg = self.quality_gates
+        if not isinstance(qg.get("SYNTHETIC_CASES"), list) or not qg.get("SYNTHETIC_CASES"):
+            errors.append("QUALITY_GATES.SYNTHETIC_CASES ausente/vazio")
+        if not isinstance(qg.get("REAL_VALIDATED_CASES"), list) or not qg.get("REAL_VALIDATED_CASES"):
+            errors.append("QUALITY_GATES.REAL_VALIDATED_CASES ausente/vazio")
+        if not isinstance(qg.get("IDENTITY_CASES"), list) or not qg.get("IDENTITY_CASES"):
+            errors.append("QUALITY_GATES.IDENTITY_CASES ausente/vazio")
+
+        # Colisões de alias cross-type precisam ser governadas explicitamente.
+        for alias, owners in sorted(self.alias_to_types.items()):
+            uniq = sorted(set(owners))
+            if len(uniq) <= 1:
+                continue
+            preferred = self.alias_collision_policy.get(alias)
+            if not preferred:
+                errors.append(f"ALIAS_COLLISION_UNDECLARED: '{alias}' pertence a {uniq}")
+            elif preferred not in uniq:
+                errors.append(f"ALIAS_COLLISION_BAD_POLICY: '{alias}' prefere {preferred}, mas owners={uniq}")
+
+        # Requisito explícito do projeto: MERCHANDISING foi removido por falso positivo.
+        if "MERCHANDISING" in self.types:
+            errors.append("FORBIDDEN_TYPE: MERCHANDISING não pode existir em PRODUCT_TYPES")
+        if any(cg == "MERCHANDISING" or fam == "MERCHANDISING" for cg, fam in self.valid_pairs):
+            errors.append("FORBIDDEN_TAXONOMY: MERCHANDISING|MERCHANDISING não pode existir")
+
+        # Closed schema: evita voltar a acumular seções/campos mortos no JSON.
+        allowed_root = {
+            "VERSION", "SCHEMA_VERSION", "DESIGN_PRINCIPLES",
+            "TAXONOMY_PAIRS", "PRODUCT_TYPES", "POWER_RULES",
+            "SOURCE_RULES", "TAXONOMY_RULES", "COMPONENT_CONTEXT_RULES",
+            "TYPE_POLICY", "RESOLUTION_POLICY", "CLASSIFICATION_POLICY",
+            "COMPOSITE_TYPE_RULES", "QUALITY_GATES",
+        }
+        for key in self.raw:
+            if key not in allowed_root:
+                errors.append(f"UNKNOWN_ROOT_SECTION: {key} não possui executor no R9.2")
+
+        allowed_resolution = {"alias_collision_policy"}
+        for key in self.resolution_policy:
+            if key not in allowed_resolution:
+                errors.append(f"UNKNOWN_RESOLUTION_POLICY_FIELD: {key}")
+
+        allowed_classification = {"llm_resolution_gate"}
+        for key in self.classification_policy:
+            if key not in allowed_classification:
+                errors.append(f"UNKNOWN_CLASSIFICATION_POLICY_FIELD: {key}")
+
+        allowed_type_policy = {
+            "component_primary_types", "passive_power_types", "specificity_groups",
+            "output_voltage_not_input_power_types", "output_voltage_rule",
+            "replacement_compatibility_rule", "source_conflict_rule",
+            "agricultural_mower_rule",
+        }
+        for key in self.type_policy:
+            if key not in allowed_type_policy:
+                errors.append(f"UNKNOWN_TYPE_POLICY_FIELD: {key}")
+
+        allowed_type_fields = {"aliases", "negative_aliases", "fallback_pair"}
+        for typ, data in self.types.items():
+            for key in data:
+                if key not in allowed_type_fields:
+                    errors.append(f"UNKNOWN_PRODUCT_TYPE_FIELD: {typ}.{key}")
+
+        # Closed schema também nas demais seções executáveis: nenhum campo
+        # decorativo pode parecer regra ativa sem ter executor no Python.
+        allowed_taxonomy_fields = {"primary_type", "power", "category_general", "family", "priority"}
+        for i, row in enumerate(self.taxonomy_rules):
+            for key in row:
+                if key not in allowed_taxonomy_fields:
+                    errors.append(f"UNKNOWN_TAXONOMY_RULE_FIELD: TAXONOMY_RULES[{i}].{key}")
+
+        for power, data in self.power_rules.items():
+            for key in data:
+                if key == "negative_keywords" or key.endswith("_keywords"):
+                    continue
+                errors.append(f"UNKNOWN_POWER_RULE_FIELD: {power}.{key}")
+
+        allowed_source_fields = {"negative_page_terms", "negative_title_terms", "notes"}
+        for key in self.source_rules:
+            if key not in allowed_source_fields:
+                errors.append(f"UNKNOWN_SOURCE_RULE_FIELD: {key}")
+
+        allowed_component_fields = {"negation_phrases"}
+        for key in self.component_context:
+            if key not in allowed_component_fields:
+                errors.append(f"UNKNOWN_COMPONENT_CONTEXT_FIELD: {key}")
+
+        allowed_composite_fields = {"target_type", "any", "all_groups", "none"}
+        for i, row in enumerate(self.composite_rules):
+            for key in row:
+                if key not in allowed_composite_fields:
+                    errors.append(f"UNKNOWN_COMPOSITE_RULE_FIELD: COMPOSITE_TYPE_RULES[{i}].{key}")
+
+        return errors
+
+    def map_taxonomy(self, product_type: str, power: str) -> Tuple[str, str, str]:
+        candidates = []
+        for r in self.taxonomy_rules:
+            if safe(r.get("primary_type")) != product_type:
+                continue
+            rp = safe(r.get("power")) or "*"
+            if rp not in {power, "*"}:
+                continue
+            candidates.append(r)
+        if candidates:
+            candidates.sort(key=lambda x: (int(x.get("priority", 0)), safe(x.get("power")) == power), reverse=True)
+            best = candidates[0]
+            pair = (safe(best.get("category_general")), safe(best.get("family")))
+            if pair in self.valid_pairs:
+                return pair[0], pair[1], f"TAXONOMY_RULE:{safe(best.get('power')) or '*'}"
+
+        fp = (self.types.get(product_type, {}) or {}).get("fallback_pair")
+        if isinstance(fp, list) and len(fp) == 2:
+            pair = (safe(fp[0]), safe(fp[1]))
+            if pair in self.valid_pairs:
+                return pair[0], pair[1], "TYPE_FALLBACK_PAIR"
+        return "OTHERS", "OTHERS", "TAXONOMY_UNMAPPED"
+
+
+# -----------------------------------------------------------------------------
+# Evidence store Tavily - somente leitura
+# -----------------------------------------------------------------------------
+@dataclass
+class RawEvidence:
+    state: str
+    brand: str
+    model: str
+    cache_key_stored: str = ""
+    payload: Optional[Dict[str, Any]] = None
+    reason: str = ""
+
+    @property
+    def raw_hash(self) -> str:
+        if not self.payload:
+            return ""
+        return stable_json_hash(self.payload.get("results", []) or [])
+
+
+class TavilyReadOnlyStore:
+    def __init__(self, path: Path):
+        if not path.exists():
+            raise FileNotFoundError(f"Cache Tavily não existe: {path}")
+        self.path = path
+        uri = f"file:{quote(str(path.resolve()).replace(os.sep, '/'), safe='/:')}?mode=ro"
+        self.conn = sqlite3.connect(uri, uri=True)
+        self.conn.row_factory = sqlite3.Row
+        qc = self.conn.execute("PRAGMA quick_check").fetchone()
+        if not qc or safe(qc[0]).lower() != "ok":
+            raise RuntimeError(f"SQLite quick_check falhou: {qc[0] if qc else 'sem resposta'}")
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(tavily_cache)")}
+        required = {"cache_key", "brand", "model", "response_json", "created_at"}
+        if not required.issubset(cols):
+            raise RuntimeError(f"Tabela tavily_cache inválida. Faltam: {sorted(required-cols)}")
+        self._rows: Dict[str, List[sqlite3.Row]] = defaultdict(list)
+        self.merged_variants: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+        for row in self.conn.execute("SELECT cache_key,brand,model,response_json,created_at FROM tavily_cache"):
+            k = business_key(row["brand"], row["model"])
+            self._rows[k].append(row)
+        for k, rows in self._rows.items():
+            pairs = sorted({(safe(r["brand"]), safe(r["model"])) for r in rows})
+            if len(pairs) > 1:
+                self.merged_variants[k] = pairs
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def catalog(self) -> List[Tuple[str, str, str]]:
+        """Catálogo em ordem determinística pela business_key.
+
+        Isso garante que um piloto de N produtos use o mesmo cohort ao trocar
+        apenas provider/modelo, permitindo benchmark Groq x NVIDIA no futuro.
+        """
+        out = []
+        for k in sorted(self._rows):
+            rows = self._rows[k]
+            row = rows[-1]
+            out.append((safe(row["brand"]), safe(row["model"]), k))
+        return out
+
+    def get(self, brand: str, model: str) -> RawEvidence:
+        k = business_key(brand, model)
+        rows = self._rows.get(k)
+        if not rows:
+            return RawEvidence("RAW_MISSING", brand, model, reason="Produto não existe na tabela tavily_cache")
+
+        merged_results: List[Dict[str, Any]] = []
+        seen = set()
+        valid_payloads = 0
+        cache_keys = []
+        for row in rows:
+            cache_keys.append(safe(row["cache_key"]))
+            try:
+                payload = json.loads(row["response_json"])
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            results = payload.get("results", []) or []
+            if not isinstance(results, list):
+                continue
+            valid_payloads += 1
+            for res in results:
+                if not isinstance(res, dict):
+                    continue
+                sig = (safe(res.get("url")), safe(res.get("title")), safe(res.get("content"))[:200])
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                merged_results.append(res)
+
+        if valid_payloads == 0:
+            return RawEvidence("RAW_CORRUPT", brand, model, " | ".join(cache_keys), reason="Nenhuma variante contém JSON Tavily válido")
+        payload = {"results": merged_results}
+        if not merged_results:
+            return RawEvidence("RAW_EMPTY", brand, model, " | ".join(cache_keys), payload, "Tavily persistiu resposta sem resultados")
+        state = "RAW_OK_MERGED" if len(rows) > 1 else "RAW_OK"
+        reason = f"{len(rows)} variantes de Marca/Modelo consolidadas" if len(rows) > 1 else ""
+        return RawEvidence(state, brand, model, " | ".join(cache_keys), payload, reason)
+
+
+# -----------------------------------------------------------------------------
+# Tavily - gravação SOMENTE no modo COLETA
+# -----------------------------------------------------------------------------
+class TavilyWritableStore:
+    """Writer isolado do RAW Tavily com commit por produto."""
+    def __init__(self, path: Path):
+        self.path = path
+        self.conn = sqlite3.connect(path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=FULL")
+        self.conn.execute(
+            """CREATE TABLE IF NOT EXISTS tavily_cache (
+                cache_key TEXT PRIMARY KEY,
+                brand TEXT NOT NULL,
+                model TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        self.conn.commit()
+        qc = self.conn.execute("PRAGMA quick_check").fetchone()
+        if not qc or safe(qc[0]).lower() != "ok":
+            raise RuntimeError(f"SQLite quick_check falhou antes da coleta: {qc[0] if qc else 'sem resposta'}")
+
+    def put(self, brand: str, model: str, payload: Dict[str, Any]) -> None:
+        if not isinstance(payload, dict) or not isinstance(payload.get("results", []), list):
+            raise ValueError("Payload Tavily inválido; RAW não será gravado")
+        key = "v3|" + business_key(brand, model)
+        self.conn.execute(
+            """INSERT INTO tavily_cache(cache_key,brand,model,response_json,created_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(cache_key) DO UPDATE SET
+                 brand=excluded.brand,
+                 model=excluded.model,
+                 response_json=excluded.response_json,
+                 created_at=excluded.created_at""",
+            (key, brand, model, json.dumps(payload, ensure_ascii=False, default=str), now_iso()),
+        )
+        self.conn.commit()  # RAW persistido imediatamente por produto
+
+    def close(self) -> None:
+        self.conn.commit()
+        self.conn.close()
+
+
+@dataclass
+class InputProductRow:
+    row_number: int
+    brand_original: str
+    model_original: str
+    brand_canonical: str
+    model_canonical: str
+    key: str
+    valid: bool
+    duplicate_rank: int = 0
+    duplicate_count: int = 0
+    representative: bool = False
+    raw_state: str = ""
+    action: str = ""
+    reason: str = ""
+
+
+@dataclass
+class PreCollectionPlan:
+    input_path: Path
+    report_path: Path
+    rows: List[InputProductRow]
+    representatives: List[InputProductRow]
+    candidates: List[InputProductRow]
+    summary: Dict[str, Any]
+
+
+def read_input_rows(path: Path) -> List[InputProductRow]:
+    """Lê TODAS as linhas e preserva Marca/Modelo exatamente como vieram."""
+    if not path.exists():
+        raise FileNotFoundError(f"Base de entrada não encontrada: {path}")
+
+    import pandas as pd
+    if path.suffix.casefold() in {".xlsx", ".xlsm", ".xls"}:
+        df = pd.read_excel(path, dtype=object)
+    elif path.suffix.casefold() == ".csv":
+        df = pd.read_csv(path, dtype=object, sep=None, engine="python")
+    else:
+        raise ValueError("Entrada deve ser Excel ou CSV")
+
+    b = find_col(df, ["Fabricante", "Marca", "Manufacturer", "Brand"])
+    m = find_col(df, ["Modelo", "Model", "SKU", "Part Number"])
+
+    out: List[InputProductRow] = []
+    for idx, row in df.iterrows():
+        brand = safe(row[b])
+        model = safe(row[m])
+        valid = bool(brand and model)
+        key = business_key(brand, model) if valid else ""
+        out.append(
+            InputProductRow(
+                row_number=int(idx) + 2,
+                brand_original=brand,
+                model_original=model,
+                brand_canonical=canonical_display(brand),
+                model_canonical=canonical_display(model),
+                key=key,
+                valid=valid,
+                reason="" if valid else "MARCA_OU_MODELO_AUSENTE",
+            )
+        )
+    return out
+
+
+def _raw_missing_without_cache(brand: str, model: str) -> RawEvidence:
+    return RawEvidence("RAW_MISSING", brand, model, reason="Cache ainda não existe")
+
+
+def build_precollection_plan(
+    input_path: Path,
+    cache_path: Path,
+    report_path: Path,
+    recollect_empty: bool = False,
+    max_tavily_new: int = 0,
+) -> PreCollectionPlan:
+    """Normaliza/deduplica/cruza cache. NÃO consulta Tavily."""
+    rows = read_input_rows(input_path)
+
+    groups: Dict[str, List[InputProductRow]] = defaultdict(list)
+    for row in rows:
+        if row.valid:
+            groups[row.key].append(row)
+
+    representatives: List[InputProductRow] = []
+    for _, grp in groups.items():
+        total = len(grp)
+        representative = grp[0]
+        representatives.append(representative)
+        for rank, row in enumerate(grp, 1):
+            row.duplicate_rank = rank
+            row.duplicate_count = total
+            row.representative = rank == 1
+            if rank > 1:
+                row.action = "DUPLICADO_ENTRADA"
+                row.reason = f"Mesma business_key da linha {representative.row_number}"
+
+    store: Optional[TavilyReadOnlyStore] = TavilyReadOnlyStore(cache_path) if cache_path.exists() else None
+    try:
+        for rep in representatives:
+            raw = store.get(rep.brand_original, rep.model_original) if store else _raw_missing_without_cache(rep.brand_original, rep.model_original)
+            rep.raw_state = raw.state
+
+            if raw.state in {"RAW_OK", "RAW_OK_MERGED"}:
+                rep.action = "JA_NO_CACHE"
+                rep.reason = raw.reason or "RAW Tavily já disponível"
+            elif raw.state == "RAW_EMPTY":
+                if recollect_empty:
+                    rep.action = "RECOLETAR"
+                    rep.reason = "RAW vazio e --recollect-empty habilitado"
+                else:
+                    rep.action = "RAW_EMPTY_PULADO"
+                    rep.reason = "RAW vazio preservado; use --recollect-empty para nova consulta"
+            elif raw.state == "RAW_CORRUPT":
+                rep.action = "RECOLETAR"
+                rep.reason = "RAW corrompido"
+            elif raw.state == "RAW_MISSING":
+                rep.action = "NOVA_COLETA"
+                rep.reason = "business_key não encontrada no cache"
+            else:
+                rep.action = "REVISAR_PRECOLETA"
+                rep.reason = f"Estado RAW inesperado: {raw.state}"
+
+        rep_by_key = {r.key: r for r in representatives}
+        for row in rows:
+            if not row.valid:
+                row.action = "INVALIDO"
+                row.raw_state = ""
+                continue
+
+            rep = rep_by_key[row.key]
+            row.raw_state = rep.raw_state
+            if not row.representative:
+                row.reason = f"Duplicado estrutural da linha {rep.row_number}; ação do grupo={rep.action}"
+    finally:
+        if store:
+            store.close()
+
+    candidates_all = [r for r in representatives if r.action in {"NOVA_COLETA", "RECOLETAR"}]
+    candidates = candidates_all[:max_tavily_new] if max_tavily_new else list(candidates_all)
+
+    valid_rows = sum(1 for r in rows if r.valid)
+    invalid_rows = len(rows) - valid_rows
+
+    raw_counts = defaultdict(int)
+    action_counts = defaultdict(int)
+    for r in representatives:
+        raw_counts[r.raw_state] += 1
+        action_counts[r.action] += 1
+
+    summary = {
+        "Linhas recebidas": len(rows),
+        "Linhas válidas": valid_rows,
+        "Linhas inválidas": invalid_rows,
+        "Produtos únicos por business_key": len(representatives),
+        "Duplicidades internas removidas": max(0, valid_rows - len(representatives)),
+        "RAW_OK": raw_counts["RAW_OK"],
+        "RAW_OK_MERGED": raw_counts["RAW_OK_MERGED"],
+        "RAW_EMPTY": raw_counts["RAW_EMPTY"],
+        "RAW_CORRUPT": raw_counts["RAW_CORRUPT"],
+        "RAW_MISSING": raw_counts["RAW_MISSING"],
+        "Já no cache": action_counts["JA_NO_CACHE"],
+        "RAW vazio pulado": action_counts["RAW_EMPTY_PULADO"],
+        "Fila real Tavily antes do limite": len(candidates_all),
+        "Fila Tavily desta execução": len(candidates),
+        "Business key": "AGRESSIVA_ESTRUTURAL_SEM_FUZZY",
+        "Tavily chamada até este ponto": 0,
+    }
+
+    plan = PreCollectionPlan(
+        input_path=input_path,
+        report_path=report_path,
+        rows=rows,
+        representatives=representatives,
+        candidates=candidates,
+        summary=summary,
+    )
+    export_precollection_report(plan)
+    return plan
+
+
+def export_precollection_report(plan: PreCollectionPlan) -> None:
+    """Gera auditoria pré-coleta ANTES de qualquer chamada Tavily."""
+    import pandas as pd
+
+    normalizacao = []
+    for r in plan.rows:
+        normalizacao.append({
+            "Linha Entrada": r.row_number,
+            "Marca Original": r.brand_original,
+            "Modelo Original": r.model_original,
+            "Marca Canônica": r.brand_canonical,
+            "Modelo Canônico": r.model_canonical,
+            "Business Key": r.key,
+            "Válido": "SIM" if r.valid else "NÃO",
+            "Qtd no Grupo": r.duplicate_count,
+            "Ordem no Grupo": r.duplicate_rank,
+            "Representante": "SIM" if r.representative else "NÃO",
+            "Estado Cache": r.raw_state,
+            "Ação Pré-Coleta": r.action,
+            "Motivo": r.reason,
+        })
+
+    fila = [{
+        "Linha Entrada": r.row_number,
+        "Marca Original": r.brand_original,
+        "Modelo Original": r.model_original,
+        "Marca Canônica": r.brand_canonical,
+        "Modelo Canônico": r.model_canonical,
+        "Business Key": r.key,
+        "Estado Cache": r.raw_state,
+        "Ação": r.action,
+        "Motivo": r.reason,
+    } for r in plan.candidates]
+
+    duplicados = [x for x in normalizacao if int(x["Qtd no Grupo"] or 0) > 1]
+    resumo = [{"Indicador": k, "Valor": v} for k, v in plan.summary.items()]
+
+    plan.report_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = plan.report_path.with_name(
+        plan.report_path.stem + f".tmp_{os.getpid()}" + plan.report_path.suffix
+    )
+
+    with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
+        pd.DataFrame(resumo).to_excel(writer, sheet_name="Resumo", index=False)
+        pd.DataFrame(normalizacao).to_excel(writer, sheet_name="Normalizacao", index=False)
+        pd.DataFrame(fila).to_excel(writer, sheet_name="Fila_Coleta", index=False)
+        pd.DataFrame(duplicados).to_excel(writer, sheet_name="Duplicidades", index=False)
+
+    os.replace(tmp, plan.report_path)
+
+
+def tavily_search(brand: str, model: str, cfg: Dict[str, Any], limiter: RateLimiter) -> Dict[str, Any]:
+    """Consulta Tavily com retry; erro nunca é gravado como RAW válido."""
+    try:
+        import requests
+    except ImportError as exc:
+        raise RuntimeError("Pacote requests não instalado. Rode: pip install requests") from exc
+
+    api_key = os.getenv("TAVILY_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("TAVILY_API_KEY não configurada no .env")
+
+    tc = cfg.get("tavily", {}) or {}
+    retries = max(1, int(tc.get("retries", 4)))
+    backoffs = tc.get("retry_backoff_seconds", [2, 5, 10, 20]) or [2, 5, 10, 20]
+    timeout = float(tc.get("timeout_seconds", 60))
+    body = {
+        "query": f"{brand} {model}".strip(),
+        "search_depth": safe(tc.get("search_depth", "basic")) or "basic",
+        "max_results": int(tc.get("max_results", 5)),
+        "include_answer": False,
+        "include_raw_content": safe(tc.get("include_raw_content", "markdown")) or "markdown",
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    last: Optional[Exception] = None
+    for attempt in range(retries):
+        limiter.wait()
+        try:
+            response = requests.post("https://api.tavily.com/search", headers=headers, json=body, timeout=timeout)
+            status = int(response.status_code)
+            if status == 200:
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    raise RuntimeError("Tavily retornou JSON inválido")
+                return payload
+            if status in {401, 403}:
+                raise OperationalPause("TAVILY_AUTH", f"Tavily HTTP {status}: autenticação/permissão")
+            if status in {432, 433}:
+                raise OperationalPause("TAVILY_PLAN_LIMIT", f"Tavily HTTP {status}: limite de plano/uso atingido")
+            if status == 429 or 500 <= status <= 599:
+                last = RuntimeError(f"Tavily HTTP {status}: {response.text[:500]}")
+            else:
+                raise RuntimeError(f"Tavily HTTP {status}: {response.text[:800]}")
+        except OperationalPause:
+            raise
+        except Exception as exc:
+            last = exc
+
+        if attempt + 1 < retries:
+            base_wait = float(backoffs[min(attempt, len(backoffs) - 1)])
+            wait = base_wait + random.uniform(0, min(1.5, base_wait * 0.2))
+            LOG.warning("Tavily retry %d/%d para %s | %s em %.1fs", attempt + 1, retries, brand, model, wait)
+            time.sleep(wait)
+
+    if "429" in safe(last):
+        raise OperationalPause("TAVILY_RATE_LIMIT", f"Rate limit Tavily persistiu após retries: {last}")
+    raise RuntimeError(f"Tavily falhou após {retries} tentativas: {last}")
+
+
+def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> bool:
+    input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
+    cache_path = Path(args.cache or cfg["files"]["cache"])
+    db_path = Path(args.db or cfg["files"]["classification_db"])
+    pre_report = Path(
+        args.precollection_output
+        or cfg.get("files", {}).get("precollection_report", "Pre_Coleta_Normalizacao_v3.xlsx")
+    )
+
+    # ETAPA ANTERIOR À COLETA: nenhuma chamada Tavily até terminar este plano.
+    plan = build_precollection_plan(
+        input_path=input_path,
+        cache_path=cache_path,
+        report_path=pre_report,
+        recollect_empty=bool(args.recollect_empty),
+        max_tavily_new=int(args.max_tavily_new or 0),
+    )
+    candidates = [
+        (r.brand_original, r.model_original, r.raw_state)
+        for r in plan.candidates
+    ]
+
+    print()
+    print("=" * 78)
+    print(" PRÉ-COLETA — NORMALIZAÇÃO / DEDUPLICAÇÃO / CACHE")
+    print("=" * 78)
+    labels = [
+        "Linhas recebidas",
+        "Linhas válidas",
+        "Linhas inválidas",
+        "Produtos únicos por business_key",
+        "Duplicidades internas removidas",
+        "Já no cache",
+        "RAW_EMPTY",
+        "RAW_CORRUPT",
+        "RAW_MISSING",
+        "Fila real Tavily antes do limite",
+        "Fila Tavily desta execução",
+    ]
+    for label in labels:
+        print(f"{label:.<50} {plan.summary.get(label, 0)}")
+    print("-" * 78)
+    print("Business key................................... AGRESSIVA / SEM FUZZY")
+    print("Chamadas Tavily realizadas até aqui............ 0")
+    print(f"Relatório pré-coleta............................ {pre_report}")
+    print("=" * 78)
+
+    if not candidates:
+        LOG.info("Nenhuma nova consulta Tavily necessária.")
+        return True
+
+    if not args.yes:
+        print()
+        print(f"Fila real desta execução: {len(candidates)} consulta(s) Tavily.")
+        print("Marca e Modelo originais permanecem preservados.")
+        if input("Digite CONFIRMAR para iniciar a coleta: ").strip().upper() != "CONFIRMAR":
+            LOG.info("Coleta cancelada após pré-coleta. Nenhuma chamada Tavily foi realizada.")
+            return False
+
+    tc = cfg.get("tavily", {}) or {}
+    limiter = RateLimiter(float(tc.get("requests_per_minute", 30)))
+    db = ClassificationDB(db_path)
+    run_id = db.start_run("collect", rules.hash, "TAVILY")
+    writer = TavilyWritableStore(cache_path)
+    rows = []
+    completed = True
+    try:
+        for i, (brand, model, prior_state) in enumerate(candidates, 1):
+            key = business_key(brand, model)
+            try:
+                payload = tavily_search(brand, model, cfg, limiter)
+                writer.put(brand, model, payload)
+                n = len(payload.get("results", []) or [])
+                db.event(run_id, key, "TAVILY_SAVED", f"results={n}; prior={prior_state}")
+                rows.append({"Marca": brand, "Modelo": model, "Anterior": prior_state, "Status": "SAVED", "Resultados": n, "Data": now_iso()})
+            except OperationalPause as exc:
+                db.event(run_id, key, exc.code, safe(exc))
+                rows.append({"Marca": brand, "Modelo": model, "Anterior": prior_state, "Status": exc.code, "Resultados": "", "Data": now_iso()})
+                LOG.error("%s. Coleta pausada com segurança; tudo salvo até aqui permanece persistido.", exc)
+                completed = False
+                break
+            except Exception as exc:
+                # Não grava erro no cache. Na próxima execução continua elegível.
+                db.event(run_id, key, "TAVILY_ERROR", safe(exc))
+                rows.append({"Marca": brand, "Modelo": model, "Anterior": prior_state, "Status": "ERROR_RETRY_NEXT_RUN", "Resultados": "", "Data": now_iso()})
+                LOG.error("Falha Tavily %s | %s: %s", brand, model, exc)
+
+            if i % 25 == 0 or i == len(candidates):
+                LOG.info("COLETA %d/%d", i, len(candidates))
+
+        import pandas as pd
+        report_path = Path(cfg.get("files", {}).get("collection_report", "Coleta_Tavily_v3.xlsx"))
+        pd.DataFrame(rows).to_excel(report_path, index=False)
+        db.finish_run(run_id, "COMPLETED" if completed else "PAUSED", f"executados={len(rows)} planejados={len(candidates)}")
+        LOG.info("Relatório de coleta: %s", report_path)
+        return completed
+    except KeyboardInterrupt:
+        db.finish_run(run_id, "INTERRUPTED", "RAW já commitado por produto")
+        LOG.warning("Coleta interrompida. Tudo salvo até o último produto permanece no cache.")
+        raise
+    finally:
+        writer.close()
+        db.close()
+
+
+# -----------------------------------------------------------------------------
+# Evidências e Stage 1 determinístico — R9.2
+# -----------------------------------------------------------------------------
+@dataclass
+class Source:
+    source_id: int
+    title: str
+    content: str
+    url: str
+    relevance: str
+    quality_flags: List[str] = field(default_factory=list)
+    type_hits: Dict[str, List[str]] = field(default_factory=dict)
+    power_hits: Dict[str, List[str]] = field(default_factory=dict)
+    identity_score: int = 0
+    model_match: str = "NONE"
+    source_weight: float = 0.0
+    identity_conflict: bool = False
+    type_scores: Dict[str, float] = field(default_factory=dict)
+    power_scores: Dict[str, float] = field(default_factory=dict)
+    type_evidence_fields: Dict[str, List[str]] = field(default_factory=dict)
+
+    @property
+    def text(self) -> str:
+        return f"{self.title}\n{self.content}".strip()
+
+
+@dataclass
+class Stage1Result:
+    state: str
+    product_type: Optional[str]
+    power: Optional[str]
+    type_candidates: List[str]
+    power_candidates: List[str]
+    sources: List[Source]
+    reasons: List[str]
+    taxonomy: Tuple[str, str, str] = ("", "", "")
+    type_scores: Dict[str, float] = field(default_factory=dict)
+    type_share: float = 0.0
+    type_margin: float = 0.0
+    type_support: Dict[str, int] = field(default_factory=dict)
+    power_scores: Dict[str, float] = field(default_factory=dict)
+    power_share: float = 0.0
+    power_margin: float = 0.0
+    best_source_score: int = 0
+    identity_best: str = "WEAK"
+    conflict_count: int = 0
+
+
+def _weighted_stats(scores: Dict[str, float]) -> Tuple[str, float, float, str]:
+    clean = {k: float(v) for k, v in scores.items() if k and float(v) > 0}
+    if not clean:
+        return "", 0.0, 0.0, ""
+    ordered = sorted(clean.items(), key=lambda kv: kv[1], reverse=True)
+    total = sum(v for _, v in ordered) or 1.0
+    winner, top = ordered[0]
+    runner, second = ordered[1] if len(ordered) > 1 else ("", 0.0)
+    share = top / total
+    margin = (top - second) / top if top else 0.0
+    return winner, share, margin, runner
+
+
+def _model_identity_norm(value: str) -> str:
+    text = strip_accents(value).casefold()
+    text = re.sub(r"[^a-z0-9+./-]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _model_identity_variants(model: str, regional_suffixes: Sequence[str]) -> List[Tuple[str, str]]:
+    """Variações equivalentes de SKU sem fuzzy/edit-distance.
+
+    Mantém o comportamento estável R5 e acrescenta apenas equivalências
+    estruturais determinísticas: separadores, sufixo regional e revisão decimal.
+    Retorna (compact_variant, reason).
+    """
+    raw = _model_identity_norm(model)
+    if not raw:
+        return []
+    out: List[Tuple[str, str]] = []
+
+    def add(value: str, reason: str) -> None:
+        c = compact(value)
+        if len(c) >= 4 and c not in {x[0] for x in out}:
+            out.append((c, reason))
+
+    add(raw, "EXACT")
+    suffixes = {compact(x) for x in regional_suffixes if compact(x)}
+    tokens = raw.split()
+    if len(tokens) > 1 and compact(tokens[-1]) in suffixes:
+        add(" ".join(tokens[:-1]), "REGIONAL_SUFFIX")
+
+    # Letra isolada após revisão decimal: "RMA 353.0 V" -> "RMA 353.0"
+    for base, reason in [(raw, "LETTER_REVISION")]:
+        toks = base.split()
+        if len(toks) >= 2 and re.fullmatch(r"[a-z]", toks[-1]) and re.search(r"\d+\.\d+$", toks[-2]):
+            add(" ".join(toks[:-1]), reason)
+
+    # Revisão decimal final: "RMA 353.0" -> "RMA 353".
+    for value in [raw] + [" ".join(tokens[:-1]) if len(tokens) > 1 and compact(tokens[-1]) in suffixes else ""]:
+        if value:
+            stripped = re.sub(r"(?<=\d)\.\d+$", "", value)
+            if stripped != value:
+                add(stripped, "DECIMAL_REVISION")
+            toks = value.split()
+            if len(toks) >= 2 and re.fullmatch(r"[a-z]", toks[-1]) and re.search(r"\d+\.\d+$", toks[-2]):
+                without_letter = " ".join(toks[:-1])
+                add(without_letter, "LETTER_REVISION")
+                add(re.sub(r"(?<=\d)\.\d+$", "", without_letter), "DECIMAL_REVISION")
+
+    return out
+
+
+def _token_coverage(model: str, text: str, regional_suffixes: Sequence[str]) -> float:
+    """Fallback conservador para páginas que omitem um token comercial do SKU."""
+    raw = _model_identity_norm(model)
+    toks = raw.split()
+    suffixes = {compact(x) for x in regional_suffixes if compact(x)}
+    if toks and compact(toks[-1]) in suffixes:
+        toks = toks[:-1]
+    model_tokens = re.findall(r"[a-z]+|\d+", " ".join(toks))
+    if not model_tokens:
+        return 0.0
+    hay = norm_text(text)
+    hits = total = 0.0
+    for token in model_tokens:
+        weight = 2.0 if token.isalpha() and len(token) >= 2 else (1.5 if token.isdigit() and len(token) >= 2 else 0.6)
+        total += weight
+        if re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", hay, re.I):
+            hits += weight
+        elif len(token) >= 4 and token in compact(text):
+            hits += 0.85 * weight
+    return hits / total if total else 0.0
+
+
+def _source_identity_baseline(
+    brand: str,
+    model: str,
+    title: str,
+    content: str,
+    url: str,
+    suffixes: Sequence[str],
+) -> Tuple[str, int, str, float]:
+    """Identidade compatível com o Stage 1 estável R5.
+
+    R5 usava presença compacta de Marca+Modelo. Aqui mantemos essa semântica,
+    mas registramos níveis novos para o gate estrito da LLM.
+    """
+    all_text = f"{title} {url} {content[:2500]}"
+    ctext = compact(all_text)
+    variants = _model_identity_variants(model, suffixes)
+    exact = next((reason for value, reason in variants if value and value in ctext), "")
+    coverage = _token_coverage(model, all_text, suffixes)
+    model_hit = bool(exact) or coverage >= 0.82
+    brand_c = compact(brand)
+    brand_hit = len(brand_c) >= 3 and brand_c in ctext
+
+    if model_hit and brand_hit:
+        level, score, weight = "STRONG", 100, 1.0
+    elif model_hit:
+        level, score, weight = "PROBABLE", 85, 0.80
+    elif brand_hit:
+        level, score, weight = "CONTEXTUAL", 55, 0.45
+    else:
+        level, score, weight = "WEAK", 0, 0.0
+
+    if exact:
+        match = "EXACT" if exact == "EXACT" else "CORE"
+    elif coverage >= 0.82:
+        match = "TOKENS"
+    else:
+        match = "NONE"
+    return level, score, match, weight
+
+
+class DeterministicEngine:
+    """Stage 1 restaurado a partir do R5 estável (v3.7.1).
+
+    Regra central do R9.2:
+    - candidatos vêm SOMENTE de aliases/regras do JSON;
+    - qualquer fonte Tavily pode gerar candidato, como no R5;
+    - resolução automática exige identidade explícita do modelo OU repetição;
+    - LLM nunca cria candidato novo (gate posterior).
+    """
+    IDENTITY_RANK = {"CONFLICT": 0, "WEAK": 1, "CONTEXTUAL": 2, "PROBABLE": 3, "STRONG": 4}
+
+    def __init__(self, rules: Rules, cfg: Dict[str, Any]):
+        self.rules = rules
+        self.cfg = cfg
+        self.max_results = int(cfg.get("evidence", {}).get("max_results", 5))
+        self.content_chars = int(cfg.get("evidence", {}).get("content_chars", 2400))
+        self.suffixes = cfg.get("identity", {}).get("regional_suffixes", ["AR", "BR", "B1", "B2", "B3", "B4"])
+        self.component_negations = rules.component_context.get("negation_phrases", {}) or {}
+        self.min_score = 1.0  # usado pelo gate LLM; 1 ponto = 1 fonte de suporte.
+
+    def _source_quality_flags(self, title: str, content: str) -> List[str]:
+        flags: List[str] = []
+        title_fold = strip_accents(title).casefold()
+        page_fold = strip_accents(f"{title} {content}").casefold()
+        if any(safe(x) and contains_alias_prepared(title_fold, x) for x in (self.rules.source_rules.get("negative_title_terms", []) or [])):
+            flags.append("NEGATIVE_TITLE_TERM")
+        if any(safe(x) and contains_alias_prepared(page_fold, x) for x in (self.rules.source_rules.get("negative_page_terms", []) or [])):
+            flags.append("NEGATIVE_PAGE_TERM")
+        return flags
+
+    def build_sources(self, brand: str, model: str, payload: Dict[str, Any]) -> List[Source]:
+        out: List[Source] = []
+        for i, res in enumerate((payload.get("results", []) or [])[: self.max_results], 1):
+            title = safe((res or {}).get("title"))
+            content = safe((res or {}).get("content"))[: self.content_chars]
+            url = safe((res or {}).get("url"))
+            level, score, match, sw = _source_identity_baseline(brand, model, title, content, url, self.suffixes)
+            out.append(Source(
+                source_id=i, title=title, content=content, url=url,
+                relevance=level, quality_flags=self._source_quality_flags(title, content),
+                identity_score=score, model_match=match, source_weight=sw,
+            ))
+        return out
+
+    def _collision_allows(self, typ: str, alias: str) -> bool:
+        normalized = norm_text(alias)
+        owners = sorted(set(self.rules.alias_to_types.get(normalized, [])))
+        if len(owners) <= 1:
+            return True
+        return self.rules.alias_collision_policy.get(normalized) == typ
+
+    def _composite_candidates(self, text: str) -> List[str]:
+        folded = strip_accents(text).casefold()
+        found: List[str] = []
+        for rule in self.rules.composite_rules:
+            target = safe(rule.get("target_type"))
+            if target not in self.rules.types:
+                continue
+            if any(contains_alias_prepared(folded, x) for x in (rule.get("none", []) or [])):
+                continue
+            any_terms = rule.get("any", []) or []
+            if any_terms and not any(contains_alias_prepared(folded, x) for x in any_terms):
+                continue
+            groups = rule.get("all_groups", []) or []
+            if groups and not all(any(contains_alias_prepared(folded, x) for x in group) for group in groups if group):
+                continue
+            if any_terms or groups:
+                found.append(target)
+        return found
+
+    def _type_hits_for_source(self, src: Source) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+        title_fold = strip_accents(src.title).casefold()
+        body_fold = strip_accents(src.content).casefold()
+        combined = f"{title_fold}\n{body_fold}"
+        hits: Dict[str, List[str]] = {}
+        fields: Dict[str, List[str]] = defaultdict(list)
+
+        for typ, patterns in self.rules._compiled_aliases.items():
+            neg_patterns = self.rules._compiled_negative.get(typ, [])
+            if any(p.search(combined) for _, p in neg_patterns):
+                continue
+            if typ in self.component_negations and any(contains_alias_prepared(combined, x) for x in self.component_negations.get(typ, [])):
+                continue
+
+            matched = [alias for alias, p in patterns if self._collision_allows(typ, alias) and p.search(combined)]
+            if not matched:
+                continue
+            max_words = max(len(norm_text(a).split()) for a in matched)
+            chosen = sorted({a for a in matched if len(norm_text(a).split()) == max_words})
+            hits[typ] = chosen
+            if any(p.search(title_fold) for a, p in patterns if a in chosen):
+                fields[typ].append("TITLE")
+            if any(p.search(body_fold) for a, p in patterns if a in chosen):
+                fields[typ].append("BODY")
+
+        for typ in self._composite_candidates(combined):
+            hits.setdefault(typ, []).append("[COMPOSITE_RULE]")
+            fields[typ].append("COMPOSITE")
+
+        # Mesmo guard do R5: componente genérico não rouba tipo físico.
+        physical = [t for t in hits if t not in self.rules.component_types]
+        if physical:
+            for typ in list(hits):
+                if typ not in self.rules.component_types:
+                    continue
+                explicit = [a for a in hits[typ] if a == "[COMPOSITE_RULE]" or len(norm_text(a).split()) >= 2]
+                if explicit:
+                    hits[typ] = explicit
+                else:
+                    hits.pop(typ, None)
+                    fields.pop(typ, None)
+
+        return hits, {k: list(dict.fromkeys(v)) for k, v in fields.items()}
+
+    def _power_hits_for_source(self, src: Source) -> Dict[str, List[str]]:
+        folded = strip_accents(src.text).casefold()
+        hits: Dict[str, List[str]] = {}
+        source_types = set(src.type_hits)
+        output_voltage_context = bool(source_types.intersection(self.rules.output_voltage_not_input_power_types))
+
+        for power, data in self.rules.power_rules.items():
+            if any(contains_alias_prepared(folded, x) for x in (data.get("negative_keywords", []) or [])):
+                continue
+            by_group: Dict[str, List[str]] = defaultdict(list)
+            for key, values in data.items():
+                if key in {"negative_keywords", "display_label", "voltage_min", "voltage_max", "voltage_only_requires_context"}:
+                    continue
+                if not key.endswith("keywords") or not isinstance(values, list):
+                    continue
+                for value in values:
+                    if contains_alias_prepared(folded, value):
+                        by_group[key].append(value)
+            positive = [x for vals in by_group.values() for x in vals]
+            if not positive:
+                continue
+            if output_voltage_context and power in {"BATTERY", "CORDED"} and not by_group.get("strong_keywords"):
+                continue
+            hits[power] = sorted(set(positive))
+        return hits
+
+    def _apply_specificity(self, candidates: Iterable[str]) -> List[str]:
+        cur = set(candidates)
+        for group in self.rules.specificity_groups:
+            present = [x for x in group if x in cur]
+            if len(present) >= 2:
+                winner = present[0]
+                for item in present[1:]:
+                    cur.discard(item)
+                cur.add(winner)
+        return sorted(cur)
+
+    def _type_requires_specific_power(self, typ: str) -> bool:
+        rows = [r for r in self.rules.taxonomy_rules if safe(r.get("primary_type")) == typ]
+        if not rows:
+            return False
+        powers = {safe(r.get("power")) or "*" for r in rows}
+        return "*" not in powers and "UNKNOWN" not in powers
+
+    def classify(self, brand: str, model: str, payload: Dict[str, Any]) -> Stage1Result:
+        sources = self.build_sources(brand, model, payload)
+        all_type_hits: Dict[str, List[int]] = defaultdict(list)
+        all_power_hits: Dict[str, List[int]] = defaultdict(list)
+
+        # Candidatos: todas as fontes, como no R5. Aprovação: somente identidade
+        # de modelo (PROBABLE/STRONG) ou repetição independente.
+        explicit_levels = {"STRONG", "PROBABLE"}
+        for src in sources:
+            src.type_hits, src.type_evidence_fields = self._type_hits_for_source(src)
+            src.power_hits = self._power_hits_for_source(src)
+            src.type_scores = {t: 1.0 for t in src.type_hits}
+            src.power_scores = {p: 1.0 for p in src.power_hits}
+            for typ in src.type_hits:
+                all_type_hits[typ].append(src.source_id)
+            for power in src.power_hits:
+                all_power_hits[power].append(src.source_id)
+
+        type_candidates = self._apply_specificity(all_type_hits.keys())
+        power_candidates = sorted(all_power_hits.keys())
+        # Após especificidade, métricas só consideram candidatos sobreviventes.
+        type_support = {t: len(set(all_type_hits.get(t, []))) for t in type_candidates}
+        type_scores = {t: float(type_support[t]) for t in type_candidates}
+        type_winner, type_share, type_margin, runner = _weighted_stats(type_scores)
+        power_support = {p: len(set(all_power_hits.get(p, []))) for p in power_candidates}
+        power_scores = {p: float(power_support[p]) for p in power_candidates}
+        _, power_share, power_margin, _ = _weighted_stats(power_scores)
+        reasons: List[str] = []
+
+        product_type: Optional[str] = None
+        if len(type_candidates) == 1:
+            typ = type_candidates[0]
+            support_ids = set(all_type_hits.get(typ, []))
+            explicit = any(s.source_id in support_ids and s.relevance in explicit_levels for s in sources)
+            repeated = len(support_ids) >= 2
+            if explicit or repeated:
+                product_type = typ
+                reasons.append(f"TYPE_UNIQUE:{typ}; support={sorted(support_ids)}; explicit={explicit}; repeated={repeated}")
+            else:
+                reasons.append(f"TYPE_SINGLE_CONTEXT:{typ}; support={sorted(support_ids)}")
+        elif len(type_candidates) > 1:
+            reasons.append(f"TYPE_AMBIGUOUS:{type_candidates}")
+        else:
+            reasons.append("TYPE_UNRESOLVED:NO_JSON_ALIAS")
+
+        power: Optional[str] = None
+        if product_type in self.rules.passive_types:
+            power = "UNKNOWN"
+            reasons.append("POWER_PASSIVE_TYPE")
+        elif len(power_candidates) == 1:
+            candidate = power_candidates[0]
+            support_ids = set(all_power_hits.get(candidate, []))
+            explicit = any(s.source_id in support_ids and s.relevance in explicit_levels for s in sources)
+            repeated = len(support_ids) >= 2
+            if explicit or repeated:
+                power = candidate
+                reasons.append(f"POWER_UNIQUE:{candidate}; support={sorted(support_ids)}; explicit={explicit}; repeated={repeated}")
+            else:
+                reasons.append(f"POWER_SINGLE_CONTEXT:{candidate}; support={sorted(support_ids)}")
+        elif len(power_candidates) > 1:
+            reasons.append(f"POWER_AMBIGUOUS:{power_candidates}")
+        else:
+            reasons.append("POWER_UNRESOLVED")
+
+        # Se a taxonomia do TYPE independe de alimentação, UNKNOWN é uma decisão
+        # válida e não motivo para gastar LLM.
+        if product_type and power is None and not self._type_requires_specific_power(product_type):
+            power = "UNKNOWN"
+            reasons.append("POWER_UNKNOWN_ALLOWED_BY_TAXONOMY")
+
+        if product_type:
+            cg, fam, tax_reason = self.rules.map_taxonomy(product_type, power or "UNKNOWN")
+        else:
+            cg, fam, tax_reason = "", "", ""
+
+        if product_type and power is not None and (cg, fam) in self.rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS"):
+            state = "RESOLVED_RULE"
+        elif type_candidates:
+            state = "AMBIGUOUS"
+        else:
+            state = "UNRESOLVED"
+
+        supporters = [s for s in sources if product_type and product_type in s.type_hits]
+        best_source_score = max((s.identity_score for s in supporters), default=0)
+        identity_best = max((s.relevance for s in supporters), key=lambda x: self.IDENTITY_RANK.get(x, 0), default="WEAK")
+
+        if type_candidates:
+            reasons.append("ALLOWED_LLM_TYPES:" + ",".join(type_candidates))
+        else:
+            reasons.append("LLM_BLOCKED:NO_TYPE_CANDIDATE")
+
+        return Stage1Result(
+            state=state,
+            product_type=product_type,
+            power=power,
+            type_candidates=type_candidates,
+            power_candidates=power_candidates,
+            sources=sources,
+            reasons=reasons,
+            taxonomy=(cg, fam, tax_reason),
+            type_scores=type_scores,
+            type_share=type_share,
+            type_margin=type_margin,
+            type_support=type_support,
+            power_scores=power_scores,
+            power_share=power_share,
+            power_margin=power_margin,
+            best_source_score=best_source_score,
+            identity_best=identity_best,
+            conflict_count=0,
+        )
+
+# -----------------------------------------------------------------------------
+# Classificação DB / checkpoint
+# -----------------------------------------------------------------------------
+class ClassificationDB:
+    def __init__(self, path: Path):
+        self.path = path
+        self.conn = sqlite3.connect(path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=FULL")
+        self._init()
+
+    def _init(self) -> None:
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS runs (
+                run_id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                pipeline_version TEXT NOT NULL,
+                rules_hash TEXT NOT NULL,
+                model TEXT,
+                note TEXT
+            );
+            CREATE TABLE IF NOT EXISTS llm_cache (
+                cache_id TEXT PRIMARY KEY,
+                business_key TEXT NOT NULL,
+                raw_hash TEXT NOT NULL,
+                rules_hash TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                usage_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS classification_results (
+                checkpoint_id TEXT PRIMARY KEY,
+                business_key TEXT NOT NULL,
+                brand TEXT NOT NULL,
+                model TEXT NOT NULL,
+                raw_hash TEXT NOT NULL,
+                rules_hash TEXT NOT NULL,
+                pipeline_version TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_results_business_key ON classification_results(business_key);
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                business_key TEXT,
+                created_at TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                detail TEXT
+            );
+            """
+        )
+        self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.commit()
+        self.conn.close()
+
+    def start_run(self, mode: str, rules_hash: str, model: str) -> str:
+        rid = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.conn.execute(
+            "INSERT INTO runs(run_id,started_at,status,mode,pipeline_version,rules_hash,model) VALUES(?,?,?,?,?,?,?)",
+            (rid, now_iso(), "RUNNING", mode, PIPELINE_VERSION, rules_hash, model),
+        )
+        self.conn.commit()
+        return rid
+
+    def finish_run(self, run_id: str, status: str, note: str = "") -> None:
+        self.conn.execute("UPDATE runs SET finished_at=?,status=?,note=? WHERE run_id=?", (now_iso(), status, note, run_id))
+        self.conn.commit()
+
+    def update_run_model(self, run_id: str, model: str) -> None:
+        self.conn.execute(
+            "UPDATE runs SET model=? WHERE run_id=?",
+            (model, run_id),
+        )
+        self.conn.commit()
+
+    def event(self, run_id: str, key: str, event_type: str, detail: str = "") -> None:
+        self.conn.execute(
+            "INSERT INTO events(run_id,business_key,created_at,event_type,detail) VALUES(?,?,?,?,?)",
+            (run_id, key, now_iso(), event_type, detail[:4000]),
+        )
+        self.conn.commit()
+
+    @staticmethod
+    def checkpoint_id(key: str, raw_hash: str, rules_hash: str, model: str) -> str:
+        # Inclui modelo + prompt para impedir reaproveitamento silencioso de
+        # resultados de outra política LLM.
+        material = f"{PIPELINE_VERSION}|{PROMPT_VERSION}|{model}|{key}|{raw_hash}|{rules_hash}"
+        return hashlib.sha256(material.encode()).hexdigest()
+
+    def get_checkpoint(self, key: str, raw_hash: str, rules_hash: str, model: str) -> Optional[Dict[str, Any]]:
+        cid = self.checkpoint_id(key, raw_hash, rules_hash, model)
+        row = self.conn.execute("SELECT result_json FROM classification_results WHERE checkpoint_id=?", (cid,)).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row[0])
+        except Exception:
+            return None
+
+
+    def put_checkpoint(self, key: str, brand: str, model: str, raw_hash: str, rules_hash: str, result: Dict[str, Any], llm_model: str) -> None:
+        cid = self.checkpoint_id(key, raw_hash, rules_hash, llm_model)
+        self.conn.execute(
+            """INSERT OR REPLACE INTO classification_results
+               (checkpoint_id,business_key,brand,model,raw_hash,rules_hash,pipeline_version,result_json,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (cid, key, brand, model, raw_hash, rules_hash, PIPELINE_VERSION, json.dumps(result, ensure_ascii=False, default=str), now_iso()),
+        )
+        self.conn.commit()  # por produto
+
+
+    @staticmethod
+    def llm_cache_id(key: str, raw_hash: str, rules_hash: str, provider: str, model: str) -> str:
+        material = f"{PROMPT_VERSION}|{provider}|{model}|{key}|{raw_hash}|{rules_hash}"
+        return hashlib.sha256(material.encode()).hexdigest()
+
+    def get_llm(
+        self,
+        key: str,
+        raw_hash: str,
+        rules_hash: str,
+        provider: str,
+        model: str,
+    ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        cid = self.llm_cache_id(key, raw_hash, rules_hash, provider, model)
+        row = self.conn.execute(
+            "SELECT response_json,usage_json FROM llm_cache WHERE cache_id=?",
+            (cid,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["response_json"]), json.loads(row["usage_json"] or "{}")
+        except Exception:
+            return None
+
+    def put_llm(
+        self,
+        key: str,
+        raw_hash: str,
+        rules_hash: str,
+        provider: str,
+        model: str,
+        response: Dict[str, Any],
+        usage: Dict[str, Any],
+    ) -> None:
+        cid = self.llm_cache_id(key, raw_hash, rules_hash, provider, model)
+        self.conn.execute(
+            """INSERT OR REPLACE INTO llm_cache
+               (cache_id,business_key,raw_hash,rules_hash,prompt_version,provider,model,response_json,usage_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                cid, key, raw_hash, rules_hash, PROMPT_VERSION, provider, model,
+                json.dumps(response, ensure_ascii=False, default=str),
+                json.dumps(usage, ensure_ascii=False, default=str),
+                now_iso(),
+            ),
+        )
+        self.conn.commit()
+
+
+# -----------------------------------------------------------------------------
+# OpenAI-compatible Stage 2 — Groq
+# -----------------------------------------------------------------------------
+class DualWindowLimiter:
+    """Limiter conservador para RPM + TPM usando janela móvel de 60 segundos.
+
+    O consumo de tokens da próxima chamada é estimado antes do POST. A API continua
+    sendo a autoridade final; headers e 429 são tratados separadamente.
+    """
+
+    def __init__(self, rpm: int, tpm: int, safety_margin: float = 0.90):
+        self.rpm = max(1, int(rpm))
+        self.tpm = max(1, int(tpm))
+        self.margin = min(1.0, max(0.50, float(safety_margin)))
+        self.effective_rpm = max(1, int(self.rpm * self.margin))
+        self.effective_tpm = max(1, int(self.tpm * self.margin))
+        self.requests: deque = deque()
+        self.tokens: deque = deque()
+
+    def _prune(self, now: float) -> None:
+        while self.requests and now - self.requests[0] >= 60.0:
+            self.requests.popleft()
+        while self.tokens and now - self.tokens[0][0] >= 60.0:
+            self.tokens.popleft()
+
+    def wait(self, estimated_tokens: int) -> None:
+        estimated_tokens = max(1, int(estimated_tokens))
+        while True:
+            now = time.monotonic()
+            self._prune(now)
+
+            used_tokens = sum(x[1] for x in self.tokens)
+            req_ok = len(self.requests) < self.effective_rpm
+            tok_ok = used_tokens + estimated_tokens <= self.effective_tpm
+
+            # Uma única chamada maior que o budget efetivo não pode ficar em loop eterno.
+            if estimated_tokens > self.effective_tpm:
+                raise OperationalPause(
+                    "GROQ_SINGLE_REQUEST_TOO_LARGE",
+                    f"Prompt estimado={estimated_tokens} tokens excede TPM operacional="
+                    f"{self.effective_tpm}. Reduza contexto/evidências."
+                )
+
+            if req_ok and tok_ok:
+                self.requests.append(now)
+                self.tokens.append((now, estimated_tokens))
+                return
+
+            waits = []
+            if not req_ok and self.requests:
+                waits.append(max(0.1, 60.0 - (now - self.requests[0]) + 0.05))
+            if not tok_ok and self.tokens:
+                waits.append(max(0.1, 60.0 - (now - self.tokens[0][0]) + 0.05))
+            wait_for = min(waits) if waits else 1.0
+            LOG.info(
+                "GROQ LIMITER: aguardando %.1fs | req_window=%d/%d | token_est_window=%d/%d",
+                wait_for, len(self.requests), self.effective_rpm,
+                used_tokens, self.effective_tpm,
+            )
+            time.sleep(wait_for)
+
+
+class OpenAICompatibleClassifier:
+    """Stage 2 via provider OpenAI-compatible.
+
+    Providers:
+    - groq       / openai/gpt-oss-120b
+    - nvidia     / nvidia/nemotron-3.5-lightning-30b-a3b
+    - openrouter / openai/gpt-oss-120b:free
+    """
+
+    def __init__(
+        self,
+        rules: Rules,
+        cfg: Dict[str, Any],
+        db: ClassificationDB,
+        provider: str,
+        model: str,
+    ):
+        self.rules = rules
+        self.cfg = cfg
+        self.db = db
+        self.provider = provider.casefold().strip()
+        self.model = model
+
+        if self.provider not in {"groq", "nvidia", "openrouter"}:
+            raise OperationalPause(
+                "LLM_PROVIDER_UNSUPPORTED",
+                f"Provider '{provider}' não está habilitado nesta versão."
+            )
+
+        pcfg = cfg.get(self.provider, {}) or {}
+
+        if self.provider == "groq":
+            self.api_key_env = "GROQ_API_KEY"
+            self.base_url = (
+                os.getenv("GROQ_BASE_URL", "").strip()
+                or safe(pcfg.get("base_url"))
+                or "https://api.groq.com/openai/v1"
+            ).rstrip("/")
+            self.model_candidates = [self.model]
+
+        elif self.provider == "nvidia":
+            self.api_key_env = "NVIDIA_API_KEY"
+            self.base_url = (
+                os.getenv("NVIDIA_BASE_URL", "").strip()
+                or safe(pcfg.get("base_url"))
+                or "https://integrate.api.nvidia.com/v1"
+            ).rstrip("/")
+
+            env_candidates = [
+                x.strip()
+                for x in os.getenv("NVIDIA_MODEL_CANDIDATES", "").split(",")
+                if x.strip()
+            ]
+            config_candidates = [
+                safe(x)
+                for x in (pcfg.get("model_candidates", []) or [])
+                if safe(x)
+            ]
+            defaults = [
+                "nvidia/nemotron-3.5-lightning-30b-a3b",
+                "meta/llama-3.3-70b-instruct",
+                "openai/gpt-oss-20b",
+                "meta/llama-3.1-8b-instruct",
+            ]
+            ordered = [self.model] + env_candidates + config_candidates + defaults
+            self.model_candidates = []
+            for candidate in ordered:
+                candidate = safe(candidate)
+                if candidate and candidate not in self.model_candidates:
+                    self.model_candidates.append(candidate)
+
+        else:  # OpenRouter
+            self.api_key_env = "OPENROUTER_API_KEY"
+            self.base_url = (
+                os.getenv("OPENROUTER_BASE_URL", "").strip()
+                or safe(pcfg.get("base_url"))
+                or "https://openrouter.ai/api/v1"
+            ).rstrip("/")
+
+            # Mantemos um modelo fixo para não misturar qualidade entre modelos.
+            # O OpenRouter já faz failover entre provedores que servem o MESMO modelo.
+            self.require_free_model = bool(pcfg.get("require_free_model", True))
+            self.model_candidates = [self.model]
+
+        self.account_requests_per_minute = int(
+            pcfg.get("requests_per_minute", 30 if self.provider == "groq" else 0)
+        )
+        self.account_tokens_per_minute = int(
+            pcfg.get("tokens_per_minute", 8000 if self.provider == "groq" else 0)
+        )
+
+        self.operational_requests_per_minute = float(
+            pcfg.get("operational_requests_per_minute", 3.0)
+        )
+        self.limiter = RateLimiter(self.operational_requests_per_minute)
+
+        # Groq aplica simultaneamente RPM e TPM. O RateLimiter sozinho controla
+        # apenas a cadência de requests; o segundo guard reserva também o budget
+        # estimado de tokens na janela móvel de 60s para evitar 429 por TPM.
+        self.groq_window_limiter: Optional[DualWindowLimiter] = None
+        if (
+            self.provider == "groq"
+            and self.account_requests_per_minute > 0
+            and self.account_tokens_per_minute > 0
+        ):
+            self.groq_window_limiter = DualWindowLimiter(
+                self.account_requests_per_minute,
+                self.account_tokens_per_minute,
+                safety_margin=float(pcfg.get("tpm_safety_margin", 0.88)),
+            )
+
+        self.requests_per_day = int(
+            pcfg.get("requests_per_day", 1000 if self.provider == "groq" else 0)
+        )
+        self.tokens_per_day = int(
+            pcfg.get("tokens_per_day", 200000 if self.provider == "groq" else 0)
+        )
+        self.max_calls_per_run = max(
+            0, int(pcfg.get("max_api_calls_per_run", 1000))
+        )
+        self.max_total_tokens_per_run = max(
+            0, int(pcfg.get("max_total_tokens_per_run", 0))
+        )
+
+        self.timeout_seconds = max(10, int(pcfg.get("timeout_seconds", 90)))
+        self.retry_attempts = max(1, int(pcfg.get("retry_attempts", 4)))
+        self.retry_backoff = list(
+            pcfg.get("retry_backoff_seconds", [2, 5, 10, 20])
+            or [2, 5, 10, 20]
+        )
+        self.max_output_tokens = max(
+            64, int(pcfg.get("max_output_tokens", 1024))
+        )
+        self.json_retry_max_completion_tokens = max(
+            self.max_output_tokens,
+            int(pcfg.get("json_retry_max_completion_tokens", 2048)),
+        )
+        self.reasoning_effort = safe(
+            pcfg.get("reasoning_effort", "low")
+        ) or "low"
+
+        self.evidence_content_chars = max(
+            250, int(pcfg.get("evidence_content_chars", 500))
+        )
+        self.max_llm_sources = max(
+            1, int(pcfg.get("max_llm_sources", 2))
+        )
+        self.max_aliases_per_type = max(
+            3, int(pcfg.get("max_aliases_per_type", 6))
+        )
+        self.max_negative_aliases_per_type = max(
+            2, int(pcfg.get("max_negative_aliases_per_type", 4))
+        )
+
+        self.api_calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+
+    @property
+    def identity(self) -> str:
+        return f"{self.provider}:{self.model}"
+
+    def _discover_nvidia_model(self) -> Dict[str, Any]:
+        """Consulta a API real da NVIDIA e escolhe um modelo servido agora."""
+        import requests
+
+        url = self.base_url + "/models"
+        headers = {
+            "Authorization": f"Bearer {os.environ[self.api_key_env].strip()}",
+            "Accept": "application/json",
+        }
+
+        try:
+            resp = requests.get(
+                url,
+                headers=headers,
+                timeout=min(self.timeout_seconds, 30),
+            )
+        except requests.RequestException as exc:
+            raise OperationalPause(
+                "NVIDIA_MODEL_DISCOVERY_NETWORK",
+                f"Falha ao consultar {url}: {type(exc).__name__}: {safe(exc)}",
+            ) from exc
+
+        if resp.status_code != 200:
+            raise self._operational_error(
+                resp.status_code,
+                safe(resp.text)[:3000],
+            )
+
+        try:
+            payload = resp.json()
+            available = {
+                safe(row.get("id"))
+                for row in (payload.get("data", []) or [])
+                if safe(row.get("id"))
+            }
+        except Exception as exc:
+            raise OperationalPause(
+                "NVIDIA_MODEL_DISCOVERY_PARSE",
+                f"Resposta inválida de GET /models: {type(exc).__name__}: {safe(exc)}",
+            ) from exc
+
+        if not available:
+            raise OperationalPause(
+                "NVIDIA_NO_MODELS",
+                "GET /v1/models não retornou modelos disponíveis.",
+            )
+
+        requested = self.model
+        if requested in available:
+            return {
+                "requested_model": requested,
+                "selected_model": requested,
+                "auto_selected": False,
+                "available_count": len(available),
+            }
+
+        for candidate in self.model_candidates:
+            if candidate in available:
+                self.model = candidate
+                LOG.warning(
+                    "NVIDIA MODEL AUTO-SELECT | configurado=%s indisponível | selecionado=%s",
+                    requested,
+                    candidate,
+                )
+                return {
+                    "requested_model": requested,
+                    "selected_model": candidate,
+                    "auto_selected": True,
+                    "available_count": len(available),
+                }
+
+        interesting = sorted(
+            x for x in available
+            if any(k in x.casefold() for k in ["nemotron", "llama", "gpt-oss"])
+        )[:30]
+
+        raise OperationalPause(
+            "NVIDIA_NO_COMPATIBLE_MODEL",
+            "Nenhum candidato configurado está disponível na API NVIDIA. "
+            f"Candidatos={self.model_candidates}. "
+            f"Disponíveis relacionados={interesting}",
+        )
+
+    def _discover_openrouter_model(self) -> Dict[str, Any]:
+        """Valida chave/modelo diretamente no catálogo vivo do OpenRouter.
+
+        Para este projeto o default é fixo em openai/gpt-oss-120b:free. Não usa
+        openrouter/free, porque esse router pode trocar de modelo e dificultar a
+        auditoria da taxa de acerto.
+        """
+        import requests
+
+        headers = {
+            "Authorization": f"Bearer {os.environ[self.api_key_env].strip()}",
+            "Accept": "application/json",
+        }
+        models_url = self.base_url + "/models"
+        key_url = self.base_url + "/key"
+
+        try:
+            resp = requests.get(
+                models_url,
+                headers=headers,
+                timeout=min(self.timeout_seconds, 30),
+            )
+        except requests.RequestException as exc:
+            raise OperationalPause(
+                "OPENROUTER_MODEL_DISCOVERY_NETWORK",
+                f"Falha ao consultar {models_url}: {type(exc).__name__}: {safe(exc)}",
+            ) from exc
+
+        if resp.status_code != 200:
+            raise self._operational_error(resp.status_code, safe(resp.text)[:3000])
+
+        try:
+            payload = resp.json()
+            rows = payload.get("data", []) or []
+            by_id = {
+                safe(row.get("id")): row
+                for row in rows
+                if safe(row.get("id"))
+            }
+        except Exception as exc:
+            raise OperationalPause(
+                "OPENROUTER_MODEL_DISCOVERY_PARSE",
+                f"Resposta inválida de GET /models: {type(exc).__name__}: {safe(exc)}",
+            ) from exc
+
+        requested = self.model
+        row = by_id.get(requested)
+        if row is None:
+            related = sorted(
+                mid for mid in by_id
+                if any(k in mid.casefold() for k in ["gpt-oss-120b", "gpt-oss-20b", "nemotron"])
+                and mid.endswith(":free")
+            )[:30]
+            raise OperationalPause(
+                "OPENROUTER_MODEL_UNAVAILABLE",
+                f"Modelo configurado não aparece em GET /models: {requested}. "
+                f"Free relacionados disponíveis={related}",
+            )
+
+        pricing = row.get("pricing", {}) or {}
+        prompt_price = safe(pricing.get("prompt"))
+        completion_price = safe(pricing.get("completion"))
+        request_price = safe(pricing.get("request"))
+        is_free_slug = requested.endswith(":free")
+        def _price_is_zero(value: str) -> bool:
+            value = safe(value)
+            if not value:
+                return True
+            try:
+                return float(value) == 0.0
+            except Exception:
+                return False
+
+        is_zero_priced = all(
+            _price_is_zero(x)
+            for x in [prompt_price, completion_price, request_price]
+        )
+        if getattr(self, "require_free_model", True) and not (is_free_slug and is_zero_priced):
+            raise OperationalPause(
+                "OPENROUTER_MODEL_NOT_FREE",
+                f"O projeto exige endpoint gratuito, mas o modelo configurado não foi validado como free: {requested}",
+            )
+
+        supported = {safe(x) for x in (row.get("supported_parameters", []) or [])}
+        structured = "response_format" in supported
+        if not structured:
+            raise OperationalPause(
+                "OPENROUTER_STRUCTURED_OUTPUT_UNSUPPORTED",
+                f"Modelo {requested} não anuncia response_format em GET /models; "
+                "não será usado para evitar regressão de JSON.",
+            )
+
+        key_info: Dict[str, Any] = {}
+        try:
+            kres = requests.get(
+                key_url,
+                headers=headers,
+                timeout=min(self.timeout_seconds, 30),
+            )
+            if kres.status_code == 200:
+                kd = (kres.json() or {}).get("data", {}) or {}
+                key_info = {
+                    "is_free_tier": bool(kd.get("is_free_tier", False)),
+                    "limit_remaining": kd.get("limit_remaining"),
+                    "usage_daily": kd.get("usage_daily"),
+                }
+        except Exception:
+            # /key é telemetria auxiliar; falha aqui não invalida a inferência.
+            key_info = {}
+
+        return {
+            "requested_model": requested,
+            "selected_model": requested,
+            "auto_selected": False,
+            "available_count": len(by_id),
+            "free_validated": True,
+            "structured_output": True,
+            "key_info": key_info,
+        }
+
+    def preflight(self) -> Dict[str, Any]:
+        """Pre-flight local; NVIDIA/OpenRouter validam modelo no catálogo vivo."""
+        try:
+            import requests  # noqa: F401
+        except ImportError as exc:
+            raise OperationalPause(
+                f"{self.provider.upper()}_REQUESTS_MISSING",
+                "Pacote requests não instalado. Instale requirements_v3.txt.",
+            ) from exc
+
+        if not os.getenv(self.api_key_env, "").strip():
+            raise OperationalPause(
+                f"{self.provider.upper()}_API_KEY_MISSING",
+                f"{self.api_key_env} não configurada no .env."
+            )
+
+        if not self.base_url.startswith("https://"):
+            raise OperationalPause(
+                f"{self.provider.upper()}_BASE_URL_INVALID",
+                f"Base URL inválida: {self.base_url!r}"
+            )
+
+        discovery = None
+        if self.provider == "nvidia":
+            discovery = self._discover_nvidia_model()
+        elif self.provider == "openrouter":
+            discovery = self._discover_openrouter_model()
+
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "base_url": self.base_url,
+            "account_rpm": self.account_requests_per_minute,
+            "account_tpm": self.account_tokens_per_minute,
+            "operational_rpm": self.operational_requests_per_minute,
+            "requests_per_day": self.requests_per_day,
+            "tokens_per_day": self.tokens_per_day,
+            "run_cap": self.max_calls_per_run,
+            "token_cap": self.max_total_tokens_per_run,
+            "model_discovery": discovery,
+        }
+
+
+    def schema(self, s1: Stage1Result) -> Dict[str, Any]:
+        """Structured Output fechado nos candidatos do Stage 1.
+
+        Groq/OpenRouter nem conseguem gerar TYPE/POWER fora do conjunto
+        determinístico; NVIDIA continua protegida pelo validator Python.
+        """
+        return {
+            "type": "object",
+            "properties": {
+                "decision": {
+                    "type": "string",
+                    "enum": ["RESOLVED", "INSUFFICIENT_EVIDENCE", "CONFLICT"],
+                },
+                "product_type": {
+                    "type": "string",
+                    "enum": sorted(set(s1.type_candidates) | {"REVISAR"}),
+                },
+                "power": {
+                    "type": "string",
+                    "enum": sorted(set(s1.power_candidates) | {"UNKNOWN"}),
+                },
+                "evidence_source_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                },
+                "reason_short": {"type": "string"},
+            },
+            "required": [
+                "decision",
+                "product_type",
+                "power",
+                "evidence_source_ids",
+                "reason_short",
+            ],
+            "additionalProperties": False,
+        }
+
+    @staticmethod
+    def _tokens(text: str) -> set:
+        return {
+            x for x in re.findall(r"\w+", norm_text(text), flags=re.UNICODE)
+            if len(x) >= 3
+        }
+
+    def _context_type_names(self, brand: str, model: str, s1: Stage1Result) -> List[str]:
+        """Retorna SOMENTE candidatos produzidos pelo Stage 1.
+
+        R9.1 ainda recuperava tipos por similaridade lexical apenas para montar o
+        prompt. Mesmo sem poder validá-los depois, isso expunha a IA a classes que
+        as regras não haviam candidatado. R9.2 fecha essa porta completamente.
+        """
+        selected: List[str] = []
+        if s1.product_type and s1.product_type in s1.type_candidates:
+            selected.append(s1.product_type)
+        for typ in s1.type_candidates:
+            if typ in self.rules.types and typ not in selected:
+                selected.append(typ)
+        # O limite continua técnico, mas nunca corta silenciosamente candidatos:
+        # se o Stage 1 gerar mais que o limite, o caller recebe todos.
+        return selected
+
+    def _rules_context(
+        self, brand: str, model: str, s1: Stage1Result
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        """Pacote mínimo de regras do JSON para o fallback LLM."""
+        selected = self._context_type_names(brand, model, s1)
+        selected_set = set(selected)
+
+        evidence_text = "\n".join(
+            [brand, model]
+            + [
+                f"{s.title}\n{s.content[:self.evidence_content_chars]}"
+                for s in s1.sources[: self.max_llm_sources]
+            ]
+        )
+        e_tokens = self._tokens(evidence_text)
+
+        def rank_aliases(values: List[str], limit: int) -> List[str]:
+            ranked = []
+            for alias in values or []:
+                alias = safe(alias)
+                if not alias:
+                    continue
+                a_tokens = self._tokens(alias)
+                overlap = len(a_tokens & e_tokens)
+                literal = 1 if norm_text(alias) in norm_text(evidence_text) else 0
+                ranked.append((literal, overlap, len(a_tokens), alias))
+            ranked.sort(reverse=True)
+            return [x[-1] for x in ranked[:limit]]
+
+        type_rules: Dict[str, Any] = {}
+        for typ in selected:
+            raw = self.rules.types[typ]
+            type_rules[typ] = {
+                "aliases": rank_aliases(
+                    list(raw.get("aliases", []) or []),
+                    self.max_aliases_per_type,
+                ),
+                "negative_aliases": rank_aliases(
+                    list(raw.get("negative_aliases", []) or []),
+                    self.max_negative_aliases_per_type,
+                ),
+            }
+
+        collision_all = (
+            self.rules.raw.get("RESOLUTION_POLICY", {}) or {}
+        ).get("alias_collision_policy", {}) or {}
+        ntext = norm_text(evidence_text)
+        collision_relevant = {
+            alias: target
+            for alias, target in collision_all.items()
+            if safe(target) in selected_set or norm_text(alias) in ntext
+        }
+
+        context = {
+            "ALLOWED_PRODUCT_TYPES": list(s1.type_candidates),
+            "RELEVANT_TYPE_RULES": type_rules,
+            "POWER_RULES": {p: self.rules.power_rules[p] for p in s1.power_candidates if p in self.rules.power_rules},
+            "TYPE_POLICY": self.rules.type_policy,
+            "COMPONENT_CONTEXT_RULES": self.rules.component_context,
+            "SOURCE_POLICY": {
+                "notes": safe(self.rules.source_rules.get("notes")),
+                "replacement_compatibility_rule": safe(
+                    self.rules.type_policy.get("replacement_compatibility_rule")
+                ),
+                "source_conflict_rule": safe(
+                    self.rules.type_policy.get("source_conflict_rule")
+                ),
+                "output_voltage_rule": safe(
+                    self.rules.type_policy.get("output_voltage_rule")
+                ),
+                "agricultural_mower_rule": safe(
+                    self.rules.type_policy.get("agricultural_mower_rule")
+                ),
+            },
+            "ALIAS_COLLISIONS_RELEVANT": collision_relevant,
+            "ALLOWED_POWER": sorted(set(s1.power_candidates) | {"UNKNOWN"}),
+        }
+        return context, selected
+
+    def _messages(
+        self, brand: str, model: str, s1: Stage1Result
+    ) -> Tuple[List[Dict[str, str]], List[str], Dict[int, int]]:
+        rules_context, selected_types = self._rules_context(brand, model, s1)
+
+        # Stage 1 atual usa identidade graduada. Os rótulos antigos
+        # BRAND_MODEL/MODEL/BRAND/QUERY_CONTEXT não podem ordenar estas fontes.
+        relevance_rank = {
+            "STRONG": 0,
+            "PROBABLE": 1,
+            "CONTEXTUAL": 2,
+            "WEAK": 3,
+            "CONFLICT": 4,
+        }
+        ranked_sources = sorted(
+            s1.sources,
+            key=lambda s: (
+                relevance_rank.get(s.relevance, 9),
+                1 if s.quality_flags else 0,
+                0 if (s.type_hits or s.power_hits) else 1,
+                s.source_id,
+            ),
+        )[: self.max_llm_sources]
+
+        # IDs do prompt são SEMPRE 1..N. Isso elimina a ambiguidade criada
+        # quando as fontes ranqueadas eram, por exemplo, [1, 3, 5].
+        prompt_to_source_id: Dict[int, int] = {}
+        sources = []
+        for prompt_id, s in enumerate(ranked_sources, 1):
+            prompt_to_source_id[prompt_id] = s.source_id
+            sources.append(
+                {
+                    "id": prompt_id,
+                    "relevance": s.relevance,
+                    "quality_flags": s.quality_flags,
+                    "title": s.title,
+                    "content": s.content[: self.evidence_content_chars],
+                }
+            )
+
+        system = (
+            "Classify the physical product using only the supplied Tavily evidence. "
+            "The business-rules JSON defines allowed terminology and interpretation. "
+            "Do not use outside knowledge. Do not classify Category General or FAMILY. "
+            "If evidence is insufficient, return INSUFFICIENT_EVIDENCE. "
+            "For RESOLVED, product_type must be one exact value from ALLOWED_PRODUCT_TYPES. "
+            "Never create, infer, translate, or select a type outside that list. "
+            "Power must be UNKNOWN or one exact value from ALLOWED_POWER; never infer power outside that list. "
+            "Cite at least one evidence source id from the IDs actually supplied, and that source "
+            "must textually support the chosen product_type. "
+            "Evidence IDs are local and contiguous (1..N); never invent another ID. "
+            "Respect evidence relevance and quality_flags: replacement/manual/compatibility "
+            "pages are secondary when a cleaner exact Brand+Model source exists. "
+            "A phrase such as 'without battery', 'tool only', or 'battery sold separately' "
+            "does not mean the physical product is a battery."
+        )
+
+        payload = {
+            "product": {"brand": brand, "model": model},
+            "stage1": {
+                "state": s1.state,
+                "type_candidates": s1.type_candidates,
+                "power_candidates": s1.power_candidates,
+            },
+            "business_rules": rules_context,
+            "tavily_evidence": sources,
+            "output": {
+                "fields": [
+                    "decision",
+                    "product_type",
+                    "power",
+                    "evidence_source_ids",
+                    "reason_short",
+                ]
+            },
+        }
+
+        return [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ),
+            },
+        ], selected_types, prompt_to_source_id
+
+    @staticmethod
+    def _is_json_completion_limit_error(status: int, detail: str) -> bool:
+        if status != 400:
+            return False
+        folded = safe(detail).casefold()
+        return (
+            "json_validate_failed" in folded
+            and "max completion tokens reached" in folded
+        )
+
+    def _quota_code(self, status: int, detail: str) -> Optional[str]:
+        if status != 429:
+            return None
+
+        folded = safe(detail).casefold()
+
+        if self.provider == "groq":
+            if "tokens per day" in folded or "(tpd)" in folded:
+                return "GROQ_TPD_EXHAUSTED"
+            return None
+
+        if self.provider == "nvidia":
+            # NVIDIA pode variar a mensagem de quota/crédito.
+            if any(
+                phrase in folded
+                for phrase in [
+                    "quota exhausted",
+                    "quota exceeded",
+                    "credits exhausted",
+                    "credit balance",
+                    "daily quota",
+                    "daily limit",
+                ]
+            ):
+                return "NVIDIA_QUOTA_EXHAUSTED"
+            return None
+
+        if self.provider == "openrouter":
+            # RPM/provider congestion é retryable. Só troca/pausa como quota
+            # quando a mensagem aponta explicitamente para limite diário.
+            if any(phrase in folded for phrase in [
+                "requests per day",
+                "request per day",
+                "daily limit",
+                "daily quota",
+                "free-models-per-day",
+                "free models per day",
+            ]):
+                return "OPENROUTER_QUOTA_EXHAUSTED"
+            return None
+
+        return None
+
+    def _operational_error(
+        self, status: int, detail: str
+    ) -> OperationalPause:
+        p = self.provider.upper()
+
+        if status == 401:
+            return OperationalPause(
+                f"{p}_AUTH", f"{p} 401 AUTH: {detail}"
+            )
+        if status == 403:
+            return OperationalPause(
+                f"{p}_PERMISSION", f"{p} 403 PERMISSION: {detail}"
+            )
+        if status == 402 and self.provider == "openrouter":
+            return OperationalPause(
+                "OPENROUTER_CREDIT_LIMIT",
+                f"OPENROUTER 402 CREDIT/LIMIT: {detail}",
+            )
+        if status == 429:
+            quota_code = self._quota_code(status, detail)
+            if quota_code:
+                return OperationalPause(quota_code, detail)
+            return OperationalPause(
+                f"{p}_RATE_LIMIT", f"{p} 429 RATE_LIMIT: {detail}"
+            )
+        if self.provider == "nvidia" and status == 410:
+            return OperationalPause(
+                "NVIDIA_MODEL_EOL",
+                f"NVIDIA informou modelo indisponível/EOL: {self.model} | {detail}",
+            )
+        if status in {408, 500, 502, 503, 504}:
+            return OperationalPause(
+                f"{p}_TRANSIENT", f"{p} {status} TRANSIENT: {detail}"
+            )
+
+        return OperationalPause(
+            f"{p}_FATAL", f"{p} HTTP {status}: {detail}"
+        )
+
+
+    def _post(self, payload: Dict[str, Any]):
+        import requests
+
+        url = self.base_url + "/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {os.environ[self.api_key_env].strip()}",
+            "Content-Type": "application/json",
+        }
+        if self.provider == "openrouter":
+            # Opcionais segundo a documentação; úteis apenas para atribuição.
+            referer = os.getenv("OPENROUTER_SITE_URL", "").strip()
+            app_title = os.getenv("OPENROUTER_APP_TITLE", "").strip()
+            if referer:
+                headers["HTTP-Referer"] = referer
+            if app_title:
+                headers["X-OpenRouter-Title"] = app_title
+
+        for attempt in range(1, self.retry_attempts + 1):
+            if attempt > 1:
+                # Retry HTTP também é um novo request real.
+                self._wait_provider_limits(payload)
+            try:
+                resp = requests.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout_seconds,
+                )
+            except requests.RequestException as exc:
+                if attempt >= self.retry_attempts:
+                    raise OperationalPause(
+                        f"{self.provider.upper()}_TRANSIENT",
+                        f"Falha de rede após {attempt} tentativa(s): "
+                        f"{type(exc).__name__}: {safe(exc)}",
+                    ) from exc
+                wait = float(
+                    self.retry_backoff[
+                        min(attempt - 1, len(self.retry_backoff) - 1)
+                    ]
+                )
+                LOG.warning(
+                    "%s rede/transiente | tentativa=%d/%d | retry em %.1fs",
+                    self.provider.upper(),
+                    attempt,
+                    self.retry_attempts,
+                    wait,
+                )
+                time.sleep(wait)
+                continue
+
+            self._sync_tpm_from_headers(resp)
+
+            if resp.status_code == 200:
+                return resp
+
+            detail = safe(resp.text)[:3000]
+
+            quota_code = self._quota_code(resp.status_code, detail)
+            if quota_code:
+                # Não aguarda 10/15 minutos quando o TPD acabou:
+                # entrega imediatamente ao próximo provider.
+                raise OperationalPause(quota_code, detail)
+
+            # Specific GPT-OSS structured-output failure:
+            # reasoning/output budget ended before a complete JSON document existed.
+            # This is recoverable by increasing ONLY the completion budget for the
+            # same product. It must not become REVIEW and must not stop the batch.
+            if self._is_json_completion_limit_error(resp.status_code, detail):
+                token_field = (
+                    "max_completion_tokens"
+                    if self.provider == "groq"
+                    else "max_tokens"
+                )
+                current_cap = int(
+                    payload.get(token_field, self.max_output_tokens)
+                )
+                if (
+                    current_cap < self.json_retry_max_completion_tokens
+                    and attempt < self.retry_attempts
+                ):
+                    new_cap = min(
+                        self.json_retry_max_completion_tokens,
+                        max(1024, current_cap * 2),
+                    )
+                    payload[token_field] = new_cap
+                    LOG.warning(
+                        "%s JSON RETRY | produto não concluído dentro de %d tokens "
+                        "| novo max_completion_tokens=%d | tentativa=%d/%d",
+                        self.provider.upper(),
+                        current_cap,
+                        new_cap,
+                        attempt + 1,
+                        self.retry_attempts,
+                    )
+                    time.sleep(1.0)
+                    continue
+
+                raise OperationalPause(
+                    f"{self.provider.upper()}_JSON_TOKEN_LIMIT",
+                    f"{self.provider.upper()} não concluiu o JSON mesmo com "
+                    f"max_completion_tokens={current_cap}: {detail}",
+                )
+
+            retryable = resp.status_code in {408, 429, 500, 502, 503, 504}
+            if not retryable or attempt >= self.retry_attempts:
+                raise self._operational_error(resp.status_code, detail)
+
+            retry_after = safe(resp.headers.get("Retry-After"))
+            try:
+                wait = max(1.0, float(retry_after)) if retry_after else float(
+                    self.retry_backoff[
+                        min(attempt - 1, len(self.retry_backoff) - 1)
+                    ]
+                )
+            except Exception:
+                wait = float(
+                    self.retry_backoff[
+                        min(attempt - 1, len(self.retry_backoff) - 1)
+                    ]
+                )
+
+            detail_short = re.sub(r"\s+", " ", detail)[:600]
+            LOG.warning(
+                "%s HTTP %s | tentativa=%d/%d | retry em %.1fs | %s",
+                self.provider.upper(),
+                resp.status_code,
+                attempt,
+                self.retry_attempts,
+                wait,
+                detail_short,
+            )
+            time.sleep(wait)
+
+        raise OperationalPause(
+            f"{self.provider.upper()}_TRANSIENT",
+            f"Falha transiente {self.provider.upper()} sem resposta final."
+        )
+
+    @staticmethod
+    def _decode_model_json(content: str) -> Dict[str, Any]:
+        """Decodifica a resposta do modelo sem alterar o conteúdo semântico.
+
+        Aceita:
+        - JSON puro;
+        - JSON cercado por ```json ... ```;
+        - texto residual antes/depois de um único objeto JSON.
+
+        NÃO tenta "consertar" campos ou inventar classificação.
+        """
+        raw = safe(content).strip()
+        if not raw:
+            raise ValueError("Resposta sem conteúdo.")
+
+        # Remove markdown fences, caso o modelo ignore a instrução de JSON puro.
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\\s*", "", raw, flags=re.I)
+            raw = re.sub(r"\\s*```$", "", raw).strip()
+
+        # 1) tentativa direta
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("Resposta JSON não é objeto.")
+            return data
+        except json.JSONDecodeError:
+            pass
+
+        # 2) extrai o primeiro objeto delimitado por { ... }.
+        first = raw.find("{")
+        last = raw.rfind("}")
+        if first >= 0 and last > first:
+            candidate = raw[first:last + 1]
+            data = json.loads(candidate)
+            if not isinstance(data, dict):
+                raise ValueError("Resposta JSON extraída não é objeto.")
+            return data
+
+        raise ValueError("Nenhum objeto JSON válido encontrado.")
+
+    @staticmethod
+    def _header_snapshot(resp) -> Dict[str, str]:
+        names = [
+            "x-ratelimit-limit-requests",
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-reset-requests",
+            "x-ratelimit-limit-tokens",
+            "x-ratelimit-remaining-tokens",
+            "x-ratelimit-reset-tokens",
+            "retry-after",
+        ]
+        return {
+            k: safe(resp.headers.get(k))
+            for k in names
+            if safe(resp.headers.get(k))
+        }
+
+    def _estimate_request_tokens(self, payload: Dict[str, Any]) -> int:
+        """Estimativa conservadora usada somente para pacing local do Groq.
+
+        O rate-limit do Groq considera o request inteiro, inclusive o orçamento
+        máximo de completion. Usamos ~3 chars/token para não depender de tokenizer
+        externo e adicionamos pequena margem estrutural.
+        """
+        messages = payload.get("messages", []) or []
+        serialized = json.dumps(
+            messages, ensure_ascii=False, separators=(",", ":"), default=str
+        )
+        prompt_estimate = max(1, (len(serialized) + 2) // 3)
+        completion_budget = int(
+            payload.get("max_completion_tokens")
+            or payload.get("max_tokens")
+            or self.max_output_tokens
+            or 0
+        )
+        return prompt_estimate + max(0, completion_budget) + 128
+
+    def _wait_provider_limits(self, payload: Dict[str, Any]) -> None:
+        """Aplica pacing RPM e, no Groq, também a janela TPM."""
+        self.limiter.wait()
+        if self.groq_window_limiter is not None:
+            estimated = self._estimate_request_tokens(payload)
+            self.groq_window_limiter.wait(estimated)
+
+    def _sync_tpm_from_headers(self, resp) -> None:
+        """Headers permanecem registrados; o pacing preventivo é local."""
+        return
+
+    @staticmethod
+    def _normalize_evidence_refs(
+        data: Dict[str, Any],
+        prompt_to_source_id: Dict[int, int],
+    ) -> Tuple[Dict[str, Any], bool]:
+        """Normaliza refs do LLM sem inventar evidência.
+
+        NVIDIA JSON mode às vezes devolve "1" como string. Aceitamos apenas
+        inteiros ou strings estritamente numéricas que apontem para IDs locais
+        realmente presentes no prompt. Depois convertemos para source_id real.
+        """
+        out = dict(data or {})
+        refs = out.get("evidence_source_ids", [])
+
+        if refs is None:
+            refs = []
+        if not isinstance(refs, list):
+            return out, False
+
+        normalized_local: List[int] = []
+        for raw in refs:
+            if isinstance(raw, bool):
+                return out, False
+            if isinstance(raw, int):
+                ref = raw
+            elif isinstance(raw, float) and raw.is_integer():
+                ref = int(raw)
+            elif isinstance(raw, str) and raw.strip().isdigit():
+                ref = int(raw.strip())
+            else:
+                return out, False
+
+            if ref not in prompt_to_source_id:
+                return out, False
+            if ref not in normalized_local:
+                normalized_local.append(ref)
+
+        out["evidence_source_ids"] = [
+            prompt_to_source_id[x] for x in normalized_local
+        ]
+        return out, True
+
+    def classify(
+        self,
+        key: str,
+        raw_hash: str,
+        brand: str,
+        model: str,
+        s1: Stage1Result,
+    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
+        cached = self.db.get_llm(
+            key, raw_hash, self.rules.hash, self.provider, self.model
+        )
+        if cached is not None:
+            data, usage = cached
+            return data, True, usage
+
+        if self.max_calls_per_run and self.api_calls >= self.max_calls_per_run:
+            raise OperationalPause(
+                f"{self.provider.upper()}_RUN_CAP",
+                f"Limite local de {self.max_calls_per_run} chamadas {self.provider.upper()}/run atingido.",
+            )
+
+        messages, context_types, prompt_to_source_id = self._messages(
+            brand, model, s1
+        )
+
+        if (
+            self.max_total_tokens_per_run
+            and self.total_tokens >= self.max_total_tokens_per_run
+        ):
+            raise OperationalPause(
+                f"{self.provider.upper()}_LOCAL_TOKEN_CAP",
+                f"Cap real de {self.max_total_tokens_per_run} tokens/run atingido. "
+                f"Consumidos={self.total_tokens}.",
+            )
+
+        LOG.info(
+            "%s CALL %d | ritmo=%.1f req/min | context_types=%d | sources=%d",
+            self.provider.upper(),
+            self.api_calls + 1,
+            self.operational_requests_per_minute,
+            len(context_types),
+            min(len(s1.sources), self.max_llm_sources),
+        )
+
+        # O pacing efetivo é aplicado imediatamente antes de cada POST,
+        # incluindo retries de parse, para respeitar RPM + TPM.
+        self.api_calls += 1
+
+        if self.provider == "groq":
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "product_classification",
+                        "strict": True,
+                        "schema": self.schema(s1),
+                    },
+                },
+                "reasoning_effort": self.reasoning_effort,
+                "temperature": 0,
+                "max_completion_tokens": self.max_output_tokens,
+            }
+        elif self.provider == "openrouter":
+            # OpenRouter suporta o contrato OpenAI e, para gpt-oss-120b:free,
+            # structured outputs via response_format/json_schema.
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "product_classification",
+                        "strict": True,
+                        "schema": self.schema(s1),
+                    },
+                },
+                "temperature": 0,
+                "max_tokens": self.max_output_tokens,
+                "stream": False,
+            }
+        else:
+            # NVIDIA hosted: JSON mode + validator Python.
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "response_format": {"type": "json_object"},
+                "temperature": 0,
+                "max_tokens": self.max_output_tokens,
+                "stream": False,
+            }
+
+            # Nemotron 3.5: desliga thinking para usar o orçamento de saída
+            # no JSON final, conforme recomendação da documentação NVIDIA.
+            if self.model == "nvidia/nemotron-3.5-lightning-30b-a3b":
+                payload["chat_template_kwargs"] = {
+                    "enable_thinking": False
+                }
+
+        parse_max_attempts = 2
+        data = None
+        usage = None
+        last_parse_error = None
+        failed_parse_tokens = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+        for parse_attempt in range(1, parse_max_attempts + 1):
+            self._wait_provider_limits(payload)
+            resp = self._post(payload)
+
+            try:
+                envelope = resp.json()
+                raw_usage = envelope.get("usage", {}) or {}
+                current_usage = {
+                    "prompt_tokens": int(raw_usage.get("prompt_tokens", 0) or 0),
+                    "completion_tokens": int(raw_usage.get("completion_tokens", 0) or 0),
+                    "total_tokens": int(raw_usage.get("total_tokens", 0) or 0),
+                }
+
+                content = safe(envelope["choices"][0]["message"]["content"])
+                data = self._decode_model_json(content)
+                data, evidence_refs_valid = self._normalize_evidence_refs(
+                    data, prompt_to_source_id
+                )
+
+                usage = {
+                    **current_usage,
+                    "context_types": context_types,
+                    "rate_limit_headers": self._header_snapshot(resp),
+                    "json_parse_retries": parse_attempt - 1,
+                    "failed_parse_tokens": failed_parse_tokens["total_tokens"],
+                    "evidence_refs_valid": evidence_refs_valid,
+                    "evidence_prompt_map": {
+                        str(k): int(v) for k, v in prompt_to_source_id.items()
+                    },
+                }
+                break
+
+            except Exception as exc:
+                last_parse_error = exc
+
+                # Se a API entregou usage, contabiliza também a resposta inválida.
+                try:
+                    envelope_for_usage = resp.json()
+                    raw_failed = envelope_for_usage.get("usage", {}) or {}
+                    failed_now = {
+                        "prompt_tokens": int(raw_failed.get("prompt_tokens", 0) or 0),
+                        "completion_tokens": int(raw_failed.get("completion_tokens", 0) or 0),
+                        "total_tokens": int(raw_failed.get("total_tokens", 0) or 0),
+                    }
+                    for k in failed_parse_tokens:
+                        failed_parse_tokens[k] += failed_now[k]
+                except Exception:
+                    pass
+
+                if parse_attempt < parse_max_attempts:
+                    LOG.warning(
+                        "%s JSON inválido | retry controlado %d/%d | %s: %s",
+                        self.provider.upper(),
+                        parse_attempt + 1,
+                        parse_max_attempts,
+                        type(exc).__name__,
+                        safe(exc),
+                    )
+
+                    # Mantém o mesmo produto/evidência/regras e só reforça o formato.
+                    retry_payload = dict(payload)
+                    retry_messages = list(payload.get("messages", []))
+                    retry_messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your previous response was not valid JSON. "
+                                "Return ONLY one syntactically valid JSON object, "
+                                "with exactly these keys: decision, product_type, "
+                                "power, evidence_source_ids, reason_short. "
+                                "No markdown, no comments, no trailing text."
+                            ),
+                        }
+                    )
+                    retry_payload["messages"] = retry_messages
+                    payload = retry_payload
+
+                    # Conta a segunda requisição real na métrica.
+                    self.api_calls += 1
+                    time.sleep(1.0)
+                    continue
+
+                raise OperationalPause(
+                    f"{self.provider.upper()}_OUTPUT_PARSE",
+                    f"Falha ao interpretar JSON de {self.provider.upper()} "
+                    f"após {parse_max_attempts} tentativa(s): "
+                    f"{type(exc).__name__}: {safe(exc)}",
+                ) from exc
+
+        if data is None or usage is None:
+            raise OperationalPause(
+                f"{self.provider.upper()}_OUTPUT_PARSE",
+                f"Resposta sem JSON válido: {safe(last_parse_error)}",
+            )
+
+        # Consumo total inclui tentativas de parse que consumiram tokens.
+        self.prompt_tokens += usage["prompt_tokens"] + failed_parse_tokens["prompt_tokens"]
+        self.completion_tokens += (
+            usage["completion_tokens"] + failed_parse_tokens["completion_tokens"]
+        )
+        self.total_tokens += usage["total_tokens"] + failed_parse_tokens["total_tokens"]
+
+        self.db.put_llm(
+            key,
+            raw_hash,
+            self.rules.hash,
+            self.provider,
+            self.model,
+            data,
+            usage,
+        )
+        return data, False, usage
+
+
+class ProviderCascade:
+    """Groq -> NVIDIA -> OpenRouter, avançando apenas por exaustão de quota."""
+
+    EXHAUSTION_CODES = {
+        "GROQ_TPD_EXHAUSTED",
+        "NVIDIA_QUOTA_EXHAUSTED",
+        "OPENROUTER_QUOTA_EXHAUSTED",
+    }
+
+    def __init__(self, providers: List[OpenAICompatibleClassifier]):
+        if not providers:
+            raise ValueError("ProviderCascade requer ao menos um provider.")
+        self.providers = providers
+        self.active_index = 0
+        self.disabled: set = set()
+
+    @property
+    def active(self) -> OpenAICompatibleClassifier:
+        return self.providers[self.active_index]
+
+    @property
+    def provider(self) -> str:
+        return self.active.provider
+
+    @property
+    def model(self) -> str:
+        return self.active.model
+
+    @property
+    def api_calls(self) -> int:
+        return sum(x.api_calls for x in self.providers)
+
+    @property
+    def prompt_tokens(self) -> int:
+        return sum(x.prompt_tokens for x in self.providers)
+
+    @property
+    def completion_tokens(self) -> int:
+        return sum(x.completion_tokens for x in self.providers)
+
+    @property
+    def total_tokens(self) -> int:
+        return sum(x.total_tokens for x in self.providers)
+
+    def preflight_all(self) -> List[Dict[str, Any]]:
+        """Valida cada provider isoladamente.
+
+        Falha de preflight em um provider NÃO derruba toda a rota: o provider é
+        desabilitado somente nesta execução e os demais continuam disponíveis.
+        Isso é especialmente importante para providers de fallback opcionais
+        (ex.: OpenRouter bloqueado por TLS/proxy corporativo).
+
+        Se TODOS falharem, aí sim ocorre SAFE PAUSE antes da classificação.
+        """
+        results: List[Dict[str, Any]] = []
+        enabled_indexes: List[int] = []
+
+        for idx, provider in enumerate(self.providers):
+            try:
+                pf = dict(provider.preflight() or {})
+                pf["enabled"] = True
+                pf["error_code"] = ""
+                pf["error_detail"] = ""
+                enabled_indexes.append(idx)
+                results.append(pf)
+            except OperationalPause as exc:
+                self.disabled.add(idx)
+                results.append({
+                    "provider": provider.provider,
+                    "model": provider.model,
+                    "base_url": provider.base_url,
+                    "operational_rpm": provider.operational_requests_per_minute,
+                    "enabled": False,
+                    "error_code": exc.code,
+                    "error_detail": safe(exc),
+                    "model_discovery": None,
+                })
+                LOG.warning(
+                    "LLM PRE-FLIGHT SKIP | provider=%s | model=%s | code=%s | %s",
+                    provider.provider,
+                    provider.model,
+                    exc.code,
+                    safe(exc),
+                )
+
+        if not enabled_indexes:
+            details = " | ".join(
+                f"{x.get('provider')}={x.get('error_code')}" for x in results
+            )
+            raise OperationalPause(
+                "LLM_NO_PROVIDER_AVAILABLE",
+                f"Nenhum provider passou no preflight. {details}",
+            )
+
+        self.active_index = enabled_indexes[0]
+        return results
+
+    def enabled_route(self) -> List[OpenAICompatibleClassifier]:
+        return [
+            p for idx, p in enumerate(self.providers)
+            if idx not in self.disabled
+        ]
+
+    def _advance(self) -> bool:
+        for idx in range(self.active_index + 1, len(self.providers)):
+            if idx not in self.disabled:
+                self.active_index = idx
+                return True
+        return False
+
+    def classify(
+        self,
+        key: str,
+        raw_hash: str,
+        brand: str,
+        model: str,
+        s1: Stage1Result,
+    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
+        while True:
+            current = self.active
+
+            try:
+                data, cache_hit, usage = current.classify(
+                    key, raw_hash, brand, model, s1
+                )
+                usage = dict(usage or {})
+                usage["provider"] = current.provider
+                usage["model"] = current.model
+                return data, cache_hit, usage
+
+            except OperationalPause as exc:
+                rotate_provider = (
+                    exc.code in self.EXHAUSTION_CODES
+                    or exc.code.endswith("_LOCAL_TOKEN_CAP")
+                    or exc.code.endswith("_RUN_CAP")
+                    or exc.code.endswith("_OUTPUT_PARSE")
+                    or exc.code.endswith("_JSON_TOKEN_LIMIT")
+                )
+                if not rotate_provider:
+                    raise
+
+                old_provider = current.provider.upper()
+                self.disabled.add(self.active_index)
+
+                if not self._advance():
+                    raise
+
+                LOG.warning(
+                    "%s não pôde concluir com segurança (%s). "
+                    "FALLBACK AUTOMÁTICO -> %s / %s",
+                    old_provider,
+                    exc.code,
+                    self.active.provider.upper(),
+                    self.active.model,
+                )
+
+
+# -----------------------------------------------------------------------------
+# Stage 3/4 e saída
+# -----------------------------------------------------------------------------
+def validate_llm_output(
+    data: Dict[str, Any],
+    rules: Rules,
+    s1: Stage1Result,
+) -> Tuple[bool, str]:
+    """Post-gate determinístico: LLM nunca vira fonte de verdade.
+
+    RESOLVED só é aceito se:
+    - TYPE já existia nos candidatos Stage 1;
+    - POWER já existia nos candidatos Stage 1 (ou UNKNOWN);
+    - ao menos uma fonte citada realmente pontuou para o TYPE;
+    - há suporte explícito no TITLE ou suporte independente suficiente;
+    - identidade/conflitos respeitam a política JSON.
+    """
+    decision = safe(data.get("decision"))
+    typ = safe(data.get("product_type"))
+    power = safe(data.get("power"))
+    refs = data.get("evidence_source_ids", [])
+    allowed_refs = {int(s.source_id) for s in s1.sources}
+    gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
+
+    if decision not in {"RESOLVED", "INSUFFICIENT_EVIDENCE", "CONFLICT"}:
+        return False, "DECISION_INVALID"
+    if power not in rules.allowed_powers:
+        return False, "POWER_OUTSIDE_TAXONOMY"
+    if not isinstance(refs, list) or any(
+        isinstance(x, bool) or not isinstance(x, int) or x not in allowed_refs
+        for x in refs
+    ):
+        return False, "EVIDENCE_REFS_INVALID"
+
+    if decision != "RESOLVED":
+        if typ != "REVISAR" and typ not in rules.types:
+            return False, "TYPE_OUTSIDE_TAXONOMY"
+        return True, "OK"
+
+    if typ not in rules.types:
+        return False, "TYPE_OUTSIDE_TAXONOMY"
+    if not refs:
+        return False, "RESOLVED_WITHOUT_EVIDENCE"
+
+    if bool(gate.get("allow_only_stage1_type_candidates", True)) and typ not in set(s1.type_candidates):
+        return False, "TYPE_NOT_STAGE1_CANDIDATE"
+
+    if bool(gate.get("block_multi_primary_title_conflict", True)):
+        candidate_set = set(s1.type_candidates)
+        for src in s1.sources:
+            explicit_here = {
+                t for t in candidate_set
+                if "TITLE" in (src.type_evidence_fields.get(t, []) or [])
+                and float(src.type_scores.get(t, 0.0) or 0.0) > 0.0
+            }
+            if len(explicit_here) >= 2:
+                return False, "MULTI_PRIMARY_TITLE_CONFLICT"
+
+    allowed_power = set(s1.power_candidates) | {"UNKNOWN"}
+    if bool(gate.get("allow_only_stage1_power_candidates", True)) and power not in allowed_power:
+        return False, "POWER_NOT_STAGE1_CANDIDATE"
+
+    by_id = {s.source_id: s for s in s1.sources}
+    cited = [by_id[x] for x in refs if x in by_id]
+    supporting = [s for s in cited if float(s.type_scores.get(typ, 0.0) or 0.0) > 0.0]
+    if bool(gate.get("require_cited_source_support", True)) and not supporting:
+        return False, "CITED_SOURCE_DOES_NOT_SUPPORT_TYPE"
+
+    title_support = any("TITLE" in (s.type_evidence_fields.get(typ, []) or []) for s in supporting)
+    strong_support = int(s1.type_support.get(typ, 0) or 0)
+    hit_support = sum(
+        1 for s in s1.sources
+        if s.source_weight > 0
+        and s.relevance not in {"WEAK", "CONFLICT"}
+        and float(s.type_scores.get(typ, 0.0) or 0.0) > 0.0
+    )
+    total_support = max(strong_support, hit_support)
+    typ_score = float(s1.type_scores.get(typ, 0.0) or 0.0)
+    score_total = sum(max(0.0, float(v or 0.0)) for v in s1.type_scores.values()) or 1.0
+    candidate_share = typ_score / score_total
+    min_sources = int(gate.get("require_title_support_or_min_sources", 2) or 2)
+    min_share = float(gate.get("min_candidate_share_without_title", 0.45) or 0.45)
+    if not title_support and not (total_support >= min_sources and candidate_share >= min_share):
+        return False, "TYPE_EVIDENCE_TOO_WEAK_FOR_LLM_RESOLVED"
+
+    id_rank = DeterministicEngine.IDENTITY_RANK
+    req_id = safe(gate.get("require_identity_at_least", "CONTEXTUAL")) or "CONTEXTUAL"
+    best_id = max((s.relevance for s in supporting), key=lambda x: id_rank.get(x, 0), default="WEAK")
+    if id_rank.get(best_id, 0) < id_rank.get(req_id, 2):
+        return False, "IDENTITY_TOO_WEAK_FOR_LLM_RESOLVED"
+    return True, "OK"
+
+
+def choose_title(sources: List[Source], refs: Sequence[int]) -> Tuple[str, str]:
+    by_id = {s.source_id: s for s in sources}
+    ordered = [by_id[x] for x in refs if x in by_id]
+    if not ordered:
+        rank = {"STRONG": 4, "PROBABLE": 3, "CONTEXTUAL": 2, "WEAK": 1, "CONFLICT": 0}
+        ordered = sorted(
+            sources,
+            key=lambda s: (rank.get(s.relevance, 0), s.identity_score, s.source_weight),
+            reverse=True,
+        )
+    if not ordered:
+        return "", ""
+    return ordered[0].title, ordered[0].url
+
+
+def record_for_raw_state(raw: RawEvidence) -> Dict[str, Any]:
+    status_map = {
+        "RAW_MISSING": ("PENDING_COLLECTION", "Produto ausente do cache Tavily"),
+        "RAW_EMPTY": ("PENDING_RECOLLECTION", "Consulta Tavily existe, mas não retornou resultados"),
+        "RAW_CORRUPT": ("CACHE_ERROR", "RAW Tavily corrompido"),
+        "RAW_COLLISION": ("CACHE_COLLISION", "Colisão de chave de negócio"),
+    }
+    status, msg = status_map.get(raw.state, ("CACHE_ERROR", raw.reason))
+    return {
+        "Marca": raw.brand,
+        "Modelo": raw.model,
+        "Raw State": raw.state,
+        "Resolution State": status,
+        "Stage": "0",
+        "O que é (Tipo)": "REVISAR",
+        "Alimentação": "UNKNOWN",
+        "Category General": "",
+        "FAMILY": "",
+        "Título Real": "",
+        "Fonte URL": "",
+        "Review Required": "SIM",
+        "Reason Code": raw.state,
+        "Motivo": f"{msg}. {raw.reason}".strip(),
+        "Pipeline Version": PIPELINE_VERSION,
+        "Processed At": now_iso(),
+    }
+
+
+def finalize_product(
+    brand: str,
+    model: str,
+    raw: RawEvidence,
+    s1: Stage1Result,
+    rules: Rules,
+    llm: Optional[OpenAICompatibleClassifier],
+    db: ClassificationDB,
+    run_id: str,
+) -> Dict[str, Any]:
+    key = business_key(brand, model)
+
+    common = {
+        "Marca": brand,
+        "Modelo": model,
+        "Raw State": raw.state,
+        "Stage1 Type Candidates": " | ".join(s1.type_candidates),
+        "Stage1 Power Candidates": " | ".join(s1.power_candidates),
+        "Rules Hash": rules.hash,
+        "Pipeline Version": PIPELINE_VERSION,
+        "Processed At": now_iso(),
+    }
+
+    if s1.state == "RESOLVED_RULE":
+        typ = s1.product_type or "REVISAR"
+        power = s1.power or "UNKNOWN"
+        cg, fam, tax_reason = rules.map_taxonomy(typ, power)
+        title, url = choose_title(s1.sources, [])
+        return {
+            **common,
+            "Resolution State": "RESOLVED",
+            "Stage": "RULE",
+            "O que é (Tipo)": typ,
+            "Alimentação": power,
+            "Category General": cg,
+            "FAMILY": fam,
+            "Título Real": title,
+            "Fonte URL": url,
+            "Review Required": "NÃO",
+            "Reason Code": "RULE_UNIQUE",
+            "Motivo": " | ".join(s1.reasons + [tax_reason]),
+            "LLM Provider": "",
+            "LLM Model": "",
+            "LLM Cache": "",
+            "LLM Prompt Tokens": 0,
+            "LLM Completion Tokens": 0,
+            "LLM Total Tokens": 0,
+        }
+
+    llm_gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
+    if bool(llm_gate.get("no_candidate_means_no_llm", True)) and not s1.type_candidates:
+        title, url = choose_title(s1.sources, [])
+        return {
+            **common,
+            "Resolution State": "REVIEW",
+            "Stage": "RULE",
+            "O que é (Tipo)": "REVISAR",
+            "Alimentação": s1.power or "UNKNOWN",
+            "Category General": "",
+            "FAMILY": "",
+            "Título Real": title,
+            "Fonte URL": url,
+            "Review Required": "SIM",
+            "Reason Code": "NO_DETERMINISTIC_TYPE_CANDIDATE",
+            "Motivo": "Stage 1 não encontrou candidato sustentado; LLM bloqueado por política.",
+            "LLM Provider": "",
+            "LLM Model": "",
+            "LLM Cache": "",
+            "LLM Prompt Tokens": 0,
+            "LLM Completion Tokens": 0,
+            "LLM Total Tokens": 0,
+        }
+
+    if llm is None:
+        title, url = choose_title(s1.sources, [])
+        return {
+            **common,
+            "Resolution State": "REVIEW",
+            "Stage": "RULE",
+            "O que é (Tipo)": s1.product_type or "REVISAR",
+            "Alimentação": s1.power or "UNKNOWN",
+            "Category General": "",
+            "FAMILY": "",
+            "Título Real": title,
+            "Fonte URL": url,
+            "Review Required": "SIM",
+            "Reason Code": f"STAGE1_{s1.state}",
+            "Motivo": " | ".join(s1.reasons),
+            "LLM Provider": "",
+            "LLM Model": "",
+            "LLM Cache": "",
+            "LLM Prompt Tokens": 0,
+            "LLM Completion Tokens": 0,
+            "LLM Total Tokens": 0,
+        }
+
+    data, cache_hit, usage = llm.classify(
+        key, raw.raw_hash, brand, model, s1
+    )
+
+    if usage.get("evidence_refs_valid") is False:
+        ok, why = False, "EVIDENCE_REFS_INVALID"
+    else:
+        ok, why = validate_llm_output(
+            data,
+            rules,
+            s1,
+        )
+    actual_provider = safe(usage.get("provider")) or llm.provider
+    actual_model = safe(usage.get("model")) or llm.model
+    provider_upper = actual_provider.upper()
+
+    base_llm = {
+        **common,
+        "LLM Provider": provider_upper,
+        "LLM Model": actual_model,
+        "LLM Cache": "SIM" if cache_hit else "NÃO",
+        "LLM Prompt Tokens": int(usage.get("prompt_tokens", 0) or 0),
+        "LLM Completion Tokens": int(usage.get("completion_tokens", 0) or 0),
+        "LLM Total Tokens": int(usage.get("total_tokens", 0) or 0),
+        "LLM JSON Parse Retries": int(usage.get("json_parse_retries", 0) or 0),
+        "LLM Failed Parse Tokens": int(usage.get("failed_parse_tokens", 0) or 0),
+        "LLM Rule Context": " | ".join(usage.get("context_types", []) or []),
+        "LLM Rate Limit Headers": json.dumps(
+            usage.get("rate_limit_headers", {}) or {},
+            ensure_ascii=False,
+        ),
+    }
+
+    if not ok:
+        db.event(run_id, key, f"{provider_upper}_OUTPUT_REJECTED", why)
+        return {
+            **base_llm,
+            "Resolution State": "REVIEW",
+            "Stage": "LLM",
+            "O que é (Tipo)": "REVISAR",
+            "Alimentação": "UNKNOWN",
+            "Category General": "",
+            "FAMILY": "",
+            "Título Real": "",
+            "Fonte URL": "",
+            "Review Required": "SIM",
+            "Reason Code": why,
+            "Motivo": safe(data.get("reason_short")),
+        }
+
+    decision = safe(data.get("decision"))
+    refs = data.get("evidence_source_ids", []) or []
+    title, url = choose_title(s1.sources, refs)
+
+    if decision != "RESOLVED":
+        return {
+            **base_llm,
+            "Resolution State": "REVIEW",
+            "Stage": "LLM",
+            "O que é (Tipo)": safe(data.get("product_type")),
+            "Alimentação": safe(data.get("power")),
+            "Category General": "",
+            "FAMILY": "",
+            "Título Real": title,
+            "Fonte URL": url,
+            "Review Required": "SIM",
+            "Reason Code": f"{provider_upper}_{decision}",
+            "Motivo": safe(data.get("reason_short")),
+            "Evidence Source IDs": ",".join(map(str, refs)),
+        }
+
+    typ = safe(data.get("product_type"))
+    power = safe(data.get("power"))
+    cg, fam, tax_reason = rules.map_taxonomy(typ, power)
+    review = (cg, fam) not in rules.valid_pairs or (cg, fam) == ("OTHERS", "OTHERS")
+    out_cg, out_fam = ("", "") if review else (cg, fam)
+
+    return {
+        **base_llm,
+        "Raw State": "RAW_OK",
+        "Resolution State": "REVIEW" if review else "RESOLVED",
+        "Stage": "LLM",
+        "O que é (Tipo)": typ,
+        "Alimentação": power,
+        "Category General": out_cg,
+        "FAMILY": out_fam,
+        "Título Real": title,
+        "Fonte URL": url,
+        "Review Required": "SIM" if review else "NÃO",
+        "Reason Code": "TAXONOMY_UNMAPPED" if review else f"{provider_upper}_RESOLVED",
+        "Motivo": f"{safe(data.get('reason_short'))} | {tax_reason}",
+        "Evidence Source IDs": ",".join(map(str, refs)),
+    }
+
+
+# -----------------------------------------------------------------------------
+# Baseline e exportação
+# -----------------------------------------------------------------------------
+BASELINE_FINAL_COLUMNS = [
+    "Marca",
+    "Modelo",
+    "O que é (Tipo)",
+    "Alimentação",
+    "Category General",
+    "FAMILY",
+    "Título Real",
+    "Status",
+    "Revisão",
+    "Revisão B.I",
+]
+
+BASELINE_MASTER_FIELDS = [
+    "O que é (Tipo)",
+    "Alimentação",
+    "Category General",
+    "FAMILY",
+    "Título Real",
+    "Fonte URL",
+    "Status",
+    "Status Processamento",
+    "Revisão",
+    "Revisão B.I",
+    "Resolution State",
+    "Review Required",
+    "Reason Code",
+    "Motivo",
+    "Stage",
+    "Rules Version",
+    "Rules Hash",
+    "Pipeline Version",
+    "Processed At",
+    "LLM Provider",
+    "LLM Model",
+]
+
+_REVIEW_REJECT_STATES = {
+    "REVISAR",
+    "REVIEW",
+    "PENDENTE_COLETA",
+    "PENDING_COLLECTION",
+    "PENDING_RECOLLECTION",
+    "CACHE_ERROR",
+    "CACHE_COLLISION",
+    "NÃO_CLASSIFICADO",
+    "NAO_CLASSIFICADO",
+}
+
+_BASELINE_ACCEPT_STATES = {
+    "AUTO_APROVADO",
+    "PROVÁVEL",
+    "PROVAVEL",
+    "VALIDADO_MANUAL",
+}
+
+
+def _is_manual_status(value: Any) -> bool:
+    return safe(value).upper() == "MANUAL"
+
+
+def _is_bi_ok_value(value: Any) -> bool:
+    """Único marcador humano de aprovação final usado como HARD LOCK."""
+    return safe(value).upper() == "OK"
+
+
+def _row_bi_locked(row: Any, df: Any) -> bool:
+    col = find_col(df, ["Revisão B.I", "Revisao B.I"], required=False)
+    return bool(col and _is_bi_ok_value(row.get(col)))
+
+
+def _read_business_sheet(path: Path) -> Tuple[Any, str]:
+    """Lê a primeira aba que realmente possui Marca+Modelo.
+
+    Evita confundir a aba Resumo de relatórios com a base de negócio.
+    """
+    import pandas as pd
+
+    xls = pd.ExcelFile(path)
+    try:
+        preferred = [
+            x for x in ["Base Final", "Consolidado", "Resultados"]
+            if x in xls.sheet_names
+        ]
+        order = preferred + [x for x in xls.sheet_names if x not in preferred]
+        last_error: Optional[Exception] = None
+        for sheet in order:
+            try:
+                df = pd.read_excel(path, sheet_name=sheet, dtype=object)
+                find_col(df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+                find_col(df, ["Modelo", "Model", "SKU", "Part Number"])
+                return df, sheet
+            except Exception as exc:
+                last_error = exc
+                continue
+        raise ValueError(
+            f"Nenhuma aba com Marca+Modelo encontrada em {path.name}: {last_error}"
+        )
+    finally:
+        xls.close()
+
+
+def _baseline_row_accepted(row: Any, df: Any) -> bool:
+    """Define se a linha é baseline/skip.
+
+    HARD LOCKS:
+    - Revisão B.I = OK: autoridade humana final, mesmo se a linha parecer incompleta.
+    - Status = Manual: preservado integralmente.
+
+    Para Script sem OK, REVIEW/PENDING nunca vira baseline só por existir na Base Final.
+    """
+    if _row_bi_locked(row, df):
+        return True
+
+    status_col = find_col(df, ["Status"], required=False)
+    if status_col and _is_manual_status(row.get(status_col)):
+        return True
+
+    review_required_col = find_col(df, ["Review Required"], required=False)
+    if review_required_col and safe(row.get(review_required_col)).upper() == "SIM":
+        return False
+
+    resolution_col = find_col(df, ["Resolution State"], required=False)
+    resolution = safe(row.get(resolution_col)).upper() if resolution_col else ""
+    if resolution and resolution != "RESOLVED":
+        return False
+
+    proc_col = find_col(df, ["Status Processamento"], required=False)
+    proc = safe(row.get(proc_col)).upper() if proc_col else ""
+    if proc and proc not in {"PROCESSADO", "COMPLETED"}:
+        return False
+
+    review_col = find_col(df, ["Revisão", "Revisao"], required=False)
+    review = safe(row.get(review_col)).upper() if review_col else ""
+    if review in _REVIEW_REJECT_STATES:
+        return False
+
+    technical_gate_present = any([
+        bool(review_required_col and safe(row.get(review_required_col))),
+        bool(resolution_col and safe(row.get(resolution_col))),
+        bool(proc_col and safe(row.get(proc_col))),
+    ])
+    if not technical_gate_present and review not in _BASELINE_ACCEPT_STATES:
+        return False
+
+    type_col = find_col(df, ["O que é (Tipo)", "Tipo", "Product Type"], required=False)
+    cg_col = find_col(df, ["Category General"], required=False)
+    fam_col = find_col(df, ["FAMILY", "Family"], required=False)
+
+    typ = safe(row.get(type_col)).upper() if type_col else ""
+    cg = safe(row.get(cg_col)).upper() if cg_col else ""
+    fam = safe(row.get(fam_col)).upper() if fam_col else ""
+
+    if not typ or typ in {"REVISAR", "UNKNOWN"}:
+        return False
+    if not cg or not fam:
+        return False
+    if (cg, fam) == ("OTHERS", "OTHERS"):
+        return False
+    return True
+
+def _accepted_keys_from_baseline_file(
+    path: Optional[Path],
+) -> Tuple[set, set, set]:
+    """Retorna (aceitos, manuais, bi_ok_locked) de um baseline."""
+    accepted: set = set()
+    manual: set = set()
+    bi_locked: set = set()
+
+    if not path or not path.exists():
+        return accepted, manual, bi_locked
+
+    try:
+        df, _ = _read_business_sheet(path)
+    except Exception as exc:
+        LOG.warning("Baseline %s não pôde ser lida: %s", path, exc)
+        return accepted, manual, bi_locked
+
+    b = find_col(df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    m = find_col(df, ["Modelo", "Model", "SKU", "Part Number"])
+    status = find_col(df, ["Status"], required=False)
+    rbi = find_col(df, ["Revisão B.I", "Revisao B.I"], required=False)
+
+    for _, row in df.iterrows():
+        brand, model = safe(row.get(b)), safe(row.get(m))
+        if not brand or not model:
+            continue
+        key = business_key(brand, model)
+
+        if rbi and _is_bi_ok_value(row.get(rbi)):
+            bi_locked.add(key)
+            accepted.add(key)
+            continue
+        if status and _is_manual_status(row.get(status)):
+            manual.add(key)
+            accepted.add(key)
+            continue
+        if _baseline_row_accepted(row, df):
+            accepted.add(key)
+
+    return accepted, manual, bi_locked
+
+def load_baseline_inventory(
+    master_path: Optional[Path],
+    final_path: Optional[Path],
+) -> Dict[str, set]:
+    """Lê Consolidado/Base Final e separa baseline de HARD LOCK humano."""
+    master_accepted, master_manual, master_bi = _accepted_keys_from_baseline_file(master_path)
+    final_accepted, final_manual, final_bi = _accepted_keys_from_baseline_file(final_path)
+
+    manual = master_manual | final_manual
+    bi_locked = master_bi | final_bi
+    hard_lock = manual | bi_locked
+    processed = master_accepted | final_accepted | hard_lock
+
+    return {
+        "processed": processed,
+        "manual": manual,
+        "bi_locked": bi_locked,
+        "hard_lock": hard_lock,
+        "master_accepted": master_accepted,
+        "final_accepted": final_accepted,
+        "master_manual": master_manual,
+        "final_manual": final_manual,
+        "master_bi_locked": master_bi,
+        "final_bi_locked": final_bi,
+    }
+
+def load_already_classified(
+    master_path: Optional[Path],
+    final_path: Optional[Path],
+) -> Tuple[set, set]:
+    """Compatibilidade: retorna união aceita + manuais."""
+    inv = load_baseline_inventory(master_path, final_path)
+    return inv["processed"], inv["manual"]
+
+
+def _ensure_master_columns(df: Any) -> Tuple[Any, str, str]:
+    import pandas as pd
+
+    out = df.copy()
+    brand_col = find_col(
+        out,
+        ["Marca", "Fabricante", "Brand", "Manufacturer"],
+        required=False,
+    )
+    model_col = find_col(
+        out,
+        ["Modelo", "Model", "SKU", "Part Number"],
+        required=False,
+    )
+
+    if not brand_col:
+        brand_col = "Marca"
+        out[brand_col] = pd.NA
+    if not model_col:
+        model_col = "Modelo"
+        out[model_col] = pd.NA
+
+    # Unifica Family/FAMILY sem apagar valor existente.
+    family_col = find_col(out, ["FAMILY"], required=False)
+    legacy_family = find_col(out, ["Family"], required=False)
+    if not family_col:
+        out["FAMILY"] = out[legacy_family] if legacy_family else pd.NA
+    elif legacy_family and legacy_family != family_col:
+        mask = out[family_col].isna() | (
+            out[family_col].astype(str).str.strip() == ""
+        )
+        out.loc[mask, family_col] = out.loc[mask, legacy_family]
+
+    for col in BASELINE_MASTER_FIELDS:
+        if col not in out.columns:
+            out[col] = pd.NA
+
+    return out, brand_col, model_col
+
+
+def _master_key_index(
+    df: Any,
+    brand_col: str,
+    model_col: str,
+) -> Dict[str, int]:
+    """Índice deduplicado. BI_OK vence Manual; Manual vence linha automática."""
+    out: Dict[str, int] = {}
+    status_col = find_col(df, ["Status"], required=False)
+    rbi_col = find_col(df, ["Revisão B.I", "Revisao B.I"], required=False)
+
+    def rank(row: Any) -> int:
+        if rbi_col and _is_bi_ok_value(row.get(rbi_col)):
+            return 3
+        if status_col and _is_manual_status(row.get(status_col)):
+            return 2
+        if _baseline_row_accepted(row, df):
+            return 1
+        return 0
+
+    for idx, row in df.iterrows():
+        brand, model = safe(row.get(brand_col)), safe(row.get(model_col))
+        if not brand or not model:
+            continue
+        key = business_key(brand, model)
+        if key not in out:
+            out[key] = int(idx)
+            continue
+        old_idx = out[key]
+        old_rank = rank(df.loc[old_idx])
+        new_rank = rank(row)
+        if new_rank >= old_rank:
+            out[key] = int(idx)
+    return out
+
+def _copy_business_values(
+    src_row: Any,
+    src_df: Any,
+    dst_df: Any,
+    dst_idx: int,
+) -> None:
+    aliases = {
+        "O que é (Tipo)": ["O que é (Tipo)", "Tipo", "Product Type"],
+        "Alimentação": ["Alimentação"],
+        "Category General": ["Category General"],
+        "FAMILY": ["FAMILY", "Family"],
+        "Título Real": ["Título Real"],
+        "Fonte URL": ["Fonte URL"],
+        "Status": ["Status"],
+        "Status Processamento": ["Status Processamento"],
+        "Revisão": ["Revisão", "Revisao"],
+        # Revisão B.I é exclusivamente humana e nunca passa pela cópia automática.
+        "Resolution State": ["Resolution State"],
+        "Review Required": ["Review Required"],
+        "Reason Code": ["Reason Code"],
+        "Motivo": ["Motivo"],
+        "Stage": ["Stage"],
+        "Rules Version": ["Rules Version"],
+        "Rules Hash": ["Rules Hash"],
+        "Pipeline Version": ["Pipeline Version"],
+        "Processed At": ["Processed At"],
+        "LLM Provider": ["LLM Provider"],
+        "LLM Model": ["LLM Model"],
+    }
+
+    for dst_col, names in aliases.items():
+        if dst_col not in dst_df.columns:
+            continue
+        src_col = find_col(src_df, names, required=False)
+        if src_col and safe(src_row.get(src_col)):
+            dst_df.at[dst_idx, dst_col] = src_row.get(src_col)
+
+
+def _copy_bi_locked_row_exact(
+    src_row: Any,
+    src_df: Any,
+    dst_df: Any,
+    dst_idx: int,
+) -> None:
+    """Copia a linha aprovada pelo B.I sem preencher vazios nem recalcular campos."""
+    aliases = {
+        "O que é (Tipo)": ["O que é (Tipo)", "Tipo", "Product Type"],
+        "Alimentação": ["Alimentação"],
+        "Category General": ["Category General"],
+        "FAMILY": ["FAMILY", "Family"],
+        "Título Real": ["Título Real"],
+        "Status": ["Status"],
+        "Revisão": ["Revisão", "Revisao"],
+        "Revisão B.I": ["Revisão B.I", "Revisao B.I"],
+    }
+    for dst_col, names in aliases.items():
+        if dst_col not in dst_df.columns:
+            continue
+        src_col = find_col(src_df, names, required=False)
+        if src_col:
+            dst_df.at[dst_idx, dst_col] = src_row.get(src_col)
+
+
+def _load_bi_lock_snapshot(final_path: Optional[Path]) -> Dict[str, Dict[str, str]]:
+    """Snapshot textual de todas as 10 colunas da Base Final com Revisão B.I=OK."""
+    if not final_path or not final_path.exists():
+        return {}
+    try:
+        df, _ = _read_business_sheet(final_path)
+    except Exception as exc:
+        LOG.warning("Snapshot HARD LOCK não pôde ser lido: %s", exc)
+        return {}
+    b = find_col(df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    m = find_col(df, ["Modelo", "Model", "SKU", "Part Number"])
+    rbi = find_col(df, ["Revisão B.I", "Revisao B.I"], required=False)
+    if not rbi:
+        return {}
+    aliases = {
+        "O que é (Tipo)": ["O que é (Tipo)", "Tipo", "Product Type"],
+        "Alimentação": ["Alimentação"],
+        "Category General": ["Category General"],
+        "FAMILY": ["FAMILY", "Family"],
+        "Título Real": ["Título Real"],
+        "Status": ["Status"],
+        "Revisão": ["Revisão", "Revisao"],
+        "Revisão B.I": ["Revisão B.I", "Revisao B.I"],
+    }
+    out: Dict[str, Dict[str, str]] = {}
+    for _, row in df.iterrows():
+        if not _is_bi_ok_value(row.get(rbi)):
+            continue
+        brand, model = safe(row.get(b)), safe(row.get(m))
+        if not brand or not model:
+            continue
+        snap = {"Marca": brand, "Modelo": model}
+        for dst, names in aliases.items():
+            col = find_col(df, names, required=False)
+            snap[dst] = safe(row.get(col)) if col else ""
+        out[business_key(brand, model)] = snap
+    return out
+
+
+def _assert_bi_lock_snapshot(df: Any, snapshot: Dict[str, Dict[str, str]], label: str) -> None:
+    """Anti-regressão física: aborta a gravação se qualquer campo aprovado mudou."""
+    if not snapshot:
+        return
+    b = find_col(df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    m = find_col(df, ["Modelo", "Model", "SKU", "Part Number"])
+    aliases = {
+        "O que é (Tipo)": ["O que é (Tipo)", "Tipo", "Product Type"],
+        "Alimentação": ["Alimentação"],
+        "Category General": ["Category General"],
+        "FAMILY": ["FAMILY", "Family"],
+        "Título Real": ["Título Real"],
+        "Status": ["Status"],
+        "Revisão": ["Revisão", "Revisao"],
+        "Revisão B.I": ["Revisão B.I", "Revisao B.I"],
+    }
+    by_key = {}
+    for _, row in df.iterrows():
+        brand, model = safe(row.get(b)), safe(row.get(m))
+        if brand and model:
+            by_key[business_key(brand, model)] = row
+    errors = []
+    for key, expected in snapshot.items():
+        row = by_key.get(key)
+        if row is None:
+            errors.append(f"{key}: linha desapareceu")
+            continue
+        for field, names in aliases.items():
+            col = find_col(df, names, required=False)
+            actual = safe(row.get(col)) if col else ""
+            if actual != expected.get(field, ""):
+                errors.append(f"{key}:{field} '{expected.get(field, '')}' -> '{actual}'")
+        if len(errors) >= 20:
+            break
+    if errors:
+        raise RuntimeError(
+            "BI_OK_HARD_LOCK_VIOLATION em " + label + ": " + " | ".join(errors)
+        )
+
+
+def _load_review_bi_snapshot(
+    final_path: Optional[Path],
+) -> Tuple[Dict[str, Any], bool]:
+    """Captura Revisão B.I exatamente como está na Base Final, inclusive vazios."""
+    if not final_path or not final_path.exists():
+        return {}, False
+    try:
+        df, _ = _read_business_sheet(final_path)
+    except Exception as exc:
+        LOG.warning("Snapshot Revisão B.I não pôde ser lido: %s", exc)
+        return {}, False
+    b = find_col(df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    m = find_col(df, ["Modelo", "Model", "SKU", "Part Number"])
+    rb = find_col(df, ["Revisão B.I", "Revisao B.I"], required=False)
+    snapshot: Dict[str, Any] = {}
+    for _, row in df.iterrows():
+        brand, model = safe(row.get(b)), safe(row.get(m))
+        if not brand or not model:
+            continue
+        snapshot[business_key(brand, model)] = row.get(rb) if rb else None
+    return snapshot, True
+
+
+def _apply_review_bi_snapshot(
+    df: Any,
+    brand_col: str,
+    model_col: str,
+    snapshot: Dict[str, Any],
+    source_exists: bool,
+) -> Any:
+    """Base Final é a fonte de verdade humana de Revisão B.I."""
+    import pandas as pd
+    if "Revisão B.I" not in df.columns:
+        df["Revisão B.I"] = pd.NA
+    if not source_exists:
+        return df
+    # Limpa inclusive valores antigos do Consolidado e reaplica exatamente o snapshot da Base Final.
+    df["Revisão B.I"] = pd.NA
+    for idx, row in df.iterrows():
+        brand, model = safe(row.get(brand_col)), safe(row.get(model_col))
+        if not brand or not model:
+            continue
+        key = business_key(brand, model)
+        if key in snapshot:
+            df.at[idx, "Revisão B.I"] = snapshot[key]
+    return df
+
+
+def _sanitize_legacy_unresolved_taxonomy(df: Any) -> Tuple[Any, int]:
+    """Limpa taxonomia residual de Script não resolvido; HARD LOCK fica intocado."""
+    import pandas as pd
+    out = df.copy()
+    status_col = find_col(out, ["Status"], required=False)
+    rbi_col = find_col(out, ["Revisão B.I", "Revisao B.I"], required=False)
+    type_col = find_col(out, ["O que é (Tipo)", "Tipo", "Product Type"], required=False)
+    cg_col = find_col(out, ["Category General"], required=False)
+    fam_col = find_col(out, ["FAMILY", "Family"], required=False)
+    if not cg_col or not fam_col:
+        return out, 0
+    cleaned = 0
+    for idx, row in out.iterrows():
+        if rbi_col and _is_bi_ok_value(row.get(rbi_col)):
+            continue
+        if status_col and _is_manual_status(row.get(status_col)):
+            continue
+        typ = safe(row.get(type_col)).upper() if type_col else ""
+        cg = safe(row.get(cg_col)).upper()
+        fam = safe(row.get(fam_col)).upper()
+        if (cg, fam) != ("OTHERS", "OTHERS") and typ not in {"REVISAR", "UNKNOWN"}:
+            continue
+        if _baseline_row_accepted(row, out):
+            continue
+        if safe(row.get(cg_col)) or safe(row.get(fam_col)):
+            out.at[idx, cg_col] = pd.NA
+            out.at[idx, fam_col] = pd.NA
+            cleaned += 1
+    return out, cleaned
+
+def _backup_baseline_files(
+    master_path: Optional[Path],
+    final_path: Optional[Path],
+    backup_root: Path,
+) -> Optional[Path]:
+    """Cria backup antes de qualquer regravação dos Excel."""
+    from datetime import datetime
+    import shutil
+    existing=[p for p in (master_path,final_path) if p and p.exists()]
+    if not existing:
+        return None
+    folder=backup_root/datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    folder.mkdir(parents=True,exist_ok=False)
+    for p in existing:
+        shutil.copy2(p,folder/p.name)
+    (folder/'manifest.json').write_text(json.dumps({
+        'created_at': datetime.now().isoformat(timespec='seconds'),
+        'files':[str(p.resolve()) for p in existing],
+        'reason':'automatic_before_baseline_write',
+    },ensure_ascii=False,indent=2),encoding='utf-8')
+    return folder
+
+
+def _audit_baseline_conflicts(
+    final_path: Optional[Path],
+    report_path: Path,
+) -> Dict[str, int]:
+    """Gera CSV de conflitos objetivos sem modificar Excel e sem usar LLM."""
+    import csv
+    stats={'audit_rows':0,'review_bi_conflict':0,'others_others':0}
+    if not final_path or not final_path.exists():
+        return stats
+    try:
+        df,_=_read_business_sheet(final_path)
+    except Exception as exc:
+        LOG.warning("Auditoria baseline não pôde ler Base Final: %s",exc)
+        return stats
+    b=find_col(df,["Marca","Fabricante","Brand","Manufacturer"])
+    m=find_col(df,["Modelo","Model","SKU","Part Number"])
+    typc=find_col(df,["O que é (Tipo)","Tipo","Product Type"],required=False)
+    pc=find_col(df,["Alimentação"],required=False)
+    cgc=find_col(df,["Category General"],required=False)
+    fc=find_col(df,["FAMILY","Family"],required=False)
+    revc=find_col(df,["Revisão","Revisao"],required=False)
+    rbic=find_col(df,["Revisão B.I","Revisao B.I"],required=False)
+    statusc=find_col(df,["Status"],required=False)
+    findings=[]
+    for _,row in df.iterrows():
+        brand,model=safe(row.get(b)),safe(row.get(m))
+        if not brand or not model:
+            continue
+        typ=safe(row.get(typc)) if typc else ''
+        power=safe(row.get(pc)) if pc else ''
+        cg=safe(row.get(cgc)) if cgc else ''
+        fam=safe(row.get(fc)) if fc else ''
+        rev=safe(row.get(revc)).upper() if revc else ''
+        rbi=safe(row.get(rbic)) if rbic else ''
+        status=safe(row.get(statusc)) if statusc else ''
+        issues=[]
+        bi_ok = _is_bi_ok_value(rbi)
+        # Revisão B.I=OK é autoridade humana final. Estados técnicos antigos
+        # (REVISAR/OTHERS|OTHERS) não são tratados como conflito nem saneados.
+        if (not bi_ok) and cg.upper()=='OTHERS' and fam.upper()=='OTHERS':
+            issues.append('OTHERS_OTHERS_LEGACY'); stats['others_others'] += 1
+        if rbi and (not bi_ok) and rev in _REVIEW_REJECT_STATES:
+            issues.append('REVISAO_BI_CONFLITA_COM_REVIEW_ATUAL'); stats['review_bi_conflict'] += 1
+        if issues:
+            findings.append([brand,model,typ,power,cg,fam,status,rev,rbi,' | '.join(issues)])
+    stats['audit_rows']=len(findings)
+    if findings:
+        report_path.parent.mkdir(parents=True,exist_ok=True)
+        with report_path.open('w',encoding='utf-8-sig',newline='') as fh:
+            w=csv.writer(fh,delimiter=';')
+            w.writerow(['Marca','Modelo','O que é (Tipo)','Alimentação','Category General','FAMILY','Status','Revisão','Revisão B.I','Diagnóstico'])
+            w.writerows(findings)
+    return stats
+
+
+def _sync_final_into_master(
+    master_df: Any,
+    final_path: Optional[Path],
+    brand_col: str,
+    model_col: str,
+) -> Tuple[Any, Dict[str, int]]:
+    """Base Final é autoridade humana; BI_OK é copiado exatamente e congelado."""
+    import pandas as pd
+
+    stats = {
+        "final_manual_promoted": 0,
+        "final_bi_lock_promoted": 0,
+        "final_baseline_preserved": 0,
+        "final_rows_imported": 0,
+    }
+    if not final_path or not final_path.exists():
+        return master_df, stats
+
+    try:
+        final_df, _ = _read_business_sheet(final_path)
+    except Exception as exc:
+        LOG.warning("Base Final não pôde ser sincronizada: %s", exc)
+        return master_df, stats
+
+    fb = find_col(final_df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    fm = find_col(final_df, ["Modelo", "Model", "SKU", "Part Number"])
+    fs = find_col(final_df, ["Status"], required=False)
+    frbi = find_col(final_df, ["Revisão B.I", "Revisao B.I"], required=False)
+    ms = find_col(master_df, ["Status"], required=False)
+    key_index = _master_key_index(master_df, brand_col, model_col)
+
+    for _, src in final_df.iterrows():
+        brand, model = safe(src.get(fb)), safe(src.get(fm))
+        if not brand or not model:
+            continue
+        key = business_key(brand, model)
+        src_bi_ok = bool(frbi and _is_bi_ok_value(src.get(frbi)))
+        src_manual = bool(fs and _is_manual_status(src.get(fs)))
+        src_accepted = _baseline_row_accepted(src, final_df)
+
+        if key in key_index:
+            idx = key_index[key]
+
+            # BI_OK é absoluto: a Base Final vence o Consolidado inclusive nos vazios.
+            if src_bi_ok:
+                _copy_bi_locked_row_exact(src, final_df, master_df, idx)
+                stats["final_bi_lock_promoted"] += 1
+                continue
+
+            if frbi:
+                master_df.at[idx, "Revisão B.I"] = src.get(frbi)
+
+            master_manual = bool(ms and _is_manual_status(master_df.at[idx, ms]))
+            if master_manual:
+                continue
+
+            if src_manual or src_accepted:
+                _copy_business_values(src, final_df, master_df, idx)
+                if src_manual:
+                    master_df.at[idx, "Status"] = "Manual"
+                    stats["final_manual_promoted"] += 1
+                else:
+                    stats["final_baseline_preserved"] += 1
+            continue
+
+        row = {col: pd.NA for col in master_df.columns}
+        row[brand_col] = brand
+        row[model_col] = model
+        idx = len(master_df)
+        master_df.loc[idx] = row
+        key_index[key] = idx
+        if src_bi_ok:
+            _copy_bi_locked_row_exact(src, final_df, master_df, idx)
+            stats["final_bi_lock_promoted"] += 1
+        else:
+            _copy_business_values(src, final_df, master_df, idx)
+            if frbi:
+                master_df.at[idx, "Revisão B.I"] = src.get(frbi)
+        stats["final_rows_imported"] += 1
+
+    return master_df, stats
+
+def _record_is_accepted(rec: Dict[str, Any]) -> bool:
+    if safe(rec.get("Resolution State")).upper() != "RESOLVED":
+        return False
+    if safe(rec.get("Review Required")).upper() == "SIM":
+        return False
+    typ = safe(rec.get("O que é (Tipo)")).upper()
+    cg = safe(rec.get("Category General")).upper()
+    fam = safe(rec.get("FAMILY")).upper()
+    if not typ or typ in {"REVISAR", "UNKNOWN"}:
+        return False
+    if not cg or not fam or (cg, fam) == ("OTHERS", "OTHERS"):
+        return False
+    return True
+
+
+def _record_process_state(rec: Dict[str, Any]) -> Tuple[str, str]:
+    if _record_is_accepted(rec):
+        return "PROCESSADO", "AUTO_APROVADO"
+
+    resolution = safe(rec.get("Resolution State")).upper()
+    if resolution in {
+        "PENDING_COLLECTION",
+        "PENDING_RECOLLECTION",
+        "CACHE_ERROR",
+        "CACHE_COLLISION",
+    }:
+        return resolution, "PENDENTE_COLETA"
+
+    return "REVISAR", "REVISAR"
+
+
+def _upsert_run_rows_into_master(
+    master_df: Any,
+    rows: List[Dict[str, Any]],
+    brand_col: str,
+    model_col: str,
+    rules: Rules,
+    reprocess: bool,
+    force_reprocess_keys: Optional[set] = None,
+) -> Tuple[Any, Dict[str, int]]:
+    import pandas as pd
+
+    stats = {
+        "baseline_promoted": 0,
+        "review_recorded": 0,
+        "manual_lock_preserved": 0,
+        "bi_ok_lock_preserved": 0,
+        "baseline_downgrade_blocked": 0,
+    }
+
+    force_reprocess_keys = set(force_reprocess_keys or set())
+    key_index = _master_key_index(master_df, brand_col, model_col)
+    status_col = find_col(master_df, ["Status"], required=False)
+    rbi_col = find_col(master_df, ["Revisão B.I", "Revisao B.I"], required=False)
+
+    for rec in rows:
+        brand, model = safe(rec.get("Marca")), safe(rec.get("Modelo"))
+        if not brand or not model:
+            continue
+        key = business_key(brand, model)
+
+        if key in key_index:
+            idx = key_index[key]
+            # Regra R6: --reprocess NUNCA vence aprovação humana B.I.
+            if rbi_col and _is_bi_ok_value(master_df.at[idx, rbi_col]):
+                stats["bi_ok_lock_preserved"] += 1
+                continue
+            if status_col and _is_manual_status(master_df.at[idx, status_col]):
+                stats["manual_lock_preserved"] += 1
+                continue
+
+            existing_accepted = _baseline_row_accepted(master_df.loc[idx], master_df)
+            new_accepted = _record_is_accepted(rec)
+            if existing_accepted and not new_accepted and key not in force_reprocess_keys:
+                stats["baseline_downgrade_blocked"] += 1
+                continue
+        else:
+            row = {col: pd.NA for col in master_df.columns}
+            row[brand_col] = brand
+            row[model_col] = model
+            idx = len(master_df)
+            master_df.loc[idx] = row
+            key_index[key] = idx
+
+        proc_state, review_state = _record_process_state(rec)
+
+        for col, value in rec.items():
+            if col in {"Marca", "Modelo", "Revisão B.I", "Revisao B.I"}:
+                continue
+            if col not in master_df.columns:
+                master_df[col] = pd.NA
+            if isinstance(value, (dict, list, tuple)):
+                value = json.dumps(value, ensure_ascii=False, default=str)
+            master_df.at[idx, col] = value
+
+        master_df.at[idx, "Status"] = master_df.at[idx, "Status"] if safe(master_df.at[idx, "Status"]) else "Script"
+        master_df.at[idx, "Status Processamento"] = proc_state
+        master_df.at[idx, "Revisão"] = review_state
+        # Nunca escreve Revisão B.I. Novo/reprocessado permanece vazio até o double check.
+        master_df.at[idx, "Rules Version"] = rules.version
+        master_df.at[idx, "Rules Hash"] = rules.hash
+        master_df.at[idx, "Pipeline Version"] = PIPELINE_VERSION
+
+        if _record_is_accepted(rec):
+            stats["baseline_promoted"] += 1
+        else:
+            stats["review_recorded"] += 1
+
+    return master_df, stats
+
+def _derive_final_review(row: Any, df: Any) -> Any:
+    # HARD LOCK: não recalcula nem normaliza Revisão de uma linha B.I=OK.
+    review_col = find_col(df, ["Revisão", "Revisao"], required=False)
+    if _row_bi_locked(row, df):
+        return row.get(review_col) if review_col else ""
+
+    status_col = find_col(df, ["Status"], required=False)
+    if status_col and _is_manual_status(row.get(status_col)):
+        return "VALIDADO_MANUAL"
+    if _baseline_row_accepted(row, df):
+        value = safe(row.get(review_col)).upper() if review_col else ""
+        return value if value in {"AUTO_APROVADO", "PROVÁVEL", "PROVAVEL"} else "AUTO_APROVADO"
+
+    resolution_col = find_col(df, ["Resolution State"], required=False)
+    resolution = safe(row.get(resolution_col)).upper() if resolution_col else ""
+    if resolution in {"PENDING_COLLECTION", "PENDING_RECOLLECTION", "CACHE_ERROR", "CACHE_COLLISION"}:
+        return "PENDENTE_COLETA"
+
+    # Linha conhecida, mas ainda nunca enriquecida: fica PENDENTE, não REVISAR.
+    type_col = find_col(df, ["O que é (Tipo)", "Tipo", "Product Type"], required=False)
+    cg_col = find_col(df, ["Category General"], required=False)
+    fam_col = find_col(df, ["FAMILY", "Family"], required=False)
+    title_col = find_col(df, ["Título Real"], required=False)
+    proc_col = find_col(df, ["Status Processamento"], required=False)
+    has_any_business = any(
+        safe(row.get(c)) for c in [type_col, cg_col, fam_col, title_col] if c
+    )
+    has_processing = bool(proc_col and safe(row.get(proc_col)))
+    if not has_any_business and not has_processing:
+        return "PENDENTE"
+    return "REVISAR"
+
+def _atomic_write_dataframe(df: Any, path: Path, sheet_name: str) -> None:
+    import pandas as pd
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.stem + f".tmp_{os.getpid()}" + path.suffix)
+    try:
+        with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name=sheet_name[:31] or "Consolidado", index=False)
+        os.replace(tmp, path)
+    except PermissionError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise PermissionError(
+            f"Feche '{path.name}' no Excel e rode novamente; "
+            "o arquivo não foi substituído."
+        ) from exc
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def _export_base_final(
+    master_df: Any,
+    final_path: Path,
+    review_bi_snapshot: Optional[Dict[str, Any]] = None,
+    review_bi_source_exists: bool = False,
+    bi_lock_snapshot: Optional[Dict[str, Dict[str, str]]] = None,
+) -> int:
+    """Reconstrói Base Final preservando BI_OK byte-semanticamente nos campos humanos."""
+    import pandas as pd
+
+    work, brand_col, model_col = _ensure_master_columns(master_df)
+    valid = work[brand_col].map(lambda x: bool(safe(x))) & work[model_col].map(lambda x: bool(safe(x)))
+    work = work.loc[valid].copy()
+    work["__key"] = [business_key(safe(b), safe(m)) for b, m in zip(work[brand_col], work[model_col])]
+
+    status_col = find_col(work, ["Status"], required=False)
+    rbi_col = find_col(work, ["Revisão B.I", "Revisao B.I"], required=False)
+    work["__bi_lock_rank"] = (
+        work[rbi_col].map(lambda x: 1 if _is_bi_ok_value(x) else 0) if rbi_col else 0
+    )
+    work["__manual_rank"] = (
+        work[status_col].map(lambda x: 1 if _is_manual_status(x) else 0) if status_col else 0
+    )
+    work["__accepted_rank"] = work.apply(lambda row: 1 if _baseline_row_accepted(row, work) else 0, axis=1)
+    work["__row_rank"] = range(len(work))
+    work = work.sort_values(
+        ["__key", "__bi_lock_rank", "__manual_rank", "__accepted_rank", "__row_rank"]
+    ).drop_duplicates("__key", keep="last")
+
+    out = pd.DataFrame(index=work.index)
+    out["Marca"] = work[brand_col]
+    out["Modelo"] = work[model_col]
+    for col in ["O que é (Tipo)", "Alimentação", "Category General", "FAMILY", "Título Real"]:
+        src = find_col(work, [col, "Family"] if col == "FAMILY" else [col], required=False)
+        out[col] = work[src] if src else pd.NA
+
+    if review_bi_source_exists:
+        review_bi_snapshot = review_bi_snapshot or {}
+        out["Revisão B.I"] = [review_bi_snapshot.get(key, pd.NA) for key in work["__key"]]
+    else:
+        src_rbi = find_col(work, ["Revisão B.I", "Revisao B.I"], required=False)
+        out["Revisão B.I"] = work[src_rbi] if src_rbi else pd.NA
+
+    def final_status(row: Any) -> Any:
+        if _row_bi_locked(row, work):
+            return row.get(status_col) if status_col else ""
+        if status_col and _is_manual_status(row.get(status_col)):
+            return "Manual"
+        return "Script"
+
+    out["Status"] = work.apply(final_status, axis=1)
+    out["Revisão"] = work.apply(lambda row: _derive_final_review(row, work), axis=1)
+    out = out[BASELINE_FINAL_COLUMNS].reset_index(drop=True)
+
+    _assert_bi_lock_snapshot(out, bi_lock_snapshot or {}, "Base Final gerada")
+
+    tmp = final_path.with_name(final_path.stem + f".tmp_{os.getpid()}" + final_path.suffix)
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
+            out.to_excel(writer, sheet_name="Base Final", index=False)
+        os.replace(tmp, final_path)
+    except PermissionError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise PermissionError(
+            f"Feche '{final_path.name}' no Excel e rode novamente; a Base Final não foi substituída."
+        ) from exc
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    return len(out)
+
+def persist_baseline_excels(
+    rows: List[Dict[str, Any]],
+    master_path: Optional[Path],
+    final_path: Optional[Path],
+    input_path: Optional[Path],
+    rules: Rules,
+    reprocess: bool = False,
+    force_reprocess_keys: Optional[set] = None,
+) -> Dict[str, int]:
+    """Grava Consolidado -> Base Final sem jamais alterar linhas Revisão B.I=OK."""
+    import pandas as pd
+
+    if not master_path and not final_path:
+        return {}
+
+    review_bi_snapshot, review_bi_source_exists = _load_review_bi_snapshot(final_path)
+    bi_lock_snapshot = _load_bi_lock_snapshot(final_path)
+
+    source_path: Optional[Path] = None
+    master_sheet = "Consolidado"
+    if master_path and master_path.exists():
+        source_path = master_path
+    elif input_path and input_path.exists():
+        source_path = input_path
+    elif final_path and final_path.exists():
+        source_path = final_path
+
+    if source_path:
+        master_df, master_sheet = _read_business_sheet(source_path)
+    else:
+        master_df = pd.DataFrame(columns=["Marca", "Modelo"])
+
+    master_df, brand_col, model_col = _ensure_master_columns(master_df)
+    master_df, sync_stats = _sync_final_into_master(master_df, final_path, brand_col, model_col)
+    master_df, brand_col, model_col = _ensure_master_columns(master_df)
+    master_df, merge_stats = _upsert_run_rows_into_master(
+        master_df, rows, brand_col, model_col, rules, reprocess, force_reprocess_keys
+    )
+
+    master_df = _apply_review_bi_snapshot(
+        master_df, brand_col, model_col, review_bi_snapshot, review_bi_source_exists
+    )
+    master_df, legacy_taxonomy_cleaned = _sanitize_legacy_unresolved_taxonomy(master_df)
+
+    # Antes de tocar nos arquivos, prova que o HARD LOCK continua idêntico.
+    _assert_bi_lock_snapshot(master_df, bi_lock_snapshot, "Consolidado em memória")
+
+    stats = {
+        **sync_stats,
+        **merge_stats,
+        "legacy_taxonomy_cleaned": legacy_taxonomy_cleaned,
+        "review_bi_snapshot_rows": len(review_bi_snapshot),
+        "bi_ok_hard_lock_rows": len(bi_lock_snapshot),
+    }
+
+    if master_path:
+        _atomic_write_dataframe(
+            master_df, master_path, master_sheet if source_path == master_path else "Consolidado"
+        )
+        stats["master_rows"] = len(master_df)
+
+    if final_path:
+        stats["final_rows"] = _export_base_final(
+            master_df, final_path, review_bi_snapshot, review_bi_source_exists, bi_lock_snapshot
+        )
+
+    inv_after = load_baseline_inventory(master_path, final_path)
+    stats["master_accepted_total"] = len(inv_after["master_accepted"])
+    stats["final_accepted_total"] = len(inv_after["final_accepted"])
+    stats["baseline_union_total"] = len(inv_after["processed"])
+    stats["bi_ok_hard_lock_total"] = len(inv_after["bi_locked"])
+    stats["baseline_missing_in_final"] = len(inv_after["processed"] - inv_after["final_accepted"])
+    return stats
+
+def reconcile_baseline_before_run(
+    master_path: Optional[Path],
+    final_path: Optional[Path],
+    input_path: Optional[Path],
+    rules: Rules,
+) -> Dict[str, int]:
+    """Garante que todo item usado como SKIP exista fisicamente na Base Final."""
+    before = load_baseline_inventory(master_path, final_path)
+    missing_before = before["processed"] - before["final_accepted"]
+
+    stats = {
+        "pre_master_accepted": len(before["master_accepted"]),
+        "pre_final_accepted": len(before["final_accepted"]),
+        "pre_union_accepted": len(before["processed"]),
+        "pre_missing_in_final": len(missing_before),
+        "pre_reconciled": 0,
+    }
+
+    if not missing_before:
+        return stats
+
+    sync_stats = persist_baseline_excels(
+        rows=[],
+        master_path=master_path,
+        final_path=final_path,
+        input_path=input_path,
+        rules=rules,
+        reprocess=False,
+    )
+
+    after = load_baseline_inventory(master_path, final_path)
+    missing_after = after["processed"] - after["final_accepted"]
+
+    stats.update({
+        "pre_reconciled": 1,
+        "post_master_accepted": len(after["master_accepted"]),
+        "post_final_accepted": len(after["final_accepted"]),
+        "post_union_accepted": len(after["processed"]),
+        "post_missing_in_final": len(missing_after),
+        "pre_sync_final_rows": int(sync_stats.get("final_rows", 0) or 0),
+    })
+
+    if missing_after:
+        raise RuntimeError(
+            "BASELINE_RECONCILIATION_FAILED: "
+            f"{len(missing_after)} item(ns) seriam pulados pelo pipeline, "
+            "mas ainda não constam como aceitos na Base Final. "
+            "Classificação não iniciada para evitar gastar LLM com baseline inconsistente."
+        )
+
+    return stats
+
+
+def export_excel(rows: List[Dict[str, Any]], out_path: Path, summary: Dict[str, Any]) -> None:
+    import pandas as pd
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(rows)
+    rev = df[df.get("Review Required", pd.Series(dtype=str)).astype(str).str.upper().eq("SIM")].copy() if not df.empty else pd.DataFrame()
+    summ = pd.DataFrame([{"Métrica": k, "Valor": v} for k, v in summary.items()])
+    tmp = out_path.with_name(out_path.stem + f".tmp_{os.getpid()}" + out_path.suffix)
+    with pd.ExcelWriter(tmp, engine="openpyxl") as w:
+        summ.to_excel(w, sheet_name="Resumo", index=False)
+        df.to_excel(w, sheet_name="Resultados", index=False)
+        rev.to_excel(w, sheet_name="Revisar", index=False)
+    os.replace(tmp, out_path)
+
+
+# -----------------------------------------------------------------------------
+# Operação
+# -----------------------------------------------------------------------------
+def build_pilot_cohort(
+    catalog: Sequence[Tuple[str, str, str]],
+    processed: set,
+    manual: set,
+    hard_lock: Optional[set] = None,
+    max_items: int = 0,
+    reprocess: bool = False,
+) -> Tuple[List[Tuple[str, str, str]], List[Tuple[str, str, str]], Dict[str, int], str]:
+    """Define cohort e garante que HARD LOCK nunca vira target, nem com --reprocess."""
+    cohort = list(catalog)
+    if max_items:
+        cohort = cohort[:max_items]
+    hard_lock = set(hard_lock or manual)
+
+    stats = {
+        "cohort_size": len(cohort),
+        "cohort_already_classified": 0,
+        "cohort_manual_lock": 0,
+        "cohort_bi_ok_lock": 0,
+        "cohort_pending": 0,
+    }
+    targets: List[Tuple[str, str, str]] = []
+    for brand, model, key in cohort:
+        if key in hard_lock:
+            if key in manual:
+                stats["cohort_manual_lock"] += 1
+            else:
+                stats["cohort_bi_ok_lock"] += 1
+            continue
+        if not reprocess and key in processed:
+            stats["cohort_already_classified"] += 1
+            continue
+        targets.append((brand, model, key))
+
+    stats["cohort_pending"] = len(targets)
+    cohort_material = "\n".join(x[2] for x in cohort)
+    cohort_hash = hashlib.sha256(cohort_material.encode("utf-8")).hexdigest()[:12]
+    return cohort, targets, stats, cohort_hash
+
+def inventory(
+    store: TavilyReadOnlyStore,
+    processed: set,
+    manual: set,
+    bi_locked: Optional[set] = None,
+    output: Optional[Path] = None,
+) -> Dict[str, Any]:
+    bi_locked = set(bi_locked or set())
+    counts = defaultdict(int)
+    rows = []
+    for brand, model, key in store.catalog():
+        raw = store.get(brand, model)
+        counts[raw.state] += 1
+        if key in bi_locked:
+            state = "BI_OK_HARD_LOCK"
+        elif key in manual:
+            state = "MANUAL_LOCK"
+        elif key in processed:
+            state = "ALREADY_CLASSIFIED"
+        else:
+            state = "PENDING_CLASSIFICATION"
+        counts[state] += 1
+        rows.append({"Marca": brand, "Modelo": model, "Raw State": raw.state, "Classification State": state, "Reason": raw.reason})
+    counts["CACHE_PRODUCTS"] = len(rows)
+    counts["MERGED_KEY_VARIANTS"] = len(store.merged_variants)
+    if output:
+        import pandas as pd
+        with pd.ExcelWriter(output, engine="openpyxl") as w:
+            pd.DataFrame([{"Métrica": k, "Valor": v} for k, v in counts.items()]).to_excel(w, sheet_name="Resumo", index=False)
+            pd.DataFrame(rows).to_excel(w, sheet_name="Catalogo", index=False)
+    return dict(counts)
+
+def _load_master_rule_metadata(master_path: Optional[Path]) -> Dict[str, Dict[str, str]]:
+    """Lê metadados técnicos do Consolidado por Business Key.
+
+    A Base Final deliberadamente não expõe Rules Version/Hash. Por isso a
+    recuperação cruza a autoridade humana da Base Final com a proveniência
+    técnica registrada no Consolidado.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    if not master_path or not master_path.exists():
+        return out
+    try:
+        df, _ = _read_business_sheet(master_path)
+    except Exception as exc:
+        LOG.warning("Metadados de Rules não puderam ser lidos do Consolidado: %s", exc)
+        return out
+
+    b = find_col(df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    m = find_col(df, ["Modelo", "Model", "SKU", "Part Number"])
+    rv = find_col(df, ["Rules Version"], required=False)
+    rh = find_col(df, ["Rules Hash"], required=False)
+    pp = find_col(df, ["Pipeline Version"], required=False)
+
+    for _, row in df.iterrows():
+        brand, model = safe(row.get(b)), safe(row.get(m))
+        if not brand or not model:
+            continue
+        key = business_key(brand, model)
+        out[key] = {
+            "rules_version": safe(row.get(rv)) if rv else "",
+            "rules_hash": safe(row.get(rh)) if rh else "",
+            "pipeline_version": safe(row.get(pp)) if pp else "",
+        }
+    return out
+
+
+def _rule_metadata_is_current(meta: Dict[str, str], rules: Rules) -> bool:
+    """Hash é autoridade; versão é fallback somente quando o hash não existe."""
+    old_hash = safe(meta.get("rules_hash"))
+    if old_hash:
+        return old_hash == rules.hash
+    old_version = safe(meta.get("rules_version"))
+    if old_version:
+        return old_version == rules.version
+    return False
+
+
+def _cache_recovery_reason(
+    row: Any,
+    df: Any,
+    key: str,
+    master_meta: Dict[str, Dict[str, str]],
+    rules: Rules,
+) -> str:
+    """Retorna motivo de reprocessamento ou string vazia para preservar.
+
+    Regra R8:
+    - Revisão B.I=OK nunca entra.
+    - Manual nunca entra.
+    - AUTO_APROVADO sem OK entra novamente quando Rules Hash/Version do
+      Consolidado é antigo ou desconhecido.
+    - Demais linhas não aceitas continuam sendo pendência normal.
+    """
+    if _row_bi_locked(row, df):
+        return ""
+
+    status_col = find_col(df, ["Status"], required=False)
+    review_col = find_col(df, ["Revisão", "Revisao"], required=False)
+    if status_col and _is_manual_status(row.get(status_col)):
+        return ""
+    if review_col and safe(row.get(review_col)).upper() == "MANUAL":
+        return ""
+
+    accepted = _baseline_row_accepted(row, df)
+    review = safe(row.get(review_col)).upper() if review_col else ""
+
+    if accepted:
+        if review == "AUTO_APROVADO":
+            meta = master_meta.get(key, {})
+            if not _rule_metadata_is_current(meta, rules):
+                return "AUTO_APROVADO_REGRA_OBSOLETA"
+        return ""
+
+    return "PENDENCIA_ATUAL"
+
+
+def _row_needs_cache_recovery(
+    row: Any,
+    df: Any,
+    key: str,
+    master_meta: Dict[str, Dict[str, str]],
+    rules: Rules,
+) -> bool:
+    return bool(_cache_recovery_reason(row, df, key, master_meta, rules))
+
+
+def _export_recovery_report(rows: List[Dict[str, Any]], path: Path, sheet: str) -> None:
+    import pandas as pd
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.stem + f".tmp_{os.getpid()}" + path.suffix)
+    pd.DataFrame(rows).to_excel(tmp, sheet_name=sheet[:31], index=False)
+    os.replace(tmp, path)
+
+
+def build_cache_recovery_plan(
+    final_path: Optional[Path],
+    master_path: Optional[Path],
+    store: TavilyReadOnlyStore,
+    with_cache_path: Path,
+    without_cache_path: Path,
+    rules: Rules,
+    max_items: int = 0,
+) -> Tuple[List[Tuple[str, str, str]], Dict[str, int]]:
+    """Seleciona pendências + AUTO_APROVADO de regra antiga, sem Tavily."""
+    source = final_path if final_path and final_path.exists() else master_path
+    if not source or not source.exists():
+        raise FileNotFoundError("Cache Recovery exige Base Final ou Consolidado existente.")
+    df, _ = _read_business_sheet(source)
+    b = find_col(df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    m = find_col(df, ["Modelo", "Model", "SKU", "Part Number"])
+    fields = {
+        "O que é (Tipo)": find_col(df, ["O que é (Tipo)", "Tipo", "Product Type"], required=False),
+        "Alimentação": find_col(df, ["Alimentação"], required=False),
+        "Category General": find_col(df, ["Category General"], required=False),
+        "FAMILY": find_col(df, ["FAMILY", "Family"], required=False),
+        "Título Real": find_col(df, ["Título Real"], required=False),
+        "Status": find_col(df, ["Status"], required=False),
+        "Revisão": find_col(df, ["Revisão", "Revisao"], required=False),
+        "Revisão B.I": find_col(df, ["Revisão B.I", "Revisao B.I"], required=False),
+    }
+
+    master_meta = _load_master_rule_metadata(master_path)
+
+    with_cache: List[Dict[str, Any]] = []
+    without_cache: List[Dict[str, Any]] = []
+    target_all: List[Tuple[str, str, str]] = []
+    seen = set()
+    locked = good = stale_auto = stale_unknown_meta = 0
+
+    for _, row in df.iterrows():
+        brand, model = safe(row.get(b)), safe(row.get(m))
+        if not brand or not model:
+            continue
+        key = business_key(brand, model)
+        if key in seen:
+            continue
+        seen.add(key)
+        if _row_bi_locked(row, df):
+            locked += 1
+            continue
+
+        recovery_reason = _cache_recovery_reason(
+            row, df, key, master_meta, rules
+        )
+        if not recovery_reason:
+            good += 1
+            continue
+        if recovery_reason == "AUTO_APROVADO_REGRA_OBSOLETA":
+            stale_auto += 1
+            meta = master_meta.get(key, {})
+            if not safe(meta.get("rules_hash")) and not safe(meta.get("rules_version")):
+                stale_unknown_meta += 1
+
+        raw = store.get(brand, model)
+        meta = master_meta.get(key, {})
+        rec: Dict[str, Any] = {
+            "Marca": brand,
+            "Modelo": model,
+            "Business Key": key,
+            **{name: (row.get(col) if col else "") for name, col in fields.items()},
+            "Estado Cache": raw.state,
+            "Motivo Cache": raw.reason,
+            "Motivo Recuperação": recovery_reason,
+            "Rules Version Anterior": safe(meta.get("rules_version")),
+            "Rules Hash Anterior": safe(meta.get("rules_hash")),
+            "Rules Version Atual": rules.version,
+            "Rules Hash Atual": rules.hash,
+        }
+        if raw.state in {"RAW_OK", "RAW_OK_MERGED"}:
+            rec["Ação"] = (
+                "REPROCESSAR_REGRA_OBSOLETA"
+                if recovery_reason == "AUTO_APROVADO_REGRA_OBSOLETA"
+                else "REPROCESSAR_CACHE"
+            )
+            with_cache.append(rec)
+            target_all.append((brand, model, key))
+        else:
+            rec["Ação"] = "PENDENTE_COLETA"
+            without_cache.append(rec)
+
+    _export_recovery_report(with_cache, with_cache_path, "Pendentes_Com_Cache")
+    _export_recovery_report(without_cache, without_cache_path, "Pendentes_Sem_Cache")
+
+    targets = target_all[:max_items] if max_items else target_all
+    stats = {
+        "linhas_unicas_analisadas": len(seen),
+        "bi_ok_hard_lock": locked,
+        "baseline_atual_ignorado": good,
+        "auto_aprovado_regra_obsoleta": stale_auto,
+        "auto_aprovado_sem_metadado_regra": stale_unknown_meta,
+        "pendentes_com_cache": len(with_cache),
+        "pendentes_sem_cache": len(without_cache),
+        "targets_desta_execucao": len(targets),
+        "tavily_calls": 0,
+    }
+    return targets, stats
+
+
+def run_cache_recovery(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
+    """Opção 4: reaproveita somente cache_tavily.sqlite; Tavily permanece desligada."""
+    cache_path = Path(args.cache or cfg["files"]["cache"])
+    master_path = Path(args.master or cfg["files"].get("master", "")) if (args.master or cfg["files"].get("master")) else None
+    final_path = Path(args.final or cfg["files"].get("final", "")) if (args.final or cfg["files"].get("final")) else None
+    with_path = Path(cfg.get("files", {}).get("pending_with_cache", "Pendentes_Com_Cache.xlsx"))
+    without_path = Path(cfg.get("files", {}).get("pending_without_cache", "Pendentes_Sem_Cache.xlsx"))
+
+    store = TavilyReadOnlyStore(cache_path)
+    try:
+        targets, plan_stats = build_cache_recovery_plan(
+            final_path, master_path, store, with_path, without_path, rules, args.max_items
+        )
+    finally:
+        store.close()
+
+    LOG.info("CACHE RECOVERY | %s", " | ".join(f"{k}={v}" for k, v in plan_stats.items()))
+    LOG.info("Relatórios: %s | %s", with_path, without_path)
+    if not targets:
+        LOG.info("Nenhuma pendência com RAW_OK para reprocessar.")
+        return
+
+    # O conjunto contém pendências e AUTO_APROVADO técnico obsoleto.
+    # O pipeline revalida HARD LOCK antes do primeiro item.
+    run_pipeline(args, cfg, rules, explicit_targets=targets)
+
+
+def run_pipeline(
+    args: argparse.Namespace,
+    cfg: Dict[str, Any],
+    rules: Rules,
+    explicit_targets: Optional[Sequence[Tuple[str, str, str]]] = None,
+) -> None:
+    cache_path = Path(args.cache or cfg["files"]["cache"])
+    master_path = Path(args.master or cfg["files"].get("master", "")) if (args.master or cfg["files"].get("master")) else None
+    final_path = Path(args.final or cfg["files"].get("final", "")) if (args.final or cfg["files"].get("final")) else None
+    input_path = Path(args.input or cfg["files"].get("input", "")) if (args.input or cfg["files"].get("input")) else None
+    db_path = Path(args.db or cfg["files"]["classification_db"])
+    output_path = Path(args.output or cfg["files"]["output"])
+    inventory_path = Path(args.inventory_output or cfg["files"]["inventory_output"])
+
+    baseline_pre_stats: Dict[str, int] = {}
+    if args.mode in {"classify", "full", "recover"}:
+        backup_root = Path(cfg.get("files", {}).get("baseline_backup_dir", "Backups_Baseline"))
+        backup_folder = _backup_baseline_files(master_path, final_path, backup_root)
+        if backup_folder:
+            LOG.info("BACKUP BASELINE OK | pasta=%s", backup_folder)
+
+        audit_path = Path(cfg.get("files", {}).get("baseline_audit", "Auditoria_Baseline_R5.csv"))
+        audit_stats = _audit_baseline_conflicts(final_path, audit_path)
+        if audit_stats.get("audit_rows", 0):
+            LOG.warning(
+                "AUDITORIA BASELINE | conflitos=%d | Revisão B.I x REVIEW=%d | "
+                "OTHERS|OTHERS=%d | arquivo=%s",
+                audit_stats["audit_rows"], audit_stats["review_bi_conflict"],
+                audit_stats["others_others"], audit_path,
+            )
+        else:
+            LOG.info("AUDITORIA BASELINE OK | sem conflitos objetivos")
+
+        baseline_pre_stats = reconcile_baseline_before_run(
+            master_path=master_path,
+            final_path=final_path,
+            input_path=input_path,
+            rules=rules,
+        )
+        LOG.info(
+            "BASELINE CHECK | Consolidado aceitos=%d | Base Final aceitos=%d | "
+            "união=%d | faltando na Base Final=%d | reconciliada=%s",
+            int(baseline_pre_stats.get(
+                "post_master_accepted",
+                baseline_pre_stats.get("pre_master_accepted", 0),
+            )),
+            int(baseline_pre_stats.get(
+                "post_final_accepted",
+                baseline_pre_stats.get("pre_final_accepted", 0),
+            )),
+            int(baseline_pre_stats.get(
+                "post_union_accepted",
+                baseline_pre_stats.get("pre_union_accepted", 0),
+            )),
+            int(baseline_pre_stats.get(
+                "post_missing_in_final",
+                baseline_pre_stats.get("pre_missing_in_final", 0),
+            )),
+            "SIM" if baseline_pre_stats.get("pre_reconciled") else "NÃO",
+        )
+
+    baseline_inventory = load_baseline_inventory(master_path, final_path)
+    # Em Cache Recovery, explicit_targets é um conjunto deliberadamente autorizado
+    # a substituir AUTO_APROVADO técnico antigo. HARD LOCK humano continua sendo
+    # revalidado separadamente e nunca é vencido por esta lista.
+    force_reprocess_keys = (
+        {x[2] for x in explicit_targets}
+        if explicit_targets is not None
+        else set()
+    )
+    processed = baseline_inventory["processed"]
+    manual = baseline_inventory["manual"]
+    bi_locked = baseline_inventory["bi_locked"]
+    hard_lock = baseline_inventory["hard_lock"]
+    store = TavilyReadOnlyStore(cache_path)
+
+    try:
+        if args.mode == "inventory":
+            counts = inventory(store, processed, manual, bi_locked, inventory_path)
+            LOG.info("INVENTÁRIO: %s", " | ".join(f"{k}={v}" for k, v in counts.items()))
+            LOG.info("Arquivo: %s", inventory_path)
+            return
+
+        groq_model = (
+            os.getenv("GROQ_MODEL", "").strip()
+            or safe(cfg.get("groq", {}).get("model"))
+            or DEFAULT_MODEL
+        )
+        nvidia_model = (
+            os.getenv("NVIDIA_MODEL", "").strip()
+            or safe(cfg.get("nvidia", {}).get("model"))
+            or "nvidia/nemotron-3.5-lightning-30b-a3b"
+        )
+        openrouter_model = (
+            os.getenv("OPENROUTER_MODEL", "").strip()
+            or safe(cfg.get("openrouter", {}).get("model"))
+            or "openai/gpt-oss-120b:free"
+        )
+
+        llm_identity = (
+            f"cascade:groq:{groq_model}->nvidia:{nvidia_model}"
+            f"->openrouter:{openrouter_model}"
+        )
+        db = ClassificationDB(db_path)
+        run_id = db.start_run(args.mode, rules.hash, llm_identity)
+        engine = DeterministicEngine(rules, cfg)
+
+        use_llm = not args.no_llm
+        llm: Optional[ProviderCascade] = None
+
+        rows: List[Dict[str, Any]] = []
+        stats = defaultdict(int)
+
+        if explicit_targets is None:
+            cohort, targets, cohort_stats, cohort_hash = build_pilot_cohort(
+                store.catalog(),
+                processed=processed,
+                manual=manual,
+                hard_lock=hard_lock,
+                max_items=args.max_items,
+                reprocess=args.reprocess,
+            )
+        else:
+            # Cache Recovery já montou pendências + auto-aprovados obsoletos. Revalida o HARD LOCK
+            # no instante imediatamente anterior à classificação.
+            cohort = list(explicit_targets)
+            targets = [x for x in cohort if x[2] not in hard_lock]
+            cohort_stats = {
+                "cohort_size": len(cohort),
+                "cohort_already_classified": 0,
+                "cohort_manual_lock": sum(1 for x in cohort if x[2] in manual),
+                "cohort_bi_ok_lock": sum(1 for x in cohort if x[2] in bi_locked),
+                "cohort_pending": len(targets),
+            }
+            material = "\n".join(x[2] for x in cohort)
+            cohort_hash = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
+        for k, v in cohort_stats.items():
+            stats[k] = v
+        # Mantém nomes históricos no resumo/log.
+        stats["already_classified"] = cohort_stats["cohort_already_classified"]
+        stats["manual_lock"] = cohort_stats["cohort_manual_lock"]
+        stats["bi_ok_lock"] = cohort_stats.get("cohort_bi_ok_lock", 0)
+
+        cohort_keys = {x[2] for x in cohort}
+        cohort_master_accepted = len(
+            cohort_keys & baseline_inventory["master_accepted"]
+        )
+        cohort_final_accepted = len(
+            cohort_keys & baseline_inventory["final_accepted"]
+        )
+        stats["cohort_master_accepted"] = cohort_master_accepted
+        stats["cohort_final_accepted_at_start"] = cohort_final_accepted
+
+        LOG.info(
+            "COHORT=%d | pendentes=%d | preservados=%d | "
+            "Consolidado=%d | Base Final=%d | Manual=%d | BI_OK=%d | cohort=%s",
+            len(cohort),
+            len(targets),
+            cohort_stats["cohort_already_classified"],
+            cohort_master_accepted,
+            cohort_final_accepted,
+            cohort_stats["cohort_manual_lock"],
+            cohort_stats.get("cohort_bi_ok_lock", 0),
+            cohort_hash,
+        )
+
+        if use_llm and targets:
+            try:
+                groq_llm = OpenAICompatibleClassifier(
+                    rules=rules,
+                    cfg=cfg,
+                    db=db,
+                    provider="groq",
+                    model=groq_model,
+                )
+                nvidia_llm = OpenAICompatibleClassifier(
+                    rules=rules,
+                    cfg=cfg,
+                    db=db,
+                    provider="nvidia",
+                    model=nvidia_model,
+                )
+                openrouter_llm = OpenAICompatibleClassifier(
+                    rules=rules,
+                    cfg=cfg,
+                    db=db,
+                    provider="openrouter",
+                    model=openrouter_model,
+                )
+
+                llm = ProviderCascade([groq_llm, nvidia_llm, openrouter_llm])
+                preflights = llm.preflight_all()
+
+                # NVIDIA pode trocar automaticamente o modelo configurado por
+                # outro que GET /v1/models confirme como disponível agora.
+                llm_identity = (
+                    f"cascade:groq:{groq_llm.model}->nvidia:{nvidia_llm.model}"
+                    f"->openrouter:{openrouter_llm.model}"
+                )
+                db.update_run_model(run_id, llm_identity)
+
+                for pf, pobj in zip(preflights, llm.providers):
+                    if not pf.get("enabled", True):
+                        # Já foi registrado em WARNING por ProviderCascade.preflight_all().
+                        continue
+
+                    LOG.info(
+                        "LLM PRE-FLIGHT OK | provider=%s | model=%s | "
+                        "endpoint=%s | ritmo=%.1f req/min | "
+                        "output=%d | retry_output_max=%d",
+                        pf["provider"],
+                        pobj.model,
+                        pf["base_url"],
+                        pf["operational_rpm"],
+                        pobj.max_output_tokens,
+                        pobj.json_retry_max_completion_tokens,
+                    )
+                    if pf.get("model_discovery"):
+                        md = pf["model_discovery"]
+                        LOG.info(
+                            "%s MODELS | disponíveis=%s | solicitado=%s | selecionado=%s | auto=%s",
+                            pf["provider"].upper(),
+                            md["available_count"],
+                            md["requested_model"],
+                            md["selected_model"],
+                            md["auto_selected"],
+                        )
+                        if pf["provider"] == "openrouter" and md.get("key_info"):
+                            ki = md["key_info"]
+                            LOG.info(
+                                "OPENROUTER KEY | free_tier=%s | usage_daily=%s | key_limit_remaining=%s",
+                                ki.get("is_free_tier"),
+                                ki.get("usage_daily"),
+                                ki.get("limit_remaining"),
+                            )
+
+                enabled_names = [p.provider.upper() for p in llm.enabled_route()]
+                disabled_names = [
+                    p.provider.upper() for i, p in enumerate(llm.providers)
+                    if i in llm.disabled
+                ]
+                LOG.info(
+                    "ROTA LLM ATIVA: %s | fallback externo em cota/cap ou falha de formato "
+                    "após retries; evidência insuficiente nunca é forçada.%s",
+                    " -> ".join(enabled_names),
+                    (f" | indisponíveis nesta execução: {', '.join(disabled_names)}"
+                     if disabled_names else ""),
+                )
+
+            except OperationalPause as exc:
+                db.event(run_id, "", exc.code, safe(exc))
+                db.finish_run(run_id, "FAILED", f"{exc.code}: {exc}")
+                db.close()
+                raise RuntimeError(
+                    f"{exc.code}: {exc}\nClassificação NÃO iniciada."
+                ) from exc
+        elif use_llm:
+            LOG.info(
+                "LLM PRE-FLIGHT DISPENSADO | cohort sem itens pendentes; "
+                "nenhuma chamada de provider necessária."
+            )
+
+        paused_reason = ""
+
+        try:
+            for idx, (brand, model_, key) in enumerate(targets, 1):
+                raw = store.get(brand, model_)
+
+                if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+                    rec = record_for_raw_state(raw)
+                    stats[raw.state.lower()] += 1
+                    db.put_checkpoint(
+                        key, brand, model_, raw.raw_hash, rules.hash, rec, llm_identity
+                    )
+                    rows.append(rec)
+                    continue
+
+                cp = None
+                if not args.no_checkpoint:
+                    cp = db.get_checkpoint(
+                        key,
+                        raw.raw_hash,
+                        rules.hash,
+                        llm_identity,
+                    )
+
+                if cp is not None:
+                    rows.append(cp)
+                    stats["checkpoint_hit"] += 1
+                    continue
+
+                s1 = engine.classify(brand, model_, raw.payload or {})
+                stats[f"stage1_{s1.state.lower()}"] += 1
+
+                try:
+                    rec = finalize_product(
+                        brand, model_, raw, s1, rules, llm, db, run_id
+                    )
+                except OperationalPause as exc:
+                    db.event(run_id, key, exc.code, safe(exc))
+                    if exc.code.endswith("_OUTPUT_PARSE") or exc.code.endswith("_JSON_TOKEN_LIMIT"):
+                        title, url = choose_title(s1.sources, [])
+                        rec = {
+                            "Marca": brand, "Modelo": model_, "Raw State": raw.state,
+                            "Stage1 Type Candidates": " | ".join(s1.type_candidates),
+                            "Stage1 Power Candidates": " | ".join(s1.power_candidates),
+                            "Rules Hash": rules.hash, "Pipeline Version": PIPELINE_VERSION,
+                            "Processed At": now_iso(), "Resolution State": "REVIEW",
+                            "Stage": "LLM_FORMAT_REVIEW", "O que é (Tipo)": s1.product_type or "REVISAR",
+                            "Alimentação": s1.power or "UNKNOWN", "Category General": "", "FAMILY": "",
+                            "Título Real": title, "Fonte URL": url, "Review Required": "SIM",
+                            "Reason Code": exc.code,
+                            "Motivo": f"Todos os providers disponíveis falharam no formato para este item; execução continuou. {safe(exc)}",
+                            "LLM Provider": "", "LLM Model": "", "LLM Cache": "",
+                            "LLM Prompt Tokens": 0, "LLM Completion Tokens": 0, "LLM Total Tokens": 0,
+                        }
+                        stats["llm_format_review"] += 1
+                        LOG.warning("%s | item enviado a REVIEW; execução continuará.", exc.code)
+                    else:
+                        stats["api_paused"] += 1
+                        paused_reason = f"{exc.code}: {exc}"
+                        LOG.error("%s", paused_reason)
+                        break
+
+                if should_checkpoint_record(rec):
+                    db.put_checkpoint(
+                        key, brand, model_, raw.raw_hash, rules.hash, rec, llm_identity
+                    )
+
+                rows.append(rec)
+                stats[f"final_{safe(rec.get('Resolution State')).lower()}"] += 1
+                stats[f"stage_{safe(rec.get('Stage')).lower()}"] += 1
+
+                if safe(rec.get("LLM Cache")).upper() == "SIM":
+                    stats["llm_cache_hit"] += 1
+                elif safe(rec.get("Stage")).upper() == "LLM":
+                    stats["llm_result"] += 1
+
+                if idx % 10 == 0 or idx == len(targets):
+                    LOG.info(
+                        "PROGRESSO %d/%d | rule=%d ambiguous=%d unresolved=%d | "
+                        "llm_ok=%d llm_api=%d llm_cache=%d | review=%d checkpoint=%d | tokens=%d",
+                        idx,
+                        len(targets),
+                        stats["stage1_resolved_rule"],
+                        stats["stage1_ambiguous"],
+                        stats["stage1_unresolved"],
+                        stats["stage_llm"],
+                        llm.api_calls if llm is not None else 0,
+                        stats["llm_cache_hit"],
+                        stats["final_review"],
+                        stats["checkpoint_hit"],
+                        llm.total_tokens if llm is not None else 0,
+                    )
+
+            baseline_stats: Dict[str, int] = {}
+            baseline_warning = ""
+            try:
+                baseline_stats = persist_baseline_excels(
+                    rows=rows,
+                    master_path=master_path,
+                    final_path=final_path,
+                    input_path=input_path,
+                    rules=rules,
+                    reprocess=args.reprocess,
+                    force_reprocess_keys=force_reprocess_keys,
+                )
+                if baseline_stats:
+                    post_inv = load_baseline_inventory(master_path, final_path)
+                    final_cohort_accepted = len(
+                        cohort_keys & post_inv["final_accepted"]
+                    )
+                    expected_cohort_accepted = (
+                        cohort_stats["cohort_already_classified"]
+                        + int(baseline_stats.get("baseline_promoted", 0) or 0)
+                    )
+                    stats["cohort_final_accepted_at_end"] = final_cohort_accepted
+                    stats["cohort_expected_accepted_at_end"] = expected_cohort_accepted
+
+                    LOG.info(
+                        "BASELINE EXCEL ATUALIZADA | %s",
+                        " | ".join(
+                            f"{k}={v}" for k, v in baseline_stats.items()
+                        ),
+                    )
+                    LOG.info(
+                        "COHORT BASE FINAL | aceitos=%d/%d | esperado=%d | review=%d",
+                        final_cohort_accepted,
+                        len(cohort),
+                        expected_cohort_accepted,
+                        int(stats.get("final_review", 0) or 0),
+                    )
+
+                    if final_path and final_cohort_accepted != expected_cohort_accepted:
+                        raise RuntimeError(
+                            "BASELINE_COHORT_MISMATCH: "
+                            f"Base Final possui {final_cohort_accepted} aceito(s) "
+                            f"no cohort, mas eram esperados {expected_cohort_accepted}. "
+                            "Classificacao_v3 e checkpoints foram preservados; "
+                            "a Base Final precisa ser reconciliada antes da próxima execução."
+                        )
+            except Exception as exc:
+                # Classificação e checkpoints não são perdidos só porque o Excel
+                # está aberto ou houve falha de gravação.
+                baseline_warning = f"{type(exc).__name__}: {exc}"
+                LOG.error(
+                    "BASELINE EXCEL NÃO ATUALIZADA: %s",
+                    baseline_warning,
+                )
+
+            summary = {
+                "Pipeline Version": PIPELINE_VERSION,
+                "Rules Version": rules.version,
+                "Rules Hash": rules.hash,
+                "LLM Provider": (
+                    "groq->nvidia->openrouter" if llm is not None
+                    else ("NOT_NEEDED" if use_llm else "DISABLED")
+                ),
+                "LLM Model": (
+                    f"groq:{groq_llm.model}|nvidia:{nvidia_llm.model}|openrouter:{openrouter_llm.model}"
+                    if llm is not None
+                    else ("NOT_NEEDED" if use_llm else "DISABLED")
+                ),
+                "Produtos no cache": len(store.catalog()),
+                "Elegíveis": len(targets),
+                "Pilot Cohort Hash": cohort_hash,
+                "LLM API Calls": llm.api_calls if llm is not None else 0,
+                "LLM Prompt Tokens": llm.prompt_tokens if llm is not None else 0,
+                "LLM Completion Tokens": llm.completion_tokens if llm is not None else 0,
+                "LLM Total Tokens": llm.total_tokens if llm is not None else 0,
+                "Baseline Warning": baseline_warning,
+                **baseline_pre_stats,
+                **dict(stats),
+                **baseline_stats,
+            }
+
+            export_excel(rows, output_path, summary)
+            run_status = (
+                "PAUSED"
+                if paused_reason
+                else ("COMPLETED_WITH_BASELINE_WARNING" if baseline_warning else "COMPLETED")
+            )
+            note = paused_reason or json.dumps(summary, ensure_ascii=False)
+            db.finish_run(run_id, run_status, note)
+
+            if paused_reason:
+                LOG.warning(
+                    "CLASSIFICAÇÃO PAUSADA COM SEGURANÇA. Resultado parcial: %s",
+                    output_path,
+                )
+                LOG.warning(
+                    "Rode novamente depois; checkpoints e cache LLM evitam repetir itens concluídos."
+                )
+            else:
+                LOG.info("CONCLUÍDO. Resultado: %s", output_path)
+
+            LOG.info(
+                "Resumo: %s",
+                " | ".join(f"{k}={v}" for k, v in stats.items()),
+            )
+
+        except KeyboardInterrupt:
+            try:
+                partial_baseline = persist_baseline_excels(
+                    rows=rows,
+                    master_path=master_path,
+                    final_path=final_path,
+                    input_path=input_path,
+                    rules=rules,
+                    reprocess=args.reprocess,
+                    force_reprocess_keys=force_reprocess_keys,
+                )
+                if partial_baseline:
+                    LOG.warning(
+                        "Interrompido, mas baseline Excel foi atualizada: %s",
+                        " | ".join(
+                            f"{k}={v}" for k, v in partial_baseline.items()
+                        ),
+                    )
+            except Exception as baseline_exc:
+                LOG.error(
+                    "Interrompido; baseline Excel não pôde ser atualizada: %s",
+                    baseline_exc,
+                )
+
+            db.finish_run(
+                run_id,
+                "INTERRUPTED",
+                "Interrompido pelo usuário; checkpoints persistidos por produto",
+            )
+            LOG.warning(
+                "Interrompido. Checkpoints concluídos permanecem persistidos."
+            )
+            raise
+        except BaseException as exc:
+            db.finish_run(run_id, "FAILED", f"{type(exc).__name__}: {exc}")
+            raise
+        finally:
+            db.close()
+    finally:
+        store.close()
+
+
+def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
+    """Executa regressões sintéticas + cobertura dos casos reais validados.
+
+    REAL_VALIDATED_CASES nunca classificam um produto em runtime. Servem apenas
+    para detectar quando um tipo humano-validado deixou de ser recuperável pelas
+    regras em evidência que contém alias explícito desse mesmo tipo.
+    """
+    qg = rules.quality_gates or {}
+    synthetic = qg.get("SYNTHETIC_CASES", []) or []
+    identity_cases = qg.get("IDENTITY_CASES", []) or []
+    real = qg.get("REAL_VALIDATED_CASES", []) or []
+    if not synthetic:
+        raise RuntimeError("QUALITY_GATES_INVALID: SYNTHETIC_CASES vazio")
+    if not identity_cases:
+        raise RuntimeError("QUALITY_GATES_INVALID: IDENTITY_CASES vazio")
+    if not real:
+        raise RuntimeError("QUALITY_GATES_INVALID: REAL_VALIDATED_CASES vazio")
+
+    engine = DeterministicEngine(rules, cfg)
+    errors: List[str] = []
+
+    for i, case in enumerate(synthetic, 1):
+        cid = safe(case.get("id")) or f"synthetic_{i}"
+        brand = safe(case.get("brand")) or "TEST"
+        model = safe(case.get("model")) or f"M{i}"
+        results = case.get("results") or [{
+            "title": safe(case.get("title")),
+            "content": safe(case.get("content")),
+            "url": safe(case.get("url")) or "https://example.com/regression",
+        }]
+        if not isinstance(results, list):
+            errors.append(f"{cid}: results inválido")
+            continue
+        result = engine.classify(brand, model, {"results": results})
+        expect = case.get("expect", {}) or {}
+
+        def check(label: str, actual: Any, expected: Any) -> None:
+            if expected is not None and actual != expected:
+                errors.append(f"{cid}: {label}={actual!r}, esperado={expected!r}")
+
+        if "state" in expect: check("state", result.state, safe(expect.get("state")))
+        if "product_type" in expect: check("product_type", result.product_type, expect.get("product_type"))
+        if "power" in expect: check("power", result.power, expect.get("power"))
+        if "category_general" in expect: check("category_general", result.taxonomy[0], safe(expect.get("category_general")))
+        if "family" in expect: check("family", result.taxonomy[1], safe(expect.get("family")))
+        for typ in expect.get("must_include_type_candidates", []) or []:
+            if typ not in result.type_candidates: errors.append(f"{cid}: candidato obrigatório ausente: {typ}")
+        for typ in expect.get("forbidden_type_candidates", []) or []:
+            if typ in result.type_candidates: errors.append(f"{cid}: candidato proibido presente: {typ}")
+        for power in expect.get("forbidden_power_candidates", []) or []:
+            if power in result.power_candidates: errors.append(f"{cid}: power proibido presente: {power}")
+
+    identity_passed = 0
+    rank = DeterministicEngine.IDENTITY_RANK
+    for i, case in enumerate(identity_cases, 1):
+        cid = safe(case.get("id")) or f"identity_{i}"
+        srcs = engine.build_sources(
+            safe(case.get("brand")), safe(case.get("model")),
+            {"results": [{"title": safe(case.get("title")), "content": safe(case.get("content")), "url": safe(case.get("url")) or "https://example.com/identity"}]},
+        )
+        if not srcs:
+            errors.append(f"{cid}: fonte não construída")
+            continue
+        src = srcs[0]
+        expect = case.get("expect", {}) or {}
+        min_level = safe(expect.get("min_level"))
+        max_level = safe(expect.get("max_level"))
+        model_match = safe(expect.get("model_match"))
+        if min_level and rank.get(src.relevance, 0) < rank.get(min_level, 0):
+            errors.append(f"{cid}: identity={src.relevance}, mínimo={min_level}")
+            continue
+        if max_level and rank.get(src.relevance, 0) > rank.get(max_level, 4):
+            errors.append(f"{cid}: identity={src.relevance}, máximo={max_level}")
+            continue
+        if model_match and src.model_match != model_match:
+            errors.append(f"{cid}: model_match={src.model_match}, esperado={model_match}")
+            continue
+        identity_passed += 1
+
+    real_active = 0
+    real_explicit = 0
+    real_passed = 0
+    real_reference_only = 0
+    for i, case in enumerate(real, 1):
+        if not bool(case.get("teacher_enabled", True)):
+            continue
+        real_active += 1
+        typ = safe(case.get("gold_type"))
+        cg = safe(case.get("gold_category"))
+        fam = safe(case.get("gold_family"))
+        cid = f"REAL:{safe(case.get('brand'))}|{safe(case.get('model'))}"
+        if typ not in rules.types:
+            errors.append(f"{cid}: gold_type não existe no JSON: {typ}")
+            continue
+        if cg and fam and (cg, fam) not in rules.valid_pairs:
+            errors.append(f"{cid}: gold taxonomy inexistente: {cg}|{fam}")
+            continue
+        source_title = safe(case.get("source_title"))
+        evidence = safe(case.get("evidence_text"))
+        aliases = (rules.types.get(typ, {}) or {}).get("aliases", []) or []
+        title_explicit = any(contains_alias(source_title, a) for a in aliases if safe(a))
+        probe_sources = engine.build_sources(
+            safe(case.get("brand")) or "TEST",
+            safe(case.get("model")) or f"REAL{i}",
+            {"results": [{"title": source_title, "content": evidence, "url": "https://example.com/real-case"}]},
+        )
+        usable_title_source = bool(
+            probe_sources
+            and probe_sources[0].source_weight > 0
+            and probe_sources[0].relevance not in {"WEAK", "CONFLICT"}
+        )
+        if not title_explicit or not usable_title_source:
+            # Caso real sem identidade + tipo explícitos no título permanece como
+            # referência humana. Não transformamos ruído de BODY em obrigação do motor.
+            real_reference_only += 1
+            continue
+        real_explicit += 1
+        r = engine.classify(
+            safe(case.get("brand")) or "TEST",
+            safe(case.get("model")) or f"REAL{i}",
+            {"results": [{"title": source_title, "content": evidence, "url": "https://example.com/real-case"}]},
+        )
+        if typ not in r.type_candidates and r.product_type != typ:
+            errors.append(f"{cid}: tipo validado {typ} deixou de ser candidato determinístico")
+        else:
+            real_passed += 1
+
+    if errors:
+        raise RuntimeError(
+            f"QUALITY_GATE_FAILED: {len(errors)} falha(s). " + " | ".join(errors[:25])
+        )
+    return {
+        "synthetic_cases": len(synthetic),
+        "synthetic_passed": len(synthetic),
+        "identity_cases": len(identity_cases),
+        "identity_passed": identity_passed,
+        "real_active": real_active,
+        "real_explicit": real_explicit,
+        "real_passed": real_passed,
+        "real_reference_only": real_reference_only,
+    }
+
+
+def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") -> None:
+    errors = rules.validate()
+    if errors:
+        for e in errors:
+            LOG.error(e)
+        raise RuntimeError(f"Validação falhou: {len(errors)} erro(s)")
+
+    qg = run_quality_gates(rules, cfg)
+    LOG.info(
+        "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | reference_only=%d",
+        qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"], qg["real_reference_only"],
+    )
+
+    cache = Path(cache_override or cfg["files"]["cache"])
+    if cache.exists():
+        store = TavilyReadOnlyStore(cache)
+        try:
+            LOG.info("Cache Tavily OK: %d produtos | merged_variants=%d", len(store.catalog()), len(store.merged_variants))
+        finally:
+            store.close()
+    else:
+        LOG.warning("Cache Tavily não encontrado no caminho padrão: %s", cache)
+    LOG.info("VALIDAÇÃO OK | rules=%s | types=%d | powers=%d", rules.version, len(rules.types), len(rules.allowed_powers))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v3")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "classify", "full", "recover", "repair"], default="validate")
+    p.add_argument("--config", default="pipeline_config.json")
+    p.add_argument("--rules", default="regras_negocio.json")
+    p.add_argument("--input", default="")
+    p.add_argument("--cache", default="")
+    p.add_argument("--master", default="")
+    p.add_argument("--final", default="")
+    p.add_argument("--db", default="")
+    p.add_argument("--output", default="")
+    p.add_argument("--inventory-output", default="")
+    p.add_argument("--precollection-output", default="")
+    p.add_argument("--llm-provider", default="")
+    p.add_argument("--llm-model", default="")
+    p.add_argument("--no-llm", action="store_true")
+    p.add_argument("--no-checkpoint", action="store_true")
+    p.add_argument("--reprocess", action="store_true")
+    p.add_argument("--max-items", type=int, default=0)
+    p.add_argument("--max-tavily-new", type=int, default=0)
+    p.add_argument("--recollect-empty", action="store_true")
+    p.add_argument("--yes", action="store_true")
+    p.add_argument("--verbose", action="store_true")
+    return p
+
+
+def _menu_limit(prompt: str) -> int:
+    """Permite piloto sem expor argumentos de linha de comando ao operador."""
+    raw = input(prompt).strip()
+    if not raw:
+        return 0
+    if not raw.isdigit() or int(raw) <= 0:
+        print("Valor inválido. Será considerado TODOS.")
+        return 0
+    return int(raw)
+
+
+def interactive_menu(base: Path) -> argparse.Namespace:
+    parser = build_parser()
+    print("=" * 78)
+    print(f" PIPELINE ENRIQUECEDOR DE PRODUTOS {PIPELINE_VERSION} | {BUILD_LABEL}")
+    print(" Tavily RAW -> Regras -> Groq -> NVIDIA -> OpenRouter -> Taxonomia JSON")
+    print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
+    print("=" * 78)
+    print("1 - COLETA / EXTRAÇÃO")
+    print("2 - CLASSIFICAÇÃO")
+    print("3 - PROCESSO COMPLETO")
+    print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM TAVILY)")
+    print("5 - AUDITORIA / REPARO BASE (SEM LLM)")
+    print("6 - SAIR")
+    op = input("Opção: ").strip()
+
+    if op == "1":
+        limite = _menu_limit("Limite de NOVAS consultas Tavily para piloto (ENTER = todas): ")
+        argv = ["--mode", "collect"]
+        if limite:
+            argv += ["--max-tavily-new", str(limite)]
+        return parser.parse_args(argv)
+    if op == "2":
+        limite = _menu_limit("Limite de produtos para piloto (ENTER = todos): ")
+        argv = ["--mode", "classify"]
+        if limite:
+            argv += ["--max-items", str(limite)]
+        return parser.parse_args(argv)
+    if op == "3":
+        limite_tavily = _menu_limit("Limite de NOVAS consultas Tavily (ENTER = todas): ")
+        limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
+        argv = ["--mode", "full"]
+        if limite_tavily:
+            argv += ["--max-tavily-new", str(limite_tavily)]
+        if limite_class:
+            argv += ["--max-items", str(limite_class)]
+        return parser.parse_args(argv)
+    if op == "4":
+        limite = _menu_limit("Limite de pendências COM CACHE para reprocessar (ENTER = todas): ")
+        argv = ["--mode", "recover"]
+        if limite:
+            argv += ["--max-items", str(limite)]
+        return parser.parse_args(argv)
+    if op == "5":
+        return parser.parse_args(["--mode", "repair"])
+    raise SystemExit(0)
+
+def run_baseline_repair(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
+    """Audita e saneia baseline local sem Tavily e sem LLM."""
+    master_path = Path(args.master or cfg["files"].get("master", "")) if (args.master or cfg["files"].get("master")) else None
+    final_path = Path(args.final or cfg["files"].get("final", "")) if (args.final or cfg["files"].get("final")) else None
+    input_path = Path(args.input or cfg["files"].get("input", "")) if (args.input or cfg["files"].get("input")) else None
+
+    backup_root = Path(cfg.get("files", {}).get("baseline_backup_dir", "Backups_Baseline"))
+    backup_folder = _backup_baseline_files(master_path, final_path, backup_root)
+    if backup_folder:
+        LOG.info("BACKUP BASELINE OK | pasta=%s", backup_folder)
+
+    audit_path = Path(cfg.get("files", {}).get("baseline_audit", "Auditoria_Baseline_R5.csv"))
+    audit_stats = _audit_baseline_conflicts(final_path, audit_path)
+    LOG.info(
+        "AUDITORIA BASELINE | conflitos=%d | Revisão B.I x REVIEW=%d | OTHERS|OTHERS=%d | arquivo=%s",
+        audit_stats.get("audit_rows", 0),
+        audit_stats.get("review_bi_conflict", 0),
+        audit_stats.get("others_others", 0),
+        audit_path,
+    )
+
+    stats = persist_baseline_excels(
+        rows=[],
+        master_path=master_path,
+        final_path=final_path,
+        input_path=input_path,
+        rules=rules,
+        reprocess=False,
+    )
+    LOG.info(
+        "REPARO BASE CONCLUÍDO SEM LLM | %s",
+        " | ".join(f"{k}={v}" for k, v in stats.items()),
+    )
+    LOG.info("Revisão B.I não foi recalculada nem preenchida pelo script.")
+
+
+def main() -> int:
+    base = Path(__file__).resolve().parent
+    args = interactive_menu(base) if len(sys.argv) == 1 else build_parser().parse_args()
+    setup_logging(args.verbose)
+    os.chdir(base)
+    cfg_path = (base / args.config).resolve() if not Path(args.config).is_absolute() else Path(args.config)
+    rules_path = (base / args.rules).resolve() if not Path(args.rules).is_absolute() else Path(args.rules)
+    env_info = load_env_file(base / ".env")
+    cfg = read_json(cfg_path)
+    rules = Rules(rules_path)
+
+    if env_info["exists"]:
+        LOG.info(
+            ".env carregado: %s | GROQ_API_KEY=%s | NVIDIA_API_KEY=%s | OPENROUTER_API_KEY=%s | TAVILY_API_KEY=%s",
+            env_info["path"],
+            "CONFIGURADA" if bool(os.getenv("GROQ_API_KEY", "").strip()) else "AUSENTE",
+            "CONFIGURADA" if bool(os.getenv("NVIDIA_API_KEY", "").strip()) else "AUSENTE",
+            "CONFIGURADA" if bool(os.getenv("OPENROUTER_API_KEY", "").strip()) else "AUSENTE",
+            "CONFIGURADA" if bool(os.getenv("TAVILY_API_KEY", "").strip()) else "AUSENTE",
+        )
+    else:
+        LOG.warning(".env não encontrado em: %s", env_info["path"])
+
+    LOG.info("Pipeline=%s | Rules=%s | semantic_hash=%s | quality_hash=%s", PIPELINE_VERSION, rules.version, rules.hash[:12], rules.quality_hash[:12])
+    errors = rules.validate()
+    if errors:
+        for e in errors[:50]:
+            LOG.error(e)
+        return 2
+    if args.mode == "validate":
+        validate_all(rules, cfg, args.cache)
+        return 0
+    if args.mode == "repair":
+        run_baseline_repair(args, cfg, rules)
+        return 0
+    if args.mode in {"classify", "full", "recover"}:
+        qg = run_quality_gates(rules, cfg)
+        LOG.info(
+            "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | classificação liberada",
+            qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"],
+        )
+    if args.mode == "inventory":
+        run_pipeline(args, cfg, rules)
+        return 0
+    if args.mode == "collect":
+        if not os.getenv("TAVILY_API_KEY", "").strip():
+            raise RuntimeError("TAVILY_API_KEY não configurada no .env")
+        collect_products(args, cfg, rules)
+        return 0
+    if args.mode == "classify":
+        run_pipeline(args, cfg, rules)
+        return 0
+    if args.mode == "recover":
+        run_cache_recovery(args, cfg, rules)
+        return 0
+    if args.mode == "full":
+        if not os.getenv("TAVILY_API_KEY", "").strip():
+            raise RuntimeError("TAVILY_API_KEY não configurada no .env")
+        completed = collect_products(args, cfg, rules)
+        if not completed:
+            LOG.warning("PROCESSO COMPLETO interrompido após a coleta. Classificação não iniciada.")
+            return 3
+        run_pipeline(args, cfg, rules)
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

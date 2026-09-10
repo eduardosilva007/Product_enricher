@@ -1,0 +1,43 @@
+# Segredos / ambiente
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Bancos locais / cache
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# Bases e outputs
+*.xlsx
+*.xls
+*.csv
+
+# Backups / temporários
+Backups_Baseline/
+backup/
+backups/
+temp/
+tmp/
+Market Assessment/
+_BACKUP - SCRIPT ATUAL - PIPELINE ENRIQUECEDOR DE PRODUTOS/
+*.tmp
+*.bak
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Sistema
+Thumbs.db
+.DS_Store
