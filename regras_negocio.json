@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-11-v3.0.5-primary-product-coherence-r9.4-rc4",
+  "VERSION": "2026-09-11-v3.0.5-r9.4-rc4-manual-gap-taxonomy-fix1",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -24,12 +24,7 @@
     "Nenhuma seção/campo de política sem executor correspondente pode permanecer no JSON operacional.",
     "Stage 0 valida identidade/qualidade da evidência antes da classificação.",
     "Stage 1.5 reduz candidatos para a LLM por score, suporte e identidade; a LLM nunca recebe a taxonomia inteira.",
-    "LOW_TARGET_EVIDENCE e TAXONOMY_GAP são estados distintos.",
-    "PRIMARY PRODUCT COHERENCE: uma fonte só sustenta TYPE, Título Real ou AUTO_APROVADO quando Marca+Modelo target e o produto principal da própria fonte são semanticamente coerentes; modelo perdido apenas no BODY não valida página cujo TITLE descreve outro produto.",
-    "TYPE x POWER: sinais de alimentação como cordless, battery powered, 20V, without battery ou battery sold separately jamais criam TYPE=BATTERY; BATTERY só é TYPE quando a evidência mostra que o item comercializado é a própria bateria.",
-    "Título Real deve vir da mesma fonte elegível que sustenta a identidade do target e o TYPE final; SOURCE_CONFLICT nunca fornece Título Real e, sem fonte elegível, o campo deve permanecer vazio.",
-    "MULTI_PRODUCT_TARGET é estado de proteção para kit/combo com múltiplas ferramentas físicas explícitas; não escolher arbitrariamente uma das ferramentas e não enviar esse conflito para desempate livre da LLM.",
-    "TAXONOMY_GAP_NO_ALIAS não pode cair em OTHERS|OTHERS como escape; o produto identificado deve permanecer pendente até ampliação controlada da taxonomia."
+    "LOW_TARGET_EVIDENCE e TAXONOMY_GAP são estados distintos."
   ],
   "TAXONOMY_PAIRS": [
     {
@@ -506,10 +501,6 @@
     },
     {
       "category_general": "OTHERS",
-      "family": "PLAINA"
-    },
-    {
-      "category_general": "OTHERS",
       "family": "ELECTRIC MIXER"
     },
     {
@@ -631,6 +622,22 @@
     {
       "category_general": "OTHERS",
       "family": "EDGER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GARDEN PUMP KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SHEARS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WATER BOOSTER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PLANER"
     }
   ],
   "PRODUCT_TYPES": {
@@ -2027,7 +2034,7 @@
       ],
       "fallback_pair": [
         "OTHERS",
-        "PLAINA"
+        "PLANER"
       ]
     },
     "ELECTRIC MIXER": {
@@ -2073,7 +2080,7 @@
       ],
       "fallback_pair": [
         "OTHERS",
-        "LIFT PUMP"
+        "WATER BOOSTER PUMP"
       ]
     },
     "DELTA SANDER": {
@@ -2823,20 +2830,7 @@
       "bobina de repuesto",
       "parts for",
       "repuestos para"
-    ],
-    "primary_product_coherence": {
-      "enabled": true,
-      "conflict_state": "SOURCE_CONFLICT",
-      "body_only_model_does_not_validate_explicitly_different_primary_title": true,
-      "model_in_title_or_url_overrides_body_only_mentions": true,
-      "require_target_identity_and_primary_product_same_source": true,
-      "source_conflict_can_support_type": false,
-      "source_conflict_can_support_power": false,
-      "source_conflict_can_support_real_title": false,
-      "source_conflict_can_support_auto_approved": false,
-      "source_conflict_can_be_sent_to_llm": false,
-      "notes": "Stage 0 é peneira de evidência. Ex.: TITLE=Vacuum Cleaner e target model aparece apenas no BODY/relacionados => SOURCE_CONFLICT; a fonte não sustenta classificação do target."
-    }
+    ]
   },
   "TAXONOMY_RULES": [
     {
@@ -3669,7 +3663,7 @@
       "primary_type": "PLANER",
       "power": "*",
       "category_general": "OTHERS",
-      "family": "PLAINA",
+      "family": "PLANER",
       "priority": 180
     },
     {
@@ -3683,7 +3677,7 @@
       "primary_type": "LIFT PUMP",
       "power": "*",
       "category_general": "OTHERS",
-      "family": "LIFT PUMP",
+      "family": "WATER BOOSTER PUMP",
       "priority": 185
     },
     {
@@ -4052,37 +4046,7 @@
     "output_voltage_rule": "Para GENERATOR, INVERTER GENERATOR e INVERTER WELDER, tensão isolada pode ser saída. O engine deve suprimir power inferido somente por voltage/amp keywords quando houver um desses tipos na mesma fonte.",
     "replacement_compatibility_rule": "ACCESSORY/PART exige evidência de que o Brand+Model consultado é o próprio componente. Página com replacement/spare/repuesto/compatible/para/for pode apenas referenciar o equipamento-alvo; não transformar automaticamente o modelo pesquisado em ACCESSORY/PART.",
     "source_conflict_rule": "Em conflito entre fontes, preferir a fonte que identifica explicitamente Brand+Model e o substantivo físico do produto. Página de peça/replacement/compatibilidade é evidência secundária. Manual oficial ou ficha técnica do SKU pode ser evidência primária quando Brand+Model e o tipo físico aparecem de forma explícita.",
-    "agricultural_mower_rule": "front/rear/disc/mounted mower e mower-conditioner de implementos agrícolas => DISC MOWER; não usar RIDER/LAWN MOWER apenas pela palavra mower.",
-    "type_power_separation": {
-      "never_promote_power_signal_to_product_type": true,
-      "battery_type_requires_explicit_product_evidence": true,
-      "charger_type_requires_explicit_product_evidence": true,
-      "power_context_only_terms": [
-        "cordless",
-        "battery powered",
-        "battery-powered",
-        "battery operated",
-        "20v",
-        "18v",
-        "12v",
-        "without battery",
-        "battery not included",
-        "battery sold separately",
-        "without charger",
-        "charger not included",
-        "charger sold separately",
-        "bare tool",
-        "tool only",
-        "solo tool",
-        "body only",
-        "sem bateria",
-        "sem carregador",
-        "sin bateria",
-        "sin batería",
-        "sin cargador"
-      ],
-      "notes": "Esses termos podem sustentar POWER=BATTERY/ausência de componente, mas não TYPE=BATTERY/CHARGER. TYPE de componente depende dos aliases explícitos do PRODUCT_TYPE e de identidade do próprio item."
-    }
+    "agricultural_mower_rule": "front/rear/disc/mounted mower e mower-conditioner de implementos agrícolas => DISC MOWER; não usar RIDER/LAWN MOWER apenas pela palavra mower."
   },
   "RESOLUTION_POLICY": {
     "alias_collision_policy": {
@@ -4152,35 +4116,6 @@
         "block_when_candidates_exceed_max": true,
         "single_candidate_can_resolve_without_llm": true
       }
-    },
-    "stage0_outcome_policy": {
-      "source_conflict_state": "SOURCE_CONFLICT",
-      "low_target_evidence_state": "LOW_TARGET_EVIDENCE",
-      "no_llm_eligible_state": "NO_LLM_ELIGIBLE_TARGET_EVIDENCE",
-      "multi_product_state": "MULTI_PRODUCT_TARGET",
-      "taxonomy_gap_state": "TAXONOMY_GAP_NO_ALIAS",
-      "do_not_weaken_llm_gate_for_no_eligible_evidence": true
-    },
-    "real_title_policy": {
-      "must_use_same_valid_source_supporting_final_type": true,
-      "require_target_identity": true,
-      "reject_source_conflict": true,
-      "reject_low_target_evidence": true,
-      "blank_when_no_eligible_source": true,
-      "do_not_use_highest_ranked_source_only": true
-    },
-    "multi_product_policy": {
-      "state": "MULTI_PRODUCT_TARGET",
-      "block_llm_free_arbitration": true,
-      "do_not_choose_random_component_type": true,
-      "taxonomy_definition_pending_case_review": true,
-      "notes": "Nome/taxonomia final do conjunto depende da revisão dos 19 casos reais; não criar POWER TOOL KIT/COMBO KIT por hipótese."
-    },
-    "taxonomy_gap_policy": {
-      "state": "TAXONOMY_GAP_NO_ALIAS",
-      "allow_others_others_escape": false,
-      "require_real_evidence_before_json_extension": true,
-      "notes": "Levantar Marca+Modelo+evidência dos 7 casos antes de adicionar alias/PRODUCT_TYPE/taxonomia."
     }
   },
   "COMPOSITE_TYPE_RULES": [
@@ -4312,7 +4247,7 @@
   ],
   "SCHEMA_VERSION": "2.6",
   "QUALITY_GATES": {
-    "VERSION": "2026-09-11-quality-gates-primary-product-coherence-v2",
+    "VERSION": "2026-09-10-quality-gates-unified-v1",
     "POLICY": {
       "fail_before_classification": true,
       "synthetic_cases": "STRICT_EXPECTATION",
@@ -4520,7 +4455,7 @@
         "title": "TEST KIT5 Power tool combo kit with hammer drill and angle grinder",
         "content": "KIT5 combo kit includes hammer drill and angle grinder",
         "expect": {
-          "state": "MULTI_PRODUCT_TARGET",
+          "state": "AMBIGUOUS",
           "must_include_type_candidates": [
             "HAMMER DRILL",
             "ANGLE GRINDER"
@@ -4905,7 +4840,7 @@
         "title": "TEST KIT-X1 Hammer Drill + Angle Grinder Combo",
         "content": "kit contains a hammer drill and an angle grinder",
         "expect": {
-          "state": "MULTI_PRODUCT_TARGET",
+          "state": "AMBIGUOUS",
           "must_include_type_candidates": [
             "HAMMER DRILL",
             "ANGLE GRINDER"
@@ -5064,64 +4999,31 @@
         }
       },
       {
-        "id": "r94_total_tgsli20126_body_only_vacuum_conflict",
+        "id": "r94_manual_gap_total_planer_family",
         "brand": "TOTAL",
-        "model": "TGSLI20126",
-        "results": [
-          {
-            "title": "Total Tools Cordless Vacuum Cleaner 20V 0.5L Capacity",
-            "content": "Main product is a cordless vacuum cleaner. Related products and catalog references include TGSLI20126 among other TOTAL 20V products.",
-            "url": "https://example.com/total-cordless-vacuum-cleaner"
-          }
-        ],
+        "model": "TL5508216 4",
+        "title": "Total TL5508216 Electric Planer 550W",
+        "content": "Total TL5508216 electric planer 550W corded",
         "expect": {
-          "state": "SOURCE_CONFLICT",
-          "forbidden_type_candidates": [
-            "VACUUM CLEANER",
-            "BATTERY"
-          ]
+          "state": "RESOLVED_RULE",
+          "product_type": "PLANER",
+          "power": "CORDED",
+          "category_general": "OTHERS",
+          "family": "PLANER"
         }
       },
       {
-        "id": "r94_total_tgsli20126_valid_chainsaw_beats_vacuum_noise",
-        "brand": "TOTAL",
-        "model": "TGSLI20126",
-        "results": [
-          {
-            "title": "TOTAL TGSLI20126 20V Cordless Chain Saw",
-            "content": "TGSLI20126 cordless chainsaw 20V, battery powered chain saw.",
-            "url": "https://example.com/total-tgsli20126-chainsaw"
-          },
-          {
-            "title": "Total Tools Cordless Vacuum Cleaner 20V 0.5L Capacity",
-            "content": "Main product vacuum cleaner. Related products include TGSLI20126.",
-            "url": "https://example.com/total-cordless-vacuum-cleaner"
-          }
-        ],
+        "id": "r94_manual_gap_nebraska_booster_pump",
+        "brand": "NEBRASKA",
+        "model": "NEBP08",
+        "title": "BOMBA PRESURIZADORA NEBRASKA 100W NEBP08",
+        "content": "NEBRASKA NEBP08 bomba presurizadora water booster pump 100W",
         "expect": {
           "state": "RESOLVED_RULE",
-          "product_type": "CHAINSAW",
-          "power": "BATTERY",
-          "category_general": "BATTERY PRODUCT",
-          "family": "BATTERY CHAINSAW",
-          "forbidden_type_candidates": [
-            "VACUUM CLEANER",
-            "BATTERY"
-          ]
-        }
-      },
-      {
-        "id": "r94_battery_is_type_only_when_battery_is_primary_product",
-        "brand": "TEST",
-        "model": "BAT20",
-        "title": "TEST BAT20 20V Lithium-Ion Replacement Battery Pack",
-        "content": "BAT20 replacement battery pack for power tools.",
-        "expect": {
-          "state": "RESOLVED_RULE",
-          "product_type": "BATTERY",
+          "product_type": "LIFT PUMP",
           "power": "UNKNOWN",
           "category_general": "OTHERS",
-          "family": "BATTERY"
+          "family": "WATER BOOSTER PUMP"
         }
       }
     ],

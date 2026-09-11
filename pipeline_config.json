@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-11-r9.4-rc4-stage0-primary-product-coherence",
+  "VERSION": "2026-09-11-r9.4-rc4-schema-compatible-hotfix1",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -178,22 +178,5 @@
   "quality_gates": {
     "source": "regras_negocio.json",
     "fail_before_classification": true
-  },
-  "stage0": {
-    "primary_product_coherence": {
-      "enabled": true,
-      "conflict_state": "SOURCE_CONFLICT",
-      "body_only_model_cannot_override_explicit_primary_title_product": true,
-      "require_same_source_identity_and_product_coherence": true,
-      "source_conflict_eligible_for_type": false,
-      "source_conflict_eligible_for_real_title": false,
-      "source_conflict_eligible_for_auto_approved": false,
-      "source_conflict_eligible_for_llm": false
-    },
-    "title_real": {
-      "same_source_as_final_type_support": true,
-      "reject_source_conflict": true,
-      "blank_when_no_eligible_source": true
-    }
   }
 }
