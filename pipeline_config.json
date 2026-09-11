@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-11-r9.4-rc4-schema-compatible-hotfix1",
+  "VERSION": "2026-09-11-r9.4-rc4-hf1-nvidia-failover-cohort-safety",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -83,8 +83,7 @@
   "llm": {
     "route": [
       "nvidia",
-      "groq",
-      "openrouter"
+      "groq"
     ],
     "switch_only_on_quota_exhaustion": false
   },
@@ -116,19 +115,17 @@
     "tpm_safety_margin": 0.88
   },
   "nvidia": {
-    "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "model": "openai/gpt-oss-20b",
     "base_url": "https://integrate.api.nvidia.com/v1",
     "operational_requests_per_minute": 3.0,
     "max_api_calls_per_run": 1000,
     "max_total_tokens_per_run": 0,
-    "retry_attempts": 4,
+    "retry_attempts": 2,
     "retry_backoff_seconds": [
       2,
-      5,
-      10,
-      20
+      5
     ],
-    "timeout_seconds": 90,
+    "timeout_seconds": 60,
     "max_output_tokens": 1024,
     "json_retry_max_completion_tokens": 2048,
     "reasoning_effort": "low",
@@ -137,10 +134,8 @@
     "max_aliases_per_type": 5,
     "max_negative_aliases_per_type": 3,
     "model_candidates": [
-      "nvidia/nemotron-3.5-lightning-30b-a3b",
-      "meta/llama-3.3-70b-instruct",
       "openai/gpt-oss-20b",
-      "meta/llama-3.1-8b-instruct"
+      "openai/gpt-oss-120b"
     ]
   },
   "openrouter": {

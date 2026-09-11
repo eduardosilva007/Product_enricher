@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.4-rc4
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.4-rc4-hf1
 
 Arquitetura:
     Stage 0 - Evidence Gate target-aware sobre Tavily RAW
     Stage 1 - Regras determinísticas do JSON
     Stage 1.5 - Candidate Funnel determinístico
-    Stage 2 - NVIDIA -> Groq -> OpenRouter somente para ambiguidade real
+    Stage 2 - NVIDIA (model failover) -> Groq somente para ambiguidade real
     Stage 3 - Validação estrita e simétrica da saída LLM
     Stage 4 - Taxonomia determinística do JSON
 
@@ -48,10 +48,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote
 
-PIPELINE_VERSION = "3.9.4-rc4"
+PIPELINE_VERSION = "3.9.4-rc4-hf1"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.4-RC4 Stage0 Evidence Gate + Candidate Funnel + Adaptive Search"
+BUILD_LABEL = "v3.9.4-RC4 HF1 NVIDIA Failover + Cohort Safety Fix"
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -2240,9 +2240,9 @@ class OpenAICompatibleClassifier:
     """Stage 2 via provider OpenAI-compatible.
 
     Providers:
+    - nvidia     / openai/gpt-oss-20b (primário, com failover de modelo)
     - groq       / openai/gpt-oss-120b
-    - nvidia     / nvidia/nemotron-3.5-lightning-30b-a3b
-    - openrouter / openai/gpt-oss-120b:free
+    - openrouter / opcional; fora da rota padrão enquanto bloqueado pelo T.I.
     """
 
     def __init__(
@@ -2295,10 +2295,8 @@ class OpenAICompatibleClassifier:
                 if safe(x)
             ]
             defaults = [
-                "nvidia/nemotron-3.5-lightning-30b-a3b",
-                "meta/llama-3.3-70b-instruct",
                 "openai/gpt-oss-20b",
-                "meta/llama-3.1-8b-instruct",
+                "openai/gpt-oss-120b",
             ]
             ordered = [self.model] + env_candidates + config_candidates + defaults
             self.model_candidates = []
@@ -2306,6 +2304,8 @@ class OpenAICompatibleClassifier:
                 candidate = safe(candidate)
                 if candidate and candidate not in self.model_candidates:
                     self.model_candidates.append(candidate)
+            # Preflight preencherá somente os modelos realmente servidos agora.
+            self.available_model_candidates: List[str] = []
 
         else:  # OpenRouter
             self.api_key_env = "OPENROUTER_API_KEY"
@@ -2360,11 +2360,20 @@ class OpenAICompatibleClassifier:
             0, int(pcfg.get("max_total_tokens_per_run", 0))
         )
 
-        self.timeout_seconds = max(10, int(pcfg.get("timeout_seconds", 90)))
-        self.retry_attempts = max(1, int(pcfg.get("retry_attempts", 4)))
+        # NVIDIA precisa falhar rápido para não travar lotes grandes.
+        # Groq/OpenRouter preservam os limites históricos.
+        default_timeout = 60 if self.provider == "nvidia" else 90
+        default_retries = 2 if self.provider == "nvidia" else 4
+        default_backoff = [2, 5] if self.provider == "nvidia" else [2, 5, 10, 20]
+        self.timeout_seconds = max(
+            10, int(pcfg.get("timeout_seconds", default_timeout))
+        )
+        self.retry_attempts = max(
+            1, int(pcfg.get("retry_attempts", default_retries))
+        )
         self.retry_backoff = list(
-            pcfg.get("retry_backoff_seconds", [2, 5, 10, 20])
-            or [2, 5, 10, 20]
+            pcfg.get("retry_backoff_seconds", default_backoff)
+            or default_backoff
         )
         self.max_output_tokens = max(
             64, int(pcfg.get("max_output_tokens", 1024))
@@ -2400,7 +2409,7 @@ class OpenAICompatibleClassifier:
         return f"{self.provider}:{self.model}"
 
     def _discover_nvidia_model(self) -> Dict[str, Any]:
-        """Consulta a API real da NVIDIA e escolhe um modelo servido agora."""
+        """Consulta a API NVIDIA e prepara a cadeia de modelos servidos agora."""
         import requests
 
         url = self.base_url + "/models"
@@ -2447,40 +2456,83 @@ class OpenAICompatibleClassifier:
             )
 
         requested = self.model
-        if requested in available:
-            return {
-                "requested_model": requested,
-                "selected_model": requested,
-                "auto_selected": False,
-                "available_count": len(available),
-            }
+        served_candidates = [
+            candidate
+            for candidate in self.model_candidates
+            if candidate in available
+        ]
+        if not served_candidates:
+            interesting = sorted(
+                x for x in available
+                if any(k in x.casefold() for k in ["nemotron", "llama", "gpt-oss"])
+            )[:30]
+            raise OperationalPause(
+                "NVIDIA_NO_COMPATIBLE_MODEL",
+                "Nenhum candidato configurado está disponível na API NVIDIA. "
+                f"Candidatos={self.model_candidates}. "
+                f"Disponíveis relacionados={interesting}",
+            )
 
-        for candidate in self.model_candidates:
-            if candidate in available:
-                self.model = candidate
-                LOG.warning(
-                    "NVIDIA MODEL AUTO-SELECT | configurado=%s indisponível | selecionado=%s",
-                    requested,
-                    candidate,
-                )
-                return {
-                    "requested_model": requested,
-                    "selected_model": candidate,
-                    "auto_selected": True,
-                    "available_count": len(available),
-                }
+        self.available_model_candidates = served_candidates
 
-        interesting = sorted(
-            x for x in available
-            if any(k in x.casefold() for k in ["nemotron", "llama", "gpt-oss"])
-        )[:30]
+        if requested in served_candidates:
+            selected = requested
+            auto_selected = False
+        else:
+            selected = served_candidates[0]
+            auto_selected = True
+            self.model = selected
+            LOG.warning(
+                "NVIDIA MODEL AUTO-SELECT | configurado=%s indisponível | selecionado=%s",
+                requested,
+                selected,
+            )
 
-        raise OperationalPause(
-            "NVIDIA_NO_COMPATIBLE_MODEL",
-            "Nenhum candidato configurado está disponível na API NVIDIA. "
-            f"Candidatos={self.model_candidates}. "
-            f"Disponíveis relacionados={interesting}",
-        )
+        return {
+            "requested_model": requested,
+            "selected_model": selected,
+            "auto_selected": auto_selected,
+            "available_count": len(available),
+            "candidate_models": list(served_candidates),
+        }
+
+    def advance_nvidia_model(self, reason_code: str) -> bool:
+        """Troca para o próximo modelo NVIDIA já validado pelo preflight."""
+        if self.provider != "nvidia":
+            return False
+
+        candidates = list(getattr(self, "available_model_candidates", []) or [])
+        if not candidates:
+            return False
+
+        try:
+            current_index = candidates.index(self.model)
+        except ValueError:
+            current_index = -1
+
+        for candidate in candidates[current_index + 1:]:
+            candidate = safe(candidate)
+            if not candidate or candidate == self.model:
+                continue
+            old = self.model
+            self.model = candidate
+            LOG.warning(
+                "NVIDIA MODEL FAILOVER | %s -> %s | motivo=%s",
+                old,
+                candidate,
+                reason_code,
+            )
+            return True
+        return False
+
+    def route_identity_fragment(self) -> str:
+        """Identidade auditável da política de modelos do provider."""
+        if self.provider == "nvidia":
+            candidates = list(
+                getattr(self, "available_model_candidates", []) or self.model_candidates
+            )
+            return "nvidia:[" + ",".join(candidates) + "]"
+        return f"{self.provider}:{self.model}"
 
     def _discover_openrouter_model(self) -> Dict[str, Any]:
         """Valida chave/modelo diretamente no catálogo vivo do OpenRouter.
@@ -3450,7 +3502,7 @@ class OpenAICompatibleClassifier:
 
 
 class ProviderCascade:
-    """Cascata configurável de providers; RC4 prioriza NVIDIA."""
+    """Cascata configurável; RC4 HF1 suporta failover NVIDIA + provider."""
 
     EXHAUSTION_CODES = {
         "GROQ_TPD_EXHAUSTED",
@@ -3458,12 +3510,19 @@ class ProviderCascade:
         "OPENROUTER_QUOTA_EXHAUSTED",
     }
 
-    def __init__(self, providers: List[OpenAICompatibleClassifier]):
+    def __init__(
+        self,
+        providers: List[OpenAICompatibleClassifier],
+        switch_only_on_quota_exhaustion: bool = False,
+    ):
         if not providers:
             raise ValueError("ProviderCascade requer ao menos um provider.")
         self.providers = providers
         self.active_index = 0
         self.disabled: set = set()
+        self.switch_only_on_quota_exhaustion = bool(
+            switch_only_on_quota_exhaustion
+        )
 
     @property
     def active(self) -> OpenAICompatibleClassifier:
@@ -3580,26 +3639,54 @@ class ProviderCascade:
                 return data, cache_hit, usage
 
             except OperationalPause as exc:
-                rotate_provider = (
+                # Primeiro tenta outro modelo NVIDIA quando a falha parece
+                # específica do modelo/endpoint e a política permite failover.
+                nvidia_model_failover = (
+                    current.provider == "nvidia"
+                    and (
+                        exc.code.endswith("_OUTPUT_PARSE")
+                        or exc.code.endswith("_JSON_TOKEN_LIMIT")
+                        or exc.code.endswith("_MODEL_EOL")
+                        or (
+                            not self.switch_only_on_quota_exhaustion
+                            and exc.code.endswith("_TRANSIENT")
+                        )
+                    )
+                )
+                if nvidia_model_failover and current.advance_nvidia_model(exc.code):
+                    continue
+
+                always_rotate = (
                     exc.code in self.EXHAUSTION_CODES
                     or exc.code.endswith("_LOCAL_TOKEN_CAP")
                     or exc.code.endswith("_RUN_CAP")
                     or exc.code.endswith("_OUTPUT_PARSE")
                     or exc.code.endswith("_JSON_TOKEN_LIMIT")
                 )
+                operational_rotate = (
+                    not self.switch_only_on_quota_exhaustion
+                    and (
+                        exc.code.endswith("_TRANSIENT")
+                        or exc.code.endswith("_RATE_LIMIT")
+                        or exc.code.endswith("_MODEL_EOL")
+                    )
+                )
+                rotate_provider = always_rotate or operational_rotate
                 if not rotate_provider:
                     raise
 
                 old_provider = current.provider.upper()
+                old_model = current.model
                 self.disabled.add(self.active_index)
 
                 if not self._advance():
                     raise
 
                 LOG.warning(
-                    "%s não pôde concluir com segurança (%s). "
+                    "%s / %s não pôde concluir com segurança (%s). "
                     "FALLBACK AUTOMÁTICO -> %s / %s",
                     old_provider,
+                    old_model,
                     exc.code,
                     self.active.provider.upper(),
                     self.active.model,
@@ -5201,6 +5288,33 @@ def build_pilot_cohort(
     cohort_hash = hashlib.sha256(cohort_material.encode("utf-8")).hexdigest()[:12]
     return cohort, targets, stats, cohort_hash
 
+def _expected_cohort_accepted_after_run(
+    cohort_keys: set,
+    final_accepted_at_start: set,
+    rows: List[Dict[str, Any]],
+    force_reprocess_keys: Optional[set] = None,
+) -> set:
+    """Projeta o conjunto aceito após persistência usando a política do baseline."""
+    expected = set(cohort_keys) & set(final_accepted_at_start)
+    force_keys = set(force_reprocess_keys or set())
+
+    for rec in rows:
+        brand = safe(rec.get("Marca"))
+        model = safe(rec.get("Modelo"))
+        if not brand or not model:
+            continue
+        key = business_key(brand, model)
+        if key not in cohort_keys:
+            continue
+
+        if _record_is_accepted(rec):
+            expected.add(key)
+        elif key in force_keys:
+            expected.discard(key)
+
+    return expected
+
+
 def inventory(
     store: TavilyReadOnlyStore,
     processed: set,
@@ -5558,7 +5672,7 @@ def run_pipeline(
         nvidia_model = (
             os.getenv("NVIDIA_MODEL", "").strip()
             or safe(cfg.get("nvidia", {}).get("model"))
-            or "nvidia/nemotron-3.5-lightning-30b-a3b"
+            or "openai/gpt-oss-20b"
         )
         openrouter_model = (
             os.getenv("OPENROUTER_MODEL", "").strip()
@@ -5568,7 +5682,7 @@ def run_pipeline(
 
         route_names = [safe(x).casefold() for x in (cfg.get("llm", {}).get("route", []) or []) if safe(x)]
         if not route_names:
-            route_names = ["nvidia", "groq", "openrouter"]
+            route_names = ["nvidia", "groq"]
         model_by_provider = {"groq": groq_model, "nvidia": nvidia_model, "openrouter": openrouter_model}
         llm_identity = "cascade:" + "->".join(
             f"{name}:{model_by_provider.get(name, '')}" for name in route_names if name in model_by_provider
@@ -5617,9 +5731,10 @@ def run_pipeline(
         cohort_master_accepted = len(
             cohort_keys & baseline_inventory["master_accepted"]
         )
-        cohort_final_accepted = len(
+        cohort_final_accepted_keys_at_start = (
             cohort_keys & baseline_inventory["final_accepted"]
         )
+        cohort_final_accepted = len(cohort_final_accepted_keys_at_start)
         stats["cohort_master_accepted"] = cohort_master_accepted
         stats["cohort_final_accepted_at_start"] = cohort_final_accepted
 
@@ -5668,12 +5783,20 @@ def run_pipeline(
                 ordered_providers = [provider_map[x] for x in route_names if x in provider_map]
                 if not ordered_providers:
                     ordered_providers = [nvidia_llm, groq_llm, openrouter_llm]
-                llm = ProviderCascade(ordered_providers)
+                llm = ProviderCascade(
+                    ordered_providers,
+                    switch_only_on_quota_exhaustion=bool(
+                        cfg.get("llm", {}).get(
+                            "switch_only_on_quota_exhaustion", False
+                        )
+                    ),
+                )
                 preflights = llm.preflight_all()
 
-                # Providers podem ajustar modelo durante discovery/preflight.
+                # Registra a cadeia de modelos validada no preflight para
+                # impedir mistura de checkpoints entre políticas de fallback.
                 llm_identity = "cascade:" + "->".join(
-                    f"{obj.provider}:{obj.model}" for obj in llm.providers
+                    obj.route_identity_fragment() for obj in llm.providers
                 )
                 db.update_run_model(run_id, llm_identity)
 
@@ -5703,6 +5826,11 @@ def run_pipeline(
                             md["selected_model"],
                             md["auto_selected"],
                         )
+                        if pf["provider"] == "nvidia" and md.get("candidate_models"):
+                            LOG.info(
+                                "NVIDIA MODEL ROUTE: %s",
+                                " -> ".join(md["candidate_models"]),
+                            )
                         if pf["provider"] == "openrouter" and md.get("key_info"):
                             ki = md["key_info"]
                             LOG.info(
@@ -5718,8 +5846,8 @@ def run_pipeline(
                     if i in llm.disabled
                 ]
                 LOG.info(
-                    "ROTA LLM ATIVA: %s | fallback externo em cota/cap ou falha de formato "
-                    "após retries; evidência insuficiente nunca é forçada.%s",
+                    "ROTA LLM ATIVA: %s | fallback em cota/cap, formato e falha "
+                    "transitória após retries; evidência insuficiente nunca é forçada.%s",
                     " -> ".join(enabled_names),
                     (f" | indisponíveis nesta execução: {', '.join(disabled_names)}"
                      if disabled_names else ""),
@@ -5848,10 +5976,13 @@ def run_pipeline(
                     final_cohort_accepted = len(
                         cohort_keys & post_inv["final_accepted"]
                     )
-                    expected_cohort_accepted = (
-                        cohort_stats["cohort_already_classified"]
-                        + int(baseline_stats.get("baseline_promoted", 0) or 0)
+                    expected_cohort_keys = _expected_cohort_accepted_after_run(
+                        cohort_keys=cohort_keys,
+                        final_accepted_at_start=cohort_final_accepted_keys_at_start,
+                        rows=rows,
+                        force_reprocess_keys=force_reprocess_keys,
                     )
+                    expected_cohort_accepted = len(expected_cohort_keys)
                     stats["cohort_final_accepted_at_end"] = final_cohort_accepted
                     stats["cohort_expected_accepted_at_end"] = expected_cohort_accepted
 
@@ -5891,11 +6022,12 @@ def run_pipeline(
                 "Rules Version": rules.version,
                 "Rules Hash": rules.hash,
                 "LLM Provider": (
-                    "groq->nvidia->openrouter" if llm is not None
+                    "->".join(p.provider for p in llm.providers)
+                    if llm is not None
                     else ("NOT_NEEDED" if use_llm else "DISABLED")
                 ),
                 "LLM Model": (
-                    f"groq:{groq_llm.model}|nvidia:{nvidia_llm.model}|openrouter:{openrouter_llm.model}"
+                    "|".join(p.route_identity_fragment() for p in llm.providers)
                     if llm is not None
                     else ("NOT_NEEDED" if use_llm else "DISABLED")
                 ),
@@ -6189,7 +6321,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     parser = build_parser()
     print("=" * 78)
     print(f" PIPELINE ENRIQUECEDOR DE PRODUTOS {PIPELINE_VERSION} | {BUILD_LABEL}")
-    print(" Tavily RAW -> Stage 0 -> Regras -> Stage 1.5 -> NVIDIA -> Groq -> OpenRouter -> Taxonomia JSON")
+    print(" Tavily RAW -> Stage 0 -> Regras -> Stage 1.5 -> NVIDIA (failover) -> Groq -> Taxonomia JSON")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 78)
     print("1 - COLETA / EXTRAÇÃO")
