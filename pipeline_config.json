@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-10-r9.2-r5-stage1-strict-llm",
+  "VERSION": "2026-09-11-r9.4-rc4-stage0-funnel-adaptive-search",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -13,7 +13,7 @@
     "pending_with_cache": "Pendentes_Com_Cache.xlsx",
     "pending_without_cache": "Pendentes_Sem_Cache.xlsx",
     "baseline_backup_dir": "Backups_Baseline",
-    "baseline_audit": "Auditoria_Baseline_R9_2.csv"
+    "baseline_audit": "Auditoria_Baseline_R9_4_RC4.csv"
   },
   "evidence": {
     "max_results": 5,
@@ -27,7 +27,39 @@
       "B2",
       "B3",
       "B4"
-    ]
+    ],
+    "operational_suffixes_by_brand": {
+      "INGCO": [
+        "4"
+      ],
+      "TOTAL": [
+        "4"
+      ],
+      "EMTOP": [
+        "4"
+      ],
+      "WADFOW": [
+        "4"
+      ],
+      "JADEVER": [
+        "4"
+      ],
+      "SENSEI": [
+        "4"
+      ]
+    },
+    "embedded_sku_brands": [
+      "MAKITA"
+    ],
+    "embedded_sku_min_length": 5,
+    "short_model_requires_brand_length": 5,
+    "revision_suffixes_by_brand": {
+      "GREENWORKS": [
+        "DA1",
+        "A1",
+        "A3"
+      ]
+    }
   },
   "tavily": {
     "requests_per_minute": 30,
@@ -41,15 +73,20 @@
     "timeout_seconds": 60,
     "search_depth": "basic",
     "max_results": 5,
-    "include_raw_content": "markdown"
+    "include_raw_content": "markdown",
+    "adaptive_queries": true,
+    "primary_query_template": "{brand} {search_model} product specifications",
+    "fallback_query_template": "{brand} {search_model} product details manual technical data",
+    "fallback_only_when_no_target_evidence": true,
+    "exact_match": false
   },
   "llm": {
     "route": [
-      "groq",
       "nvidia",
+      "groq",
       "openrouter"
     ],
-    "switch_only_on_quota_exhaustion": true
+    "switch_only_on_quota_exhaustion": false
   },
   "groq": {
     "model": "openai/gpt-oss-120b",

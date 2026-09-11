@@ -1,0 +1,28 @@
+R9.4 RC4 — validação executada em 11/09/2026
+
+Pipeline: 3.9.4-rc4
+Rules: 2026-09-11-v3.0.4-stage0-funnel-taxonomy-cleanup-r9.4-rc4
+semantic_hash: ff98ea9e4051
+quality_hash: bb8a834d0bbb
+
+py_compile: OK
+Rules/schema: OK
+Synthetic: 48/48
+Identity: 14/14
+Real teacher executáveis: 22/22
+Reference-only: 12
+Cache: 3430 produtos
+Merged variants: 30
+Types: 132
+Powers: 7
+
+Cohort real 236 — offline, sem Tavily/LLM:
+- RESOLVED_RULE: 99
+- RESOLVED_FUNNEL: 19
+- LOW_TARGET_EVIDENCE: 88
+- MULTI_PRODUCT_TARGET: 19
+- TAXONOMY_GAP_NO_ALIAS: 7
+- NO_LLM_ELIGIBLE_TARGET_EVIDENCE: 1
+- LLM_ELIGIBLE: 3
+
+Nota: replay integral dos 3430 excedeu a janela de execução do ambiente e não é declarado como concluído. Use piloto de 30 itens antes de escalar.

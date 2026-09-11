@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.2
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.4-rc4
 
 Arquitetura:
-    Stage 0 - Evidence Store (Tavily RAW)
+    Stage 0 - Evidence Gate target-aware sobre Tavily RAW
     Stage 1 - Regras determinísticas do JSON
-    Stage 2 - Groq -> NVIDIA -> OpenRouter somente para AMBIGUOUS / UNRESOLVED
-    Stage 3 - Validação estrita da saída LLM
+    Stage 1.5 - Candidate Funnel determinístico
+    Stage 2 - NVIDIA -> Groq -> OpenRouter somente para ambiguidade real
+    Stage 3 - Validação estrita e simétrica da saída LLM
     Stage 4 - Taxonomia determinística do JSON
 
 Princípios:
@@ -45,12 +46,12 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
-PIPELINE_VERSION = "3.9.2"
-PROMPT_VERSION = "2026-09-10-v13-r5-stage1-strict-llm-unified"
+PIPELINE_VERSION = "3.9.4-rc4"
+PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.2-R9.2 R5 Stable Stage1 + Strict LLM Gate + Unified Rules"
+BUILD_LABEL = "v3.9.4-RC4 Stage0 Evidence Gate + Candidate Funnel + Adaptive Search"
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -123,6 +124,69 @@ def business_key(brand: str, model: str) -> str:
     originais na base ou nos relatórios.
     """
     return f"{compact(brand)}|{compact(model)}"
+
+
+def derive_search_model(brand: str, model: str, cfg: Dict[str, Any]) -> str:
+    """Deriva uma âncora técnica para busca/identidade sem alterar o Modelo original.
+
+    Regras conservadoras:
+    - remove apenas sufixos operacionais explicitamente configurados por marca;
+    - para marcas autorizadas, extrai SKU alfanumérico embutido em descrições longas;
+    - não faz fuzzy e nunca altera a chave de negócio ou a coluna Modelo.
+    """
+    original = safe(model)
+    if not original:
+        return original
+    icfg = cfg.get("identity", {}) or {}
+    brand_key = canonical_display(brand)
+    suffix_map = icfg.get("operational_suffixes_by_brand", {}) or {}
+    suffixes = {canonical_display(x) for x in (suffix_map.get(brand_key, []) or []) if safe(x)}
+
+    work = re.sub(r"\s+", " ", original).strip()
+    tokens = work.split()
+    if len(tokens) > 1 and canonical_display(tokens[-1]) in suffixes:
+        work = " ".join(tokens[:-1]).strip()
+
+    # Revisões anexadas ao SKU, somente por marca explicitamente configurada.
+    revision_map = icfg.get("revision_suffixes_by_brand", {}) or {}
+    revision_suffixes = sorted(
+        [safe(x) for x in (revision_map.get(brand_key, []) or []) if safe(x)],
+        key=lambda x: len(compact(x)),
+        reverse=True,
+    )
+    for suffix in revision_suffixes:
+        wc = compact(work)
+        sc = compact(suffix)
+        if sc and wc.endswith(sc) and len(wc) - len(sc) >= 5:
+            # remove apenas o sufixo textual no final, preservando o restante do SKU
+            work = re.sub(re.escape(suffix) + r"$", "", work, flags=re.I).rstrip(" -_./")
+            break
+
+    embedded_brands = {canonical_display(x) for x in (icfg.get("embedded_sku_brands", []) or [])}
+    min_len = int(icfg.get("embedded_sku_min_length", 5) or 5)
+    if brand_key in embedded_brands:
+        folded = canonical_display(work)
+        looks_descriptive = brand_key in folded or len(work.split()) >= 5 or "/" in work
+        if looks_descriptive:
+            candidates = []
+            for tok in re.findall(r"[A-Za-z0-9][A-Za-z0-9._/-]*", work):
+                c = compact(tok)
+                if len(c) < min_len:
+                    continue
+                if not (re.search(r"[a-z]", c) and re.search(r"\d", c)):
+                    continue
+                # evita escolher voltagem/potência como se fosse SKU
+                if re.fullmatch(r"\d+(?:\.\d+)?(?:v|w|kw|ah)", c, re.I):
+                    continue
+                if c == compact(brand):
+                    continue
+                candidates.append(tok)
+            if candidates:
+                # favorece identificador compacto, sem pontuação desnecessária
+                candidates.sort(key=lambda x: (len(compact(x)), len(x)), reverse=True)
+                work = candidates[0]
+
+    return re.sub(r"\s+", " ", work).strip() or original
 
 
 def canonical_display(text: str) -> str:
@@ -358,9 +422,26 @@ class Rules:
             pair = (safe(r.get("category_general")), safe(r.get("family")))
             if pair not in self.valid_pairs:
                 errors.append(f"TAXONOMY_RULE par inválido: {pair}")
+            if pair == ("OTHERS", "OTHERS"):
+                errors.append(f"TAXONOMY_DEAD_END: {t} termina em OTHERS|OTHERS")
             p = safe(r.get("power")) or "*"
             if p != "*" and p not in self.allowed_powers:
                 errors.append(f"TAXONOMY_RULE power inválido: {p}")
+
+        # Todo PRODUCT_TYPE precisa chegar a uma taxonomia executável.
+        mapped_types = {safe(r.get("primary_type")) for r in self.taxonomy_rules}
+        for t, data in self.types.items():
+            fp = data.get("fallback_pair")
+            has_valid_fallback = bool(
+                isinstance(fp, list) and len(fp) == 2
+                and (safe(fp[0]), safe(fp[1])) in self.valid_pairs
+                and (safe(fp[0]), safe(fp[1])) != ("OTHERS", "OTHERS")
+            )
+            if t not in mapped_types and not has_valid_fallback:
+                errors.append(f"TYPE_WITHOUT_EXECUTABLE_TAXONOMY: {t}")
+
+        if ("OTHERS", "OTHERS") in self.valid_pairs:
+            errors.append("FORBIDDEN_TAXONOMY_DEAD_END: OTHERS|OTHERS não pode existir em TAXONOMY_PAIRS")
 
         for t in sorted(self.output_voltage_not_input_power_types):
             if t not in self.types:
@@ -400,7 +481,7 @@ class Rules:
         required_policy_sections = ["RESOLUTION_POLICY", "CLASSIFICATION_POLICY"]
         for section in required_policy_sections:
             if not self.raw.get(section):
-                errors.append(f"{section} ausente/vazio; R9.2 exige política executável.")
+                errors.append(f"{section} ausente/vazio; R9.4 exige política executável.")
         llm_gate = self.classification_policy.get("llm_resolution_gate", {}) or {}
         for key in (
             "allow_only_stage1_type_candidates",
@@ -423,6 +504,18 @@ class Rules:
                 errors.append(f"LLM_SAFETY_GATE_DISABLED: {key} deve ser true")
         if safe(llm_gate.get("require_identity_at_least")) not in {"PROBABLE", "STRONG"}:
             errors.append("LLM_SAFETY_GATE_WEAK: require_identity_at_least deve ser PROBABLE ou STRONG")
+        funnel_policy = llm_gate.get("candidate_funnel", {}) or {}
+        if not funnel_policy:
+            errors.append("CLASSIFICATION_POLICY.llm_resolution_gate.candidate_funnel ausente")
+        else:
+            max_c = int(funnel_policy.get("max_candidates", 0) or 0)
+            if max_c < 1 or max_c > 4:
+                errors.append("CANDIDATE_FUNNEL.max_candidates deve ficar entre 1 e 4")
+            rel = float(funnel_policy.get("relative_score_floor", 0) or 0)
+            if not (0.0 < rel <= 1.0):
+                errors.append("CANDIDATE_FUNNEL.relative_score_floor inválido")
+            if safe(funnel_policy.get("require_identity_at_least")) not in {"PROBABLE", "STRONG"}:
+                errors.append("CANDIDATE_FUNNEL.require_identity_at_least deve ser PROBABLE ou STRONG")
         qg = self.quality_gates
         if not isinstance(qg.get("SYNTHETIC_CASES"), list) or not qg.get("SYNTHETIC_CASES"):
             errors.append("QUALITY_GATES.SYNTHETIC_CASES ausente/vazio")
@@ -458,7 +551,7 @@ class Rules:
         }
         for key in self.raw:
             if key not in allowed_root:
-                errors.append(f"UNKNOWN_ROOT_SECTION: {key} não possui executor no R9.2")
+                errors.append(f"UNKNOWN_ROOT_SECTION: {key} não possui executor no R9.4")
 
         allowed_resolution = {"alias_collision_policy"}
         for key in self.resolution_policy:
@@ -663,15 +756,42 @@ class TavilyWritableStore:
                 created_at TEXT NOT NULL
             )"""
         )
+        self.conn.execute(
+            """CREATE TABLE IF NOT EXISTS tavily_cache_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cache_key TEXT NOT NULL,
+                brand TEXT NOT NULL,
+                model TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                archived_at TEXT NOT NULL,
+                archive_reason TEXT NOT NULL
+            )"""
+        )
         self.conn.commit()
         qc = self.conn.execute("PRAGMA quick_check").fetchone()
         if not qc or safe(qc[0]).lower() != "ok":
             raise RuntimeError(f"SQLite quick_check falhou antes da coleta: {qc[0] if qc else 'sem resposta'}")
 
-    def put(self, brand: str, model: str, payload: Dict[str, Any]) -> None:
+    def put(self, brand: str, model: str, payload: Dict[str, Any], archive_reason: str = "COLLECT") -> None:
         if not isinstance(payload, dict) or not isinstance(payload.get("results", []), list):
             raise ValueError("Payload Tavily inválido; RAW não será gravado")
         key = "v3|" + business_key(brand, model)
+        previous = self.conn.execute(
+            "SELECT cache_key,brand,model,response_json,created_at FROM tavily_cache WHERE cache_key=?",
+            (key,),
+        ).fetchone()
+        if previous is not None:
+            self.conn.execute(
+                """INSERT INTO tavily_cache_history(
+                       cache_key,brand,model,response_json,created_at,archived_at,archive_reason
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    safe(previous["cache_key"]), safe(previous["brand"]), safe(previous["model"]),
+                    safe(previous["response_json"]), safe(previous["created_at"]), now_iso(),
+                    safe(archive_reason) or "RECOLLECT",
+                ),
+            )
         self.conn.execute(
             """INSERT INTO tavily_cache(cache_key,brand,model,response_json,created_at)
                VALUES(?,?,?,?,?)
@@ -682,7 +802,7 @@ class TavilyWritableStore:
                  created_at=excluded.created_at""",
             (key, brand, model, json.dumps(payload, ensure_ascii=False, default=str), now_iso()),
         )
-        self.conn.commit()  # RAW persistido imediatamente por produto
+        self.conn.commit()  # RAW + histórico persistidos imediatamente por produto
 
     def close(self) -> None:
         self.conn.commit()
@@ -762,6 +882,8 @@ def build_precollection_plan(
     cache_path: Path,
     report_path: Path,
     recollect_empty: bool = False,
+    recollect_low_evidence: bool = False,
+    cfg: Optional[Dict[str, Any]] = None,
     max_tavily_new: int = 0,
 ) -> PreCollectionPlan:
     """Normaliza/deduplica/cruza cache. NÃO consulta Tavily."""
@@ -792,8 +914,20 @@ def build_precollection_plan(
             rep.raw_state = raw.state
 
             if raw.state in {"RAW_OK", "RAW_OK_MERGED"}:
-                rep.action = "JA_NO_CACHE"
-                rep.reason = raw.reason or "RAW Tavily já disponível"
+                if recollect_low_evidence and raw.payload is not None and cfg is not None:
+                    search_model = derive_search_model(rep.brand_original, rep.model_original, cfg)
+                    target_level = _payload_target_evidence_level(
+                        rep.brand_original, search_model, raw.payload, cfg
+                    )
+                    if target_level not in {"STRONG", "PROBABLE"}:
+                        rep.action = "RECOLETAR_LOW_EVIDENCE"
+                        rep.reason = f"RAW existente sem evidência target PROBABLE/STRONG (best={target_level})"
+                    else:
+                        rep.action = "JA_NO_CACHE"
+                        rep.reason = (raw.reason + " | " if raw.reason else "") + f"target={target_level}"
+                else:
+                    rep.action = "JA_NO_CACHE"
+                    rep.reason = raw.reason or "RAW Tavily já disponível"
             elif raw.state == "RAW_EMPTY":
                 if recollect_empty:
                     rep.action = "RECOLETAR"
@@ -826,7 +960,7 @@ def build_precollection_plan(
         if store:
             store.close()
 
-    candidates_all = [r for r in representatives if r.action in {"NOVA_COLETA", "RECOLETAR"}]
+    candidates_all = [r for r in representatives if r.action in {"NOVA_COLETA", "RECOLETAR", "RECOLETAR_LOW_EVIDENCE"}]
     candidates = candidates_all[:max_tavily_new] if max_tavily_new else list(candidates_all)
 
     valid_rows = sum(1 for r in rows if r.valid)
@@ -850,6 +984,7 @@ def build_precollection_plan(
         "RAW_CORRUPT": raw_counts["RAW_CORRUPT"],
         "RAW_MISSING": raw_counts["RAW_MISSING"],
         "Já no cache": action_counts["JA_NO_CACHE"],
+        "Recoleta LOW_TARGET_EVIDENCE": action_counts["RECOLETAR_LOW_EVIDENCE"],
         "RAW vazio pulado": action_counts["RAW_EMPTY_PULADO"],
         "Fila real Tavily antes do limite": len(candidates_all),
         "Fila Tavily desta execução": len(candidates),
@@ -920,8 +1055,51 @@ def export_precollection_report(plan: PreCollectionPlan) -> None:
     os.replace(tmp, plan.report_path)
 
 
+def _payload_target_evidence_level(brand: str, model: str, payload: Dict[str, Any], cfg: Dict[str, Any]) -> str:
+    """Melhor nível de identidade target-aware no payload, sem classificar o produto."""
+    suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
+    rank = {"WEAK": 0, "CONTEXTUAL": 1, "PROBABLE": 2, "STRONG": 3}
+    best = "WEAK"
+    for res in (payload.get("results", []) or []):
+        if not isinstance(res, dict):
+            continue
+        title = safe(res.get("title"))
+        content = safe(res.get("content"))
+        url = safe(res.get("url"))
+        level, *_ = _source_identity_baseline(
+            brand, model, title, content, url, suffixes,
+            int((cfg.get("identity", {}) or {}).get("short_model_requires_brand_length", 5) or 5),
+        )
+        if rank.get(level, 0) > rank.get(best, 0):
+            best = level
+    return best
+
+
+def _merge_tavily_payloads(payloads: Sequence[Dict[str, Any]], search_meta: Dict[str, Any]) -> Dict[str, Any]:
+    results: List[Dict[str, Any]] = []
+    seen = set()
+    for payload in payloads:
+        for res in (payload.get("results", []) or []):
+            if not isinstance(res, dict):
+                continue
+            sig = (safe(res.get("url")), safe(res.get("title")), safe(res.get("content"))[:240])
+            if sig in seen:
+                continue
+            seen.add(sig)
+            results.append(res)
+    return {"results": results, "_search_meta": search_meta}
+
+
 def tavily_search(brand: str, model: str, cfg: Dict[str, Any], limiter: RateLimiter) -> Dict[str, Any]:
-    """Consulta Tavily com retry; erro nunca é gravado como RAW válido."""
+    """Consulta Tavily de forma adaptativa; erro nunca é gravado como RAW válido.
+
+    RC4:
+    - preserva Marca/Modelo originais;
+    - usa Search Model derivado apenas para consulta/identidade;
+    - exact_match permanece desligado;
+    - fallback universal só ocorre se a consulta primária não trouxer fonte
+      PROBABLE/STRONG do target.
+    """
     try:
         import requests
     except ImportError as exc:
@@ -935,48 +1113,84 @@ def tavily_search(brand: str, model: str, cfg: Dict[str, Any], limiter: RateLimi
     retries = max(1, int(tc.get("retries", 4)))
     backoffs = tc.get("retry_backoff_seconds", [2, 5, 10, 20]) or [2, 5, 10, 20]
     timeout = float(tc.get("timeout_seconds", 60))
-    body = {
-        "query": f"{brand} {model}".strip(),
-        "search_depth": safe(tc.get("search_depth", "basic")) or "basic",
-        "max_results": int(tc.get("max_results", 5)),
-        "include_answer": False,
-        "include_raw_content": safe(tc.get("include_raw_content", "markdown")) or "markdown",
-    }
+    search_model = derive_search_model(brand, model, cfg)
+    primary_tpl = safe(tc.get("primary_query_template")) or "{brand} {search_model} product specifications"
+    fallback_tpl = safe(tc.get("fallback_query_template")) or "{brand} {search_model} product details manual technical data"
+    adaptive = bool(tc.get("adaptive_queries", True))
+    fallback_only_low = bool(tc.get("fallback_only_when_no_target_evidence", True))
+
+    queries = [primary_tpl.format(brand=brand, model=model, search_model=search_model)]
+    if adaptive and fallback_tpl:
+        q2 = fallback_tpl.format(brand=brand, model=model, search_model=search_model)
+        if q2 not in queries:
+            queries.append(q2)
+
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-    last: Optional[Exception] = None
-    for attempt in range(retries):
-        limiter.wait()
-        try:
-            response = requests.post("https://api.tavily.com/search", headers=headers, json=body, timeout=timeout)
-            status = int(response.status_code)
-            if status == 200:
-                payload = response.json()
-                if not isinstance(payload, dict):
-                    raise RuntimeError("Tavily retornou JSON inválido")
-                return payload
-            if status in {401, 403}:
-                raise OperationalPause("TAVILY_AUTH", f"Tavily HTTP {status}: autenticação/permissão")
-            if status in {432, 433}:
-                raise OperationalPause("TAVILY_PLAN_LIMIT", f"Tavily HTTP {status}: limite de plano/uso atingido")
-            if status == 429 or 500 <= status <= 599:
-                last = RuntimeError(f"Tavily HTTP {status}: {response.text[:500]}")
-            else:
-                raise RuntimeError(f"Tavily HTTP {status}: {response.text[:800]}")
-        except OperationalPause:
-            raise
-        except Exception as exc:
-            last = exc
+    def run_one(query: str) -> Dict[str, Any]:
+        body = {
+            "query": query.strip(),
+            "search_depth": safe(tc.get("search_depth", "basic")) or "basic",
+            "max_results": int(tc.get("max_results", 5)),
+            "include_answer": False,
+            "include_raw_content": safe(tc.get("include_raw_content", "markdown")) or "markdown",
+        }
+        # exact_match deliberadamente não é enviado; recall é prioritário no Stage 0.
+        last: Optional[Exception] = None
+        for attempt in range(retries):
+            limiter.wait()
+            try:
+                response = requests.post("https://api.tavily.com/search", headers=headers, json=body, timeout=timeout)
+                status = int(response.status_code)
+                if status == 200:
+                    payload = response.json()
+                    if not isinstance(payload, dict):
+                        raise RuntimeError("Tavily retornou JSON inválido")
+                    if not isinstance(payload.get("results", []), list):
+                        raise RuntimeError("Tavily retornou results inválido")
+                    return payload
+                if status in {401, 403}:
+                    raise OperationalPause("TAVILY_AUTH", f"Tavily HTTP {status}: autenticação/permissão")
+                if status in {432, 433}:
+                    raise OperationalPause("TAVILY_PLAN_LIMIT", f"Tavily HTTP {status}: limite de plano/uso atingido")
+                if status == 429 or 500 <= status <= 599:
+                    last = RuntimeError(f"Tavily HTTP {status}: {response.text[:500]}")
+                else:
+                    raise RuntimeError(f"Tavily HTTP {status}: {response.text[:800]}")
+            except OperationalPause:
+                raise
+            except Exception as exc:
+                last = exc
 
-        if attempt + 1 < retries:
-            base_wait = float(backoffs[min(attempt, len(backoffs) - 1)])
-            wait = base_wait + random.uniform(0, min(1.5, base_wait * 0.2))
-            LOG.warning("Tavily retry %d/%d para %s | %s em %.1fs", attempt + 1, retries, brand, model, wait)
-            time.sleep(wait)
+            if attempt + 1 < retries:
+                base_wait = float(backoffs[min(attempt, len(backoffs) - 1)])
+                wait = base_wait + random.uniform(0, min(1.5, base_wait * 0.2))
+                LOG.warning("Tavily retry %d/%d para %s | %s em %.1fs", attempt + 1, retries, brand, model, wait)
+                time.sleep(wait)
+        if "429" in safe(last):
+            raise OperationalPause("TAVILY_RATE_LIMIT", f"Rate limit Tavily persistiu após retries: {last}")
+        raise RuntimeError(f"Tavily falhou após {retries} tentativas: {last}")
 
-    if "429" in safe(last):
-        raise OperationalPause("TAVILY_RATE_LIMIT", f"Rate limit Tavily persistiu após retries: {last}")
-    raise RuntimeError(f"Tavily falhou após {retries} tentativas: {last}")
+    payloads: List[Dict[str, Any]] = []
+    query_levels: List[Dict[str, str]] = []
+    for idx, query in enumerate(queries):
+        payload = run_one(query)
+        payloads.append(payload)
+        level = _payload_target_evidence_level(brand, search_model, payload, cfg)
+        query_levels.append({"query": query, "target_level": level})
+        if idx == 0 and fallback_only_low and level in {"STRONG", "PROBABLE"}:
+            break
+
+    return _merge_tavily_payloads(
+        payloads,
+        {
+            "brand_original": brand,
+            "model_original": model,
+            "search_model": search_model,
+            "queries": query_levels,
+            "exact_match": False,
+        },
+    )
 
 
 def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> bool:
@@ -994,6 +1208,8 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         cache_path=cache_path,
         report_path=pre_report,
         recollect_empty=bool(args.recollect_empty),
+        recollect_low_evidence=bool(args.recollect_low_evidence),
+        cfg=cfg,
         max_tavily_new=int(args.max_tavily_new or 0),
     )
     candidates = [
@@ -1050,7 +1266,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             key = business_key(brand, model)
             try:
                 payload = tavily_search(brand, model, cfg, limiter)
-                writer.put(brand, model, payload)
+                writer.put(brand, model, payload, archive_reason=("RECOLLECT_LOW_EVIDENCE" if prior_state in {"RAW_OK", "RAW_OK_MERGED"} else "COLLECT"))
                 n = len(payload.get("results", []) or [])
                 db.event(run_id, key, "TAVILY_SAVED", f"results={n}; prior={prior_state}")
                 rows.append({"Marca": brand, "Modelo": model, "Anterior": prior_state, "Status": "SAVED", "Resultados": n, "Data": now_iso()})
@@ -1085,7 +1301,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
 
 
 # -----------------------------------------------------------------------------
-# Evidências e Stage 1 determinístico — R9.2
+# Evidências e Stage 1 determinístico — R9.3
 # -----------------------------------------------------------------------------
 @dataclass
 class Source:
@@ -1097,8 +1313,10 @@ class Source:
     quality_flags: List[str] = field(default_factory=list)
     type_hits: Dict[str, List[str]] = field(default_factory=dict)
     power_hits: Dict[str, List[str]] = field(default_factory=dict)
+    power_evidence_fields: Dict[str, List[str]] = field(default_factory=dict)
     identity_score: int = 0
     model_match: str = "NONE"
+    model_match_field: str = "NONE"
     source_weight: float = 0.0
     identity_conflict: bool = False
     type_scores: Dict[str, float] = field(default_factory=dict)
@@ -1174,6 +1392,31 @@ def _model_identity_variants(model: str, regional_suffixes: Sequence[str]) -> Li
     if len(tokens) > 1 and compact(tokens[-1]) in suffixes:
         add(" ".join(tokens[:-1]), "REGIONAL_SUFFIX")
 
+    # Identificadores duplos separados por "/" (ex.: G24HG/3400207).
+    # Cada lado pode ser publicado isoladamente pelo fabricante/revenda.
+    if "/" in raw:
+        for part in raw.split("/"):
+            pc = compact(part)
+            if len(pc) >= 5:
+                add(part, "ALT_ID")
+
+    # Código interno numérico seguido do modelo comercial
+    # (ex.: "628439 NHJ 051" -> "NHJ 051"). Só remove prefixo numérico longo.
+    if len(tokens) >= 2 and re.fullmatch(r"\d{5,8}", tokens[0] or ""):
+        rest = " ".join(tokens[1:])
+        rc = compact(rest)
+        if re.search(r"[a-z]", rc) and re.search(r"\d", rc) and len(rc) >= 5:
+            add(rest, "CATALOG_PREFIX")
+
+    # Revisões comerciais curtas anexadas ao fim (01..04), quando o núcleo
+    # anterior já contém letras e números. Mantidas apenas como CORE.
+    raw_c = compact(raw)
+    m_rev = re.fullmatch(r"(.+?)(0[1-4])", raw_c)
+    if m_rev:
+        core = m_rev.group(1)
+        if len(core) >= 6 and re.search(r"[a-z]", core) and re.search(r"\d", core):
+            add(core, "ATTACHED_REVISION")
+
     # Letra isolada após revisão decimal: "RMA 353.0 V" -> "RMA 353.0"
     for base, reason in [(raw, "LETTER_REVISION")]:
         toks = base.split()
@@ -1195,26 +1438,42 @@ def _model_identity_variants(model: str, regional_suffixes: Sequence[str]) -> Li
     return out
 
 
-def _token_coverage(model: str, text: str, regional_suffixes: Sequence[str]) -> float:
-    """Fallback conservador para páginas que omitem um token comercial do SKU."""
-    raw = _model_identity_norm(model)
-    toks = raw.split()
-    suffixes = {compact(x) for x in regional_suffixes if compact(x)}
-    if toks and compact(toks[-1]) in suffixes:
-        toks = toks[:-1]
-    model_tokens = re.findall(r"[a-z]+|\d+", " ".join(toks))
-    if not model_tokens:
-        return 0.0
-    hay = norm_text(text)
-    hits = total = 0.0
-    for token in model_tokens:
-        weight = 2.0 if token.isalpha() and len(token) >= 2 else (1.5 if token.isdigit() and len(token) >= 2 else 0.6)
-        total += weight
-        if re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", hay, re.I):
-            hits += weight
-        elif len(token) >= 4 and token in compact(text):
-            hits += 0.85 * weight
-    return hits / total if total else 0.0
+@lru_cache(maxsize=4096)
+def _model_exact_pattern(compact_variant: str) -> re.Pattern:
+    """Regex estrutural exata do SKU.
+
+    Permite apenas separadores entre caracteres. Não faz fuzzy e não soma tokens
+    espalhados pela página. Isso impede falsos matches como CTVLI20018 contra uma
+    página CGTLI20018 que também menciona CTVLI2010 em produtos relacionados.
+    """
+    c = compact(compact_variant)
+    if not c:
+        return re.compile(r"(?!x)x")
+    pieces = [re.escape(ch) for ch in c]
+    return re.compile(
+        r"(?<![a-z0-9])" + r"[^a-z0-9]*".join(pieces) + r"(?![a-z0-9])",
+        re.I,
+    )
+
+
+def _model_match_in_field(
+    model: str,
+    text: str,
+    suffixes: Sequence[str],
+) -> Tuple[str, str]:
+    """Retorna (match_kind, matched_variant) para UM campo da fonte.
+
+    Match é estritamente estrutural: EXACT/CORE. Não existe mais bag-of-tokens
+    global para identidade, pois ele podia montar um SKU usando pedaços de
+    produtos diferentes na mesma página.
+    """
+    hay = strip_accents(unquote(safe(text))).casefold()
+    if not hay:
+        return "", ""
+    for value, reason in _model_identity_variants(model, suffixes):
+        if _model_exact_pattern(value).search(hay):
+            return ("EXACT" if reason == "EXACT" else "CORE"), value
+    return "", ""
 
 
 def _source_identity_baseline(
@@ -1224,43 +1483,65 @@ def _source_identity_baseline(
     content: str,
     url: str,
     suffixes: Sequence[str],
-) -> Tuple[str, int, str, float]:
-    """Identidade compatível com o Stage 1 estável R5.
+    short_model_requires_brand_length: int = 5,
+) -> Tuple[str, int, str, float, str]:
+    """Identidade target-aware e conservadora.
 
-    R5 usava presença compacta de Marca+Modelo. Aqui mantemos essa semântica,
-    mas registramos níveis novos para o gate estrito da LLM.
+    Regras:
+    - modelo em TITLE/URL é evidência primária;
+    - modelo apenas em BODY só sobe para PROBABLE se a marca também estiver
+      presente em TITLE/URL/DOMÍNIO;
+    - marca sem modelo é apenas CONTEXTUAL e nunca pode, sozinha, sustentar TYPE;
+    - modelos numéricos curtos sem marca não recebem PROBABLE;
+    - não há fuzzy nem cobertura de tokens espalhados.
     """
-    all_text = f"{title} {url} {content[:2500]}"
-    ctext = compact(all_text)
-    variants = _model_identity_variants(model, suffixes)
-    exact = next((reason for value, reason in variants if value and value in ctext), "")
-    coverage = _token_coverage(model, all_text, suffixes)
-    model_hit = bool(exact) or coverage >= 0.82
-    brand_c = compact(brand)
-    brand_hit = len(brand_c) >= 3 and brand_c in ctext
+    title_match, _ = _model_match_in_field(model, title, suffixes)
+    url_match, _ = _model_match_in_field(model, url, suffixes)
+    body_match, _ = _model_match_in_field(model, content, suffixes)
 
-    if model_hit and brand_hit:
+    if title_match:
+        model_match, model_field = title_match, "TITLE"
+    elif url_match:
+        model_match, model_field = url_match, "URL"
+    elif body_match:
+        model_match, model_field = body_match, "BODY"
+    else:
+        model_match, model_field = "NONE", "NONE"
+
+    brand_c = compact(brand)
+    title_c = compact(title)
+    url_c = compact(url)
+    body_c = compact(content)
+    brand_primary = bool(brand_c and len(brand_c) >= 3 and (brand_c in title_c or brand_c in url_c))
+    brand_body = bool(brand_c and len(brand_c) >= 3 and brand_c in body_c)
+    brand_any = brand_primary or brand_body
+
+    primary_model = model_field in {"TITLE", "URL"}
+    body_model = model_field == "BODY"
+    core_model = compact(_model_identity_norm(model))
+    numeric_short = bool(core_model.isdigit() and len(core_model) <= 5)
+    short_ambiguous = bool(core_model and len(core_model) <= max(1, int(short_model_requires_brand_length or 5)))
+
+    if primary_model and brand_any:
         level, score, weight = "STRONG", 100, 1.0
-    elif model_hit:
+    elif primary_model and not numeric_short and not short_ambiguous:
         level, score, weight = "PROBABLE", 85, 0.80
-    elif brand_hit:
-        level, score, weight = "CONTEXTUAL", 55, 0.45
+    elif body_model and brand_primary:
+        level, score, weight = "PROBABLE", 78, 0.72
+    elif body_model and brand_any:
+        level, score, weight = "CONTEXTUAL", 60, 0.45
+    elif brand_primary:
+        level, score, weight = "CONTEXTUAL", 52, 0.40
     else:
         level, score, weight = "WEAK", 0, 0.0
 
-    if exact:
-        match = "EXACT" if exact == "EXACT" else "CORE"
-    elif coverage >= 0.82:
-        match = "TOKENS"
-    else:
-        match = "NONE"
-    return level, score, match, weight
+    return level, score, model_match, weight, model_field
 
 
 class DeterministicEngine:
     """Stage 1 restaurado a partir do R5 estável (v3.7.1).
 
-    Regra central do R9.2:
+    Regra central do R9.3:
     - candidatos vêm SOMENTE de aliases/regras do JSON;
     - qualquer fonte Tavily pode gerar candidato, como no R5;
     - resolução automática exige identidade explícita do modelo OU repetição;
@@ -1273,7 +1554,8 @@ class DeterministicEngine:
         self.cfg = cfg
         self.max_results = int(cfg.get("evidence", {}).get("max_results", 5))
         self.content_chars = int(cfg.get("evidence", {}).get("content_chars", 2400))
-        self.suffixes = cfg.get("identity", {}).get("regional_suffixes", ["AR", "BR", "B1", "B2", "B3", "B4"])
+        self.identity_cfg = cfg.get("identity", {}) or {}
+        self.suffixes = self.identity_cfg.get("regional_suffixes", ["AR", "BR", "B1", "B2", "B3", "B4"])
         self.component_negations = rules.component_context.get("negation_phrases", {}) or {}
         self.min_score = 1.0  # usado pelo gate LLM; 1 ponto = 1 fonte de suporte.
 
@@ -1289,15 +1571,20 @@ class DeterministicEngine:
 
     def build_sources(self, brand: str, model: str, payload: Dict[str, Any]) -> List[Source]:
         out: List[Source] = []
+        identity_model = derive_search_model(brand, model, self.cfg)
         for i, res in enumerate((payload.get("results", []) or [])[: self.max_results], 1):
             title = safe((res or {}).get("title"))
             content = safe((res or {}).get("content"))[: self.content_chars]
             url = safe((res or {}).get("url"))
-            level, score, match, sw = _source_identity_baseline(brand, model, title, content, url, self.suffixes)
+            level, score, match, sw, match_field = _source_identity_baseline(
+                brand, identity_model, title, content, url, self.suffixes,
+                int(self.identity_cfg.get("short_model_requires_brand_length", 5) or 5),
+            )
             out.append(Source(
                 source_id=i, title=title, content=content, url=url,
                 relevance=level, quality_flags=self._source_quality_flags(title, content),
-                identity_score=score, model_match=match, source_weight=sw,
+                identity_score=score, model_match=match, model_match_field=match_field,
+                source_weight=sw,
             ))
         return out
 
@@ -1371,14 +1658,17 @@ class DeterministicEngine:
 
         return hits, {k: list(dict.fromkeys(v)) for k, v in fields.items()}
 
-    def _power_hits_for_source(self, src: Source) -> Dict[str, List[str]]:
-        folded = strip_accents(src.text).casefold()
+    def _power_hits_for_source(self, src: Source) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+        title_fold = strip_accents(src.title).casefold()
+        body_fold = strip_accents(src.content).casefold()
+        combined = f"{title_fold}\n{body_fold}"
         hits: Dict[str, List[str]] = {}
+        fields: Dict[str, List[str]] = defaultdict(list)
         source_types = set(src.type_hits)
         output_voltage_context = bool(source_types.intersection(self.rules.output_voltage_not_input_power_types))
 
         for power, data in self.rules.power_rules.items():
-            if any(contains_alias_prepared(folded, x) for x in (data.get("negative_keywords", []) or [])):
+            if any(contains_alias_prepared(combined, x) for x in (data.get("negative_keywords", []) or [])):
                 continue
             by_group: Dict[str, List[str]] = defaultdict(list)
             for key, values in data.items():
@@ -1387,15 +1677,33 @@ class DeterministicEngine:
                 if not key.endswith("keywords") or not isinstance(values, list):
                     continue
                 for value in values:
-                    if contains_alias_prepared(folded, value):
+                    in_title = contains_alias_prepared(title_fold, value)
+                    in_body = contains_alias_prepared(body_fold, value)
+                    if in_title or in_body:
                         by_group[key].append(value)
+                        if in_title:
+                            fields[power].append("TITLE")
+                        if in_body:
+                            fields[power].append("BODY")
             positive = [x for vals in by_group.values() for x in vals]
             if not positive:
                 continue
             if output_voltage_context and power in {"BATTERY", "CORDED"} and not by_group.get("strong_keywords"):
                 continue
             hits[power] = sorted(set(positive))
-        return hits
+        return hits, {k: list(dict.fromkeys(v)) for k, v in fields.items()}
+
+    @staticmethod
+    def _evidence_is_target_anchored(src: Source, evidence_fields: Sequence[str]) -> bool:
+        """TYPE/POWER só entram no candidato se estiverem ancorados ao SKU alvo."""
+        if src.relevance not in {"STRONG", "PROBABLE"}:
+            return False
+        fields = set(evidence_fields or [])
+        if src.model_match_field in {"TITLE", "URL"}:
+            return True
+        if src.model_match_field == "BODY":
+            return "BODY" in fields
+        return False
 
     def _apply_specificity(self, candidates: Iterable[str]) -> List[str]:
         cur = set(candidates)
@@ -1420,27 +1728,60 @@ class DeterministicEngine:
         all_type_hits: Dict[str, List[int]] = defaultdict(list)
         all_power_hits: Dict[str, List[int]] = defaultdict(list)
 
-        # Candidatos: todas as fontes, como no R5. Aprovação: somente identidade
-        # de modelo (PROBABLE/STRONG) ou repetição independente.
+        # R9.3: candidato não nasce mais de ruído de busca ou de repetição entre
+        # páginas sem o SKU alvo. TYPE/POWER precisam estar ancorados ao modelo.
         explicit_levels = {"STRONG", "PROBABLE"}
         for src in sources:
             src.type_hits, src.type_evidence_fields = self._type_hits_for_source(src)
-            src.power_hits = self._power_hits_for_source(src)
-            src.type_scores = {t: 1.0 for t in src.type_hits}
-            src.power_scores = {p: 1.0 for p in src.power_hits}
-            for typ in src.type_hits:
+            src.power_hits, src.power_evidence_fields = self._power_hits_for_source(src)
+
+            anchored_types = {
+                t for t in src.type_hits
+                if self._evidence_is_target_anchored(src, src.type_evidence_fields.get(t, []))
+            }
+            anchored_powers = {
+                p for p in src.power_hits
+                if self._evidence_is_target_anchored(src, src.power_evidence_fields.get(p, []))
+            }
+
+            # Score target-aware: TITLE vale mais que BODY; identidade e qualidade
+            # modulam o peso. Isso restaura discriminação sem introduzir fuzzy/IA.
+            src.type_scores = {}
+            for typ in anchored_types:
+                fields = set(src.type_evidence_fields.get(typ, []) or [])
+                field_weight = 3.2 if "TITLE" in fields else (1.0 if "COMPOSITE" in fields else 0.45)
+                aliases = [a for a in (src.type_hits.get(typ, []) or []) if a != "[COMPOSITE_RULE]"]
+                max_words = max([len(norm_text(a).split()) for a in aliases] or [1])
+                specificity = 1.0 + min(0.35, max(0, max_words - 1) * 0.07)
+                quality = 0.65 if src.quality_flags else 1.0
+                src.type_scores[typ] = round(field_weight * max(0.1, src.source_weight) * specificity * quality, 6)
+
+            src.power_scores = {}
+            for power in anchored_powers:
+                fields = set(src.power_evidence_fields.get(power, []) or [])
+                field_weight = 2.6 if "TITLE" in fields else 0.55
+                quality = 0.70 if src.quality_flags else 1.0
+                src.power_scores[power] = round(field_weight * max(0.1, src.source_weight) * quality, 6)
+
+            for typ in anchored_types:
                 all_type_hits[typ].append(src.source_id)
-            for power in src.power_hits:
+            for power in anchored_powers:
                 all_power_hits[power].append(src.source_id)
 
         type_candidates = self._apply_specificity(all_type_hits.keys())
         power_candidates = sorted(all_power_hits.keys())
         # Após especificidade, métricas só consideram candidatos sobreviventes.
         type_support = {t: len(set(all_type_hits.get(t, []))) for t in type_candidates}
-        type_scores = {t: float(type_support[t]) for t in type_candidates}
+        type_scores = {
+            t: round(sum(float(src.type_scores.get(t, 0.0) or 0.0) for src in sources), 6)
+            for t in type_candidates
+        }
         type_winner, type_share, type_margin, runner = _weighted_stats(type_scores)
         power_support = {p: len(set(all_power_hits.get(p, []))) for p in power_candidates}
-        power_scores = {p: float(power_support[p]) for p in power_candidates}
+        power_scores = {
+            p: round(sum(float(src.power_scores.get(p, 0.0) or 0.0) for src in sources), 6)
+            for p in power_candidates
+        }
         _, power_share, power_margin, _ = _weighted_stats(power_scores)
         reasons: List[str] = []
 
@@ -1526,6 +1867,140 @@ class DeterministicEngine:
             identity_best=identity_best,
             conflict_count=0,
         )
+
+
+def multi_product_target_detected(rules: Rules, s1: Stage1Result) -> bool:
+    """Detecta kit/combo/múltiplos produtos antes de escolher um constituinte."""
+    rank = DeterministicEngine.IDENTITY_RANK
+    target_sources = [s for s in s1.sources if rank.get(s.relevance, 0) >= rank.get("PROBABLE", 3)]
+    if not target_sources:
+        return False
+    physical = {t for t in s1.type_candidates if t not in rules.component_types}
+
+    # Duas classes físicas explícitas no mesmo título target => multi-produto.
+    for src in target_sources:
+        explicit = {
+            t for t in physical
+            if "TITLE" in (src.type_evidence_fields.get(t, []) or [])
+            and float(src.type_scores.get(t, 0.0) or 0.0) > 0.0
+        }
+        if len(explicit) >= 2:
+            return True
+
+    combined = "\n".join(f"{s.title}\n{s.content[:1200]}" for s in target_sources)
+    folded = norm_text(combined)
+    combo_signal = any(term in folded for term in [
+        "combo kit", "combo set", "tool combo", "cordless combo", "industrial combo kit",
+        "kit combinado", "kit de herramientas", "kit de ferramentas", "set de herramientas",
+        "set din", "set scule", "multi tool kit",
+    ])
+    piece_signal = bool(re.search(r"\b(?:2|3|4|5|6|7|8|9|10)\s*(?:pcs?|pieces?|piezas?|pecas|peças|scule)\b", folded))
+    if combo_signal and (len(physical) >= 2 or piece_signal):
+        return True
+    return False
+
+
+@dataclass
+class CandidateFunnelResult:
+    candidates: List[str]
+    scores: Dict[str, float]
+    reason: str
+    top_score: float = 0.0
+    blocked: bool = False
+
+
+def candidate_funnel(rules: Rules, s1: Stage1Result) -> CandidateFunnelResult:
+    """Stage 1.5 determinístico: reduz o espaço da LLM sem inventar candidatos.
+
+    O funil opera somente sobre TYPEs já encontrados pelo Stage 1 e aplica o
+    mesmo conceito de evidência que será exigido depois da resposta da LLM.
+    """
+    gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
+    policy = gate.get("candidate_funnel", {}) or {}
+    if multi_product_target_detected(rules, s1):
+        return CandidateFunnelResult([], {}, "MULTI_PRODUCT_TARGET", blocked=True)
+    max_candidates = max(1, int(policy.get("max_candidates", 4) or 4))
+    rel_floor = float(policy.get("relative_score_floor", 0.45) or 0.45)
+    min_score = float(policy.get("minimum_score", 0.70) or 0.70)
+    req_identity = safe(policy.get("require_identity_at_least", "PROBABLE")) or "PROBABLE"
+    min_sources = max(1, int(policy.get("require_title_support_or_min_sources", 2) or 2))
+    block_over = bool(policy.get("block_when_candidates_exceed_max", True))
+    rank = DeterministicEngine.IDENTITY_RANK
+
+    eligible: List[Tuple[str, float]] = []
+    for typ in s1.type_candidates:
+        score = float(s1.type_scores.get(typ, 0.0) or 0.0)
+        supporting = [
+            src for src in s1.sources
+            if float(src.type_scores.get(typ, 0.0) or 0.0) > 0.0
+            and rank.get(src.relevance, 0) >= rank.get(req_identity, 3)
+        ]
+        if not supporting:
+            continue
+        title_support = any("TITLE" in (src.type_evidence_fields.get(typ, []) or []) for src in supporting)
+        independent_sources = len({src.source_id for src in supporting})
+        if not title_support and independent_sources < min_sources:
+            continue
+        if score >= min_score:
+            eligible.append((typ, score))
+
+    if not eligible:
+        return CandidateFunnelResult([], {}, "NO_FUNNEL_ELIGIBLE_CANDIDATE", blocked=True)
+
+    eligible.sort(key=lambda kv: (-kv[1], kv[0]))
+    top = eligible[0][1]
+    threshold = max(min_score, top * rel_floor)
+    narrowed = [(typ, score) for typ, score in eligible if score >= threshold]
+
+    if len(narrowed) > max_candidates and block_over:
+        return CandidateFunnelResult(
+            [], dict(narrowed),
+            f"TOO_MANY_PLAUSIBLE_CANDIDATES:{len(narrowed)}>{max_candidates}",
+            top_score=top, blocked=True,
+        )
+
+    narrowed = narrowed[:max_candidates]
+    return CandidateFunnelResult(
+        [typ for typ, _ in narrowed],
+        {typ: score for typ, score in narrowed},
+        "FUNNEL_OK",
+        top_score=top,
+        blocked=False,
+    )
+
+
+def _type_requires_specific_power_rules(rules: Rules, typ: str) -> bool:
+    rows = [r for r in rules.taxonomy_rules if safe(r.get("primary_type")) == typ]
+    if not rows:
+        return False
+    powers = {safe(r.get("power")) or "*" for r in rows}
+    return "*" not in powers and "UNKNOWN" not in powers
+
+
+def _single_funnel_candidate_can_resolve(rules: Rules, s1: Stage1Result, typ: str) -> bool:
+    gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
+    policy = gate.get("candidate_funnel", {}) or {}
+    if not bool(policy.get("single_candidate_can_resolve_without_llm", True)):
+        return False
+    rank = DeterministicEngine.IDENTITY_RANK
+    req_identity = safe(policy.get("require_identity_at_least", "PROBABLE")) or "PROBABLE"
+    supporting = [
+        src for src in s1.sources
+        if float(src.type_scores.get(typ, 0.0) or 0.0) > 0.0
+        and rank.get(src.relevance, 0) >= rank.get(req_identity, 3)
+    ]
+    if not supporting:
+        return False
+    title_support = any("TITLE" in (src.type_evidence_fields.get(typ, []) or []) for src in supporting)
+    repeated = len({src.source_id for src in supporting}) >= 2
+    if not (title_support or repeated):
+        return False
+    if s1.power is None and _type_requires_specific_power_rules(rules, typ):
+        return False
+    power = s1.power or "UNKNOWN"
+    cg, fam, _ = rules.map_taxonomy(typ, power)
+    return (cg, fam) in rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS")
+
 
 # -----------------------------------------------------------------------------
 # Classificação DB / checkpoint
@@ -2170,8 +2645,8 @@ class OpenAICompatibleClassifier:
         }
 
 
-    def schema(self, s1: Stage1Result) -> Dict[str, Any]:
-        """Structured Output fechado nos candidatos do Stage 1.
+    def schema(self, s1: Stage1Result, allowed_types: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+        """Structured Output fechado nos candidatos sobreviventes do Stage 1.5.
 
         Groq/OpenRouter nem conseguem gerar TYPE/POWER fora do conjunto
         determinístico; NVIDIA continua protegida pelo validator Python.
@@ -2185,7 +2660,7 @@ class OpenAICompatibleClassifier:
                 },
                 "product_type": {
                     "type": "string",
-                    "enum": sorted(set(s1.type_candidates) | {"REVISAR"}),
+                    "enum": sorted(set(allowed_types or s1.type_candidates) | {"REVISAR"}),
                 },
                 "power": {
                     "type": "string",
@@ -2215,21 +2690,9 @@ class OpenAICompatibleClassifier:
         }
 
     def _context_type_names(self, brand: str, model: str, s1: Stage1Result) -> List[str]:
-        """Retorna SOMENTE candidatos produzidos pelo Stage 1.
-
-        R9.1 ainda recuperava tipos por similaridade lexical apenas para montar o
-        prompt. Mesmo sem poder validá-los depois, isso expunha a IA a classes que
-        as regras não haviam candidatado. R9.2 fecha essa porta completamente.
-        """
-        selected: List[str] = []
-        if s1.product_type and s1.product_type in s1.type_candidates:
-            selected.append(s1.product_type)
-        for typ in s1.type_candidates:
-            if typ in self.rules.types and typ not in selected:
-                selected.append(typ)
-        # O limite continua técnico, mas nunca corta silenciosamente candidatos:
-        # se o Stage 1 gerar mais que o limite, o caller recebe todos.
-        return selected
+        """Stage 1.5: LLM vê somente os candidatos sobreviventes do funil."""
+        funnel = candidate_funnel(self.rules, s1)
+        return [typ for typ in funnel.candidates if typ in self.rules.types]
 
     def _rules_context(
         self, brand: str, model: str, s1: Stage1Result
@@ -2285,7 +2748,7 @@ class OpenAICompatibleClassifier:
         }
 
         context = {
-            "ALLOWED_PRODUCT_TYPES": list(s1.type_candidates),
+            "ALLOWED_PRODUCT_TYPES": list(selected),
             "RELEVANT_TYPE_RULES": type_rules,
             "POWER_RULES": {p: self.rules.power_rules[p] for p in s1.power_candidates if p in self.rules.power_rules},
             "TYPE_POLICY": self.rules.type_policy,
@@ -2351,27 +2814,27 @@ class OpenAICompatibleClassifier:
             )
 
         system = (
-            "Classify the physical product using only the supplied Tavily evidence. "
-            "The business-rules JSON defines allowed terminology and interpretation. "
-            "Do not use outside knowledge. Do not classify Category General or FAMILY. "
-            "If evidence is insufficient, return INSUFFICIENT_EVIDENCE. "
-            "For RESOLVED, product_type must be one exact value from ALLOWED_PRODUCT_TYPES. "
-            "Never create, infer, translate, or select a type outside that list. "
-            "Power must be UNKNOWN or one exact value from ALLOWED_POWER; never infer power outside that list. "
-            "Cite at least one evidence source id from the IDs actually supplied, and that source "
-            "must textually support the chosen product_type. "
+            "You are an evidence arbiter, not an open-ended product classifier. "
+            "The deterministic engine already produced the only product types you may choose from. "
+            "Use only the supplied Tavily evidence; do not use outside knowledge. "
+            "Do not create, translate, repair, broaden, or infer a product type outside ALLOWED_PRODUCT_TYPES. "
+            "Do not classify Category General or FAMILY. "
+            "Choose RESOLVED only when exactly one allowed type is clearly supported by target evidence. "
+            "If evidence supports multiple products, a kit/combo, a compatible/replacement item, another model, "
+            "or is insufficient, return INSUFFICIENT_EVIDENCE or CONFLICT. "
+            "Power must be UNKNOWN or one exact value from ALLOWED_POWER. "
+            "Cite at least one supplied evidence source id that textually supports the chosen product_type. "
             "Evidence IDs are local and contiguous (1..N); never invent another ID. "
-            "Respect evidence relevance and quality_flags: replacement/manual/compatibility "
-            "pages are secondary when a cleaner exact Brand+Model source exists. "
-            "A phrase such as 'without battery', 'tool only', or 'battery sold separately' "
-            "does not mean the physical product is a battery."
+            "Respect relevance and quality_flags. A phrase such as 'without battery', 'tool only', "
+            "or 'battery sold separately' does not mean the physical product is a battery. "
+            "Return only the requested JSON object."
         )
 
         payload = {
             "product": {"brand": brand, "model": model},
             "stage1": {
                 "state": s1.state,
-                "type_candidates": s1.type_candidates,
+                "type_candidates": selected_types,
                 "power_candidates": s1.power_candidates,
             },
             "business_rules": rules_context,
@@ -2819,7 +3282,7 @@ class OpenAICompatibleClassifier:
                     "json_schema": {
                         "name": "product_classification",
                         "strict": True,
-                        "schema": self.schema(s1),
+                        "schema": self.schema(s1, context_types),
                     },
                 },
                 "reasoning_effort": self.reasoning_effort,
@@ -2837,7 +3300,7 @@ class OpenAICompatibleClassifier:
                     "json_schema": {
                         "name": "product_classification",
                         "strict": True,
-                        "schema": self.schema(s1),
+                        "schema": self.schema(s1, context_types),
                     },
                 },
                 "temperature": 0,
@@ -2987,7 +3450,7 @@ class OpenAICompatibleClassifier:
 
 
 class ProviderCascade:
-    """Groq -> NVIDIA -> OpenRouter, avançando apenas por exaustão de quota."""
+    """Cascata configurável de providers; RC4 prioriza NVIDIA."""
 
     EXHAUSTION_CODES = {
         "GROQ_TPD_EXHAUSTED",
@@ -3187,11 +3650,13 @@ def validate_llm_output(
     if not refs:
         return False, "RESOLVED_WITHOUT_EVIDENCE"
 
-    if bool(gate.get("allow_only_stage1_type_candidates", True)) and typ not in set(s1.type_candidates):
-        return False, "TYPE_NOT_STAGE1_CANDIDATE"
+    funnel = candidate_funnel(rules, s1)
+    allowed_types = set(funnel.candidates)
+    if bool(gate.get("allow_only_stage1_type_candidates", True)) and typ not in allowed_types:
+        return False, "TYPE_NOT_STAGE15_CANDIDATE"
 
     if bool(gate.get("block_multi_primary_title_conflict", True)):
-        candidate_set = set(s1.type_candidates)
+        candidate_set = allowed_types
         for src in s1.sources:
             explicit_here = {
                 t for t in candidate_set
@@ -3221,7 +3686,7 @@ def validate_llm_output(
     )
     total_support = max(strong_support, hit_support)
     typ_score = float(s1.type_scores.get(typ, 0.0) or 0.0)
-    score_total = sum(max(0.0, float(v or 0.0)) for v in s1.type_scores.values()) or 1.0
+    score_total = sum(max(0.0, float(s1.type_scores.get(t, 0.0) or 0.0)) for t in allowed_types) or 1.0
     candidate_share = typ_score / score_total
     min_sources = int(gate.get("require_title_support_or_min_sources", 2) or 2)
     min_share = float(gate.get("min_candidate_share_without_title", 0.45) or 0.45)
@@ -3249,6 +3714,67 @@ def choose_title(sources: List[Source], refs: Sequence[int]) -> Tuple[str, str]:
     if not ordered:
         return "", ""
     return ordered[0].title, ordered[0].url
+
+
+
+def choose_title_for_type(sources: List[Source], typ: str, refs: Sequence[int] = ()) -> Tuple[str, str]:
+    """Escolhe Título Real da melhor fonte target-aware que sustenta o TYPE."""
+    rank = {"STRONG": 4, "PROBABLE": 3, "CONTEXTUAL": 2, "WEAK": 1, "CONFLICT": 0}
+    refset = {int(x) for x in refs if isinstance(x, int) and not isinstance(x, bool)}
+    candidates = [s for s in sources if float(s.type_scores.get(typ, 0.0) or 0.0) > 0.0]
+    if refset:
+        cited_support = [s for s in candidates if s.source_id in refset]
+        if cited_support:
+            candidates = cited_support
+    if not candidates:
+        return choose_title(sources, refs)
+    candidates.sort(
+        key=lambda src: (
+            rank.get(src.relevance, 0),
+            1 if "TITLE" in (src.type_evidence_fields.get(typ, []) or []) else 0,
+            float(src.type_scores.get(typ, 0.0) or 0.0),
+            src.identity_score,
+            0 if src.quality_flags else 1,
+        ),
+        reverse=True,
+    )
+    return candidates[0].title, candidates[0].url
+
+
+def repair_llm_evidence_refs(data: Dict[str, Any], rules: Rules, s1: Stage1Result) -> Tuple[Dict[str, Any], bool]:
+    """Repara somente IDs de evidência quando TYPE já é elegível e suportado.
+
+    Nunca altera TYPE/POWER escolhidos pela LLM. Evita perder uma classificação
+    correta apenas porque o modelo citou um id local inválido.
+    """
+    if safe(data.get("decision")) != "RESOLVED":
+        return data, False
+    typ = safe(data.get("product_type"))
+    funnel = candidate_funnel(rules, s1)
+    if typ not in set(funnel.candidates):
+        return data, False
+    rank = DeterministicEngine.IDENTITY_RANK
+    gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
+    req = safe(gate.get("require_identity_at_least", "PROBABLE")) or "PROBABLE"
+    supporting = [
+        src for src in s1.sources
+        if float(src.type_scores.get(typ, 0.0) or 0.0) > 0.0
+        and rank.get(src.relevance, 0) >= rank.get(req, 3)
+    ]
+    if not supporting:
+        return data, False
+    supporting.sort(
+        key=lambda src: (
+            1 if "TITLE" in (src.type_evidence_fields.get(typ, []) or []) else 0,
+            rank.get(src.relevance, 0),
+            float(src.type_scores.get(typ, 0.0) or 0.0),
+            src.identity_score,
+        ),
+        reverse=True,
+    )
+    out = dict(data)
+    out["evidence_source_ids"] = [supporting[0].source_id]
+    return out, True
 
 
 def record_for_raw_state(raw: RawEvidence) -> Dict[str, Any]:
@@ -3279,6 +3805,31 @@ def record_for_raw_state(raw: RawEvidence) -> Dict[str, Any]:
     }
 
 
+
+def llm_preflight_rejection_reason(rules: Rules, s1: Stage1Result) -> str:
+    """Stage 0 + Stage 1.5 pre-flight; nenhuma chamada LLM inútil."""
+    gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
+    rank = DeterministicEngine.IDENTITY_RANK
+    target_sources = [s for s in s1.sources if rank.get(s.relevance, 0) >= rank.get("PROBABLE", 3)]
+    if not target_sources:
+        return "LOW_TARGET_EVIDENCE"
+
+    if bool(gate.get("block_multi_primary_title_conflict", True)) and multi_product_target_detected(rules, s1):
+        return "MULTI_PRODUCT_TARGET"
+
+    if bool(gate.get("no_candidate_means_no_llm", True)) and not s1.type_candidates:
+        return "TAXONOMY_GAP_NO_ALIAS"
+
+    funnel = candidate_funnel(rules, s1)
+    if funnel.blocked:
+        if funnel.reason.startswith("TOO_MANY_PLAUSIBLE_CANDIDATES"):
+            return "NOISY_TOO_MANY_CANDIDATES"
+        return "NO_LLM_ELIGIBLE_TARGET_EVIDENCE"
+    if not funnel.candidates:
+        return "NO_LLM_ELIGIBLE_TARGET_EVIDENCE"
+    return ""
+
+
 def finalize_product(
     brand: str,
     model: str,
@@ -3290,12 +3841,15 @@ def finalize_product(
     run_id: str,
 ) -> Dict[str, Any]:
     key = business_key(brand, model)
+    funnel = candidate_funnel(rules, s1) if s1.type_candidates else CandidateFunnelResult([], {}, "NO_STAGE1_CANDIDATE", blocked=True)
 
     common = {
         "Marca": brand,
         "Modelo": model,
         "Raw State": raw.state,
         "Stage1 Type Candidates": " | ".join(s1.type_candidates),
+        "Stage1.5 Type Candidates": " | ".join(funnel.candidates),
+        "Stage1 Type Scores": json.dumps(s1.type_scores, ensure_ascii=False, sort_keys=True),
         "Stage1 Power Candidates": " | ".join(s1.power_candidates),
         "Rules Hash": rules.hash,
         "Pipeline Version": PIPELINE_VERSION,
@@ -3306,7 +3860,7 @@ def finalize_product(
         typ = s1.product_type or "REVISAR"
         power = s1.power or "UNKNOWN"
         cg, fam, tax_reason = rules.map_taxonomy(typ, power)
-        title, url = choose_title(s1.sources, [])
+        title, url = choose_title_for_type(s1.sources, typ)
         return {
             **common,
             "Resolution State": "RESOLVED",
@@ -3328,22 +3882,64 @@ def finalize_product(
             "LLM Total Tokens": 0,
         }
 
-    llm_gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
-    if bool(llm_gate.get("no_candidate_means_no_llm", True)) and not s1.type_candidates:
+    # Stage 1.5 pode encerrar deterministicamente quando restou um único TYPE
+    # bem sustentado e a alimentação necessária já está resolvida/dispensável.
+    if len(funnel.candidates) == 1 and not multi_product_target_detected(rules, s1):
+        typ = funnel.candidates[0]
+        if _single_funnel_candidate_can_resolve(rules, s1, typ):
+            power = s1.power or "UNKNOWN"
+            cg, fam, tax_reason = rules.map_taxonomy(typ, power)
+            title, url = choose_title_for_type(s1.sources, typ)
+            return {
+                **common,
+                "Resolution State": "RESOLVED",
+                "Stage": "FUNNEL_RULE",
+                "O que é (Tipo)": typ,
+                "Alimentação": power,
+                "Category General": cg,
+                "FAMILY": fam,
+                "Título Real": title,
+                "Fonte URL": url,
+                "Review Required": "NÃO",
+                "Reason Code": "FUNNEL_SINGLE_CANDIDATE",
+                "Motivo": f"Stage 1.5 reduziu para um TYPE target-aware; {tax_reason}",
+                "LLM Provider": "",
+                "LLM Model": "",
+                "LLM Cache": "",
+                "LLM Prompt Tokens": 0,
+                "LLM Completion Tokens": 0,
+                "LLM Total Tokens": 0,
+            }
+
+    preflight_reason = llm_preflight_rejection_reason(rules, s1)
+    if preflight_reason:
+        # Mantém título apenas de fonte target; para taxonomy gap não inventa tipo.
         title, url = choose_title(s1.sources, [])
+        reason_text = {
+            "LOW_TARGET_EVIDENCE":
+                "Stage 0 não encontrou fonte PROBABLE/STRONG do SKU alvo; candidato a recoleta seletiva.",
+            "TAXONOMY_GAP_NO_ALIAS":
+                "Há evidência target do produto, mas nenhum alias do JSON gerou TYPE; revisar cobertura da taxonomia/regras.",
+            "MULTI_PRODUCT_TARGET":
+                "Fonte target descreve múltiplos tipos/produtos (kit/combo); escolha automática bloqueada.",
+            "NOISY_TOO_MANY_CANDIDATES":
+                "Stage 1.5 encontrou candidatos plausíveis demais; LLM bloqueada para não arbitrar ruído.",
+            "NO_LLM_ELIGIBLE_TARGET_EVIDENCE":
+                "Há candidato bruto, mas nenhum sobreviveu ao funil mínimo de score/identidade/suporte.",
+        }.get(preflight_reason, "LLM bloqueada pelo pre-flight determinístico.")
         return {
             **common,
             "Resolution State": "REVIEW",
-            "Stage": "RULE",
-            "O que é (Tipo)": "REVISAR",
+            "Stage": "STAGE0" if preflight_reason == "LOW_TARGET_EVIDENCE" else "FUNNEL",
+            "O que é (Tipo)": s1.product_type or "REVISAR",
             "Alimentação": s1.power or "UNKNOWN",
             "Category General": "",
             "FAMILY": "",
             "Título Real": title,
             "Fonte URL": url,
             "Review Required": "SIM",
-            "Reason Code": "NO_DETERMINISTIC_TYPE_CANDIDATE",
-            "Motivo": "Stage 1 não encontrou candidato sustentado; LLM bloqueado por política.",
+            "Reason Code": preflight_reason,
+            "Motivo": reason_text,
             "LLM Provider": "",
             "LLM Model": "",
             "LLM Cache": "",
@@ -3357,7 +3953,7 @@ def finalize_product(
         return {
             **common,
             "Resolution State": "REVIEW",
-            "Stage": "RULE",
+            "Stage": "FUNNEL",
             "O que é (Tipo)": s1.product_type or "REVISAR",
             "Alimentação": s1.power or "UNKNOWN",
             "Category General": "",
@@ -3365,7 +3961,7 @@ def finalize_product(
             "Título Real": title,
             "Fonte URL": url,
             "Review Required": "SIM",
-            "Reason Code": f"STAGE1_{s1.state}",
+            "Reason Code": f"STAGE15_{s1.state}",
             "Motivo": " | ".join(s1.reasons),
             "LLM Provider": "",
             "LLM Model": "",
@@ -3375,18 +3971,21 @@ def finalize_product(
             "LLM Total Tokens": 0,
         }
 
-    data, cache_hit, usage = llm.classify(
-        key, raw.raw_hash, brand, model, s1
-    )
+    data, cache_hit, usage = llm.classify(key, raw.raw_hash, brand, model, s1)
+
+    evidence_repaired = False
+    if usage.get("evidence_refs_valid") is False:
+        data, evidence_repaired = repair_llm_evidence_refs(data, rules, s1)
+        if evidence_repaired:
+            usage = dict(usage or {})
+            usage["evidence_refs_valid"] = True
+            usage["evidence_refs_repaired"] = True
 
     if usage.get("evidence_refs_valid") is False:
         ok, why = False, "EVIDENCE_REFS_INVALID"
     else:
-        ok, why = validate_llm_output(
-            data,
-            rules,
-            s1,
-        )
+        ok, why = validate_llm_output(data, rules, s1)
+
     actual_provider = safe(usage.get("provider")) or llm.provider
     actual_model = safe(usage.get("model")) or llm.model
     provider_upper = actual_provider.upper()
@@ -3401,15 +4000,23 @@ def finalize_product(
         "LLM Total Tokens": int(usage.get("total_tokens", 0) or 0),
         "LLM JSON Parse Retries": int(usage.get("json_parse_retries", 0) or 0),
         "LLM Failed Parse Tokens": int(usage.get("failed_parse_tokens", 0) or 0),
+        "LLM Evidence Repaired": "SIM" if evidence_repaired else "NÃO",
         "LLM Rule Context": " | ".join(usage.get("context_types", []) or []),
-        "LLM Rate Limit Headers": json.dumps(
-            usage.get("rate_limit_headers", {}) or {},
-            ensure_ascii=False,
-        ),
+        "LLM Rate Limit Headers": json.dumps(usage.get("rate_limit_headers", {}) or {}, ensure_ascii=False),
     }
 
     if not ok:
         db.event(run_id, key, f"{provider_upper}_OUTPUT_REJECTED", why)
+        rejected_refs = data.get("evidence_source_ids", []) or []
+        suggested_type = safe(data.get("product_type"))
+        if suggested_type in rules.types:
+            title, url = choose_title_for_type(s1.sources, suggested_type, rejected_refs)
+        else:
+            title, url = choose_title(s1.sources, rejected_refs)
+        suggested_power = safe(data.get("power"))
+        suggestion = ""
+        if suggested_type or suggested_power:
+            suggestion = f" | LLM_SUGGESTION={suggested_type or 'REVISAR'}/{suggested_power or 'UNKNOWN'}"
         return {
             **base_llm,
             "Resolution State": "REVIEW",
@@ -3418,23 +4025,25 @@ def finalize_product(
             "Alimentação": "UNKNOWN",
             "Category General": "",
             "FAMILY": "",
-            "Título Real": "",
-            "Fonte URL": "",
+            "Título Real": title,
+            "Fonte URL": url,
             "Review Required": "SIM",
             "Reason Code": why,
-            "Motivo": safe(data.get("reason_short")),
+            "Motivo": f"{safe(data.get('reason_short'))}{suggestion} | POST_GATE={why}".strip(" |"),
+            "Evidence Source IDs": ",".join(map(str, rejected_refs)),
         }
 
     decision = safe(data.get("decision"))
     refs = data.get("evidence_source_ids", []) or []
-    title, url = choose_title(s1.sources, refs)
+    typ = safe(data.get("product_type"))
+    title, url = choose_title_for_type(s1.sources, typ, refs) if typ in rules.types else choose_title(s1.sources, refs)
 
     if decision != "RESOLVED":
         return {
             **base_llm,
             "Resolution State": "REVIEW",
             "Stage": "LLM",
-            "O que é (Tipo)": safe(data.get("product_type")),
+            "O que é (Tipo)": typ,
             "Alimentação": safe(data.get("power")),
             "Category General": "",
             "FAMILY": "",
@@ -3446,7 +4055,6 @@ def finalize_product(
             "Evidence Source IDs": ",".join(map(str, refs)),
         }
 
-    typ = safe(data.get("product_type"))
     power = safe(data.get("power"))
     cg, fam, tax_reason = rules.map_taxonomy(typ, power)
     review = (cg, fam) not in rules.valid_pairs or (cg, fam) == ("OTHERS", "OTHERS")
@@ -4958,9 +5566,12 @@ def run_pipeline(
             or "openai/gpt-oss-120b:free"
         )
 
-        llm_identity = (
-            f"cascade:groq:{groq_model}->nvidia:{nvidia_model}"
-            f"->openrouter:{openrouter_model}"
+        route_names = [safe(x).casefold() for x in (cfg.get("llm", {}).get("route", []) or []) if safe(x)]
+        if not route_names:
+            route_names = ["nvidia", "groq", "openrouter"]
+        model_by_provider = {"groq": groq_model, "nvidia": nvidia_model, "openrouter": openrouter_model}
+        llm_identity = "cascade:" + "->".join(
+            f"{name}:{model_by_provider.get(name, '')}" for name in route_names if name in model_by_provider
         )
         db = ClassificationDB(db_path)
         run_id = db.start_run(args.mode, rules.hash, llm_identity)
@@ -5049,14 +5660,20 @@ def run_pipeline(
                     model=openrouter_model,
                 )
 
-                llm = ProviderCascade([groq_llm, nvidia_llm, openrouter_llm])
+                provider_map = {
+                    "groq": groq_llm,
+                    "nvidia": nvidia_llm,
+                    "openrouter": openrouter_llm,
+                }
+                ordered_providers = [provider_map[x] for x in route_names if x in provider_map]
+                if not ordered_providers:
+                    ordered_providers = [nvidia_llm, groq_llm, openrouter_llm]
+                llm = ProviderCascade(ordered_providers)
                 preflights = llm.preflight_all()
 
-                # NVIDIA pode trocar automaticamente o modelo configurado por
-                # outro que GET /v1/models confirme como disponível agora.
-                llm_identity = (
-                    f"cascade:groq:{groq_llm.model}->nvidia:{nvidia_llm.model}"
-                    f"->openrouter:{openrouter_llm.model}"
+                # Providers podem ajustar modelo durante discovery/preflight.
+                llm_identity = "cascade:" + "->".join(
+                    f"{obj.provider}:{obj.model}" for obj in llm.providers
                 )
                 db.update_run_model(run_id, llm_identity)
 
@@ -5551,6 +6168,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-items", type=int, default=0)
     p.add_argument("--max-tavily-new", type=int, default=0)
     p.add_argument("--recollect-empty", action="store_true")
+    p.add_argument("--recollect-low-evidence", action="store_true")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p
@@ -5571,7 +6189,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     parser = build_parser()
     print("=" * 78)
     print(f" PIPELINE ENRIQUECEDOR DE PRODUTOS {PIPELINE_VERSION} | {BUILD_LABEL}")
-    print(" Tavily RAW -> Regras -> Groq -> NVIDIA -> OpenRouter -> Taxonomia JSON")
+    print(" Tavily RAW -> Stage 0 -> Regras -> Stage 1.5 -> NVIDIA -> Groq -> OpenRouter -> Taxonomia JSON")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 78)
     print("1 - COLETA / EXTRAÇÃO")
@@ -5583,8 +6201,11 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     op = input("Opção: ").strip()
 
     if op == "1":
-        limite = _menu_limit("Limite de NOVAS consultas Tavily para piloto (ENTER = todas): ")
+        limite = _menu_limit("Limite de consultas Tavily para piloto (ENTER = todas): ")
         argv = ["--mode", "collect"]
+        low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
+        if low == "S":
+            argv += ["--recollect-low-evidence"]
         if limite:
             argv += ["--max-tavily-new", str(limite)]
         return parser.parse_args(argv)
@@ -5595,9 +6216,12 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
     if op == "3":
-        limite_tavily = _menu_limit("Limite de NOVAS consultas Tavily (ENTER = todas): ")
+        limite_tavily = _menu_limit("Limite de consultas Tavily (ENTER = todas): ")
         limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
         argv = ["--mode", "full"]
+        low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
+        if low == "S":
+            argv += ["--recollect-low-evidence"]
         if limite_tavily:
             argv += ["--max-tavily-new", str(limite_tavily)]
         if limite_class:

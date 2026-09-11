@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-10-v2.8.4-unified-r5-strict-r9.2",
+  "VERSION": "2026-09-11-v3.0.4-stage0-funnel-taxonomy-cleanup-r9.4-rc4",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -21,7 +21,10 @@
     "Conflito de múltiplos tipos físicos explícitos no mesmo título não pode ser arbitrado livremente pela LLM; deve resultar em revisão.",
     "Revisão B.I=OK é decisão humana externa ao motor e HARD LOCK absoluto, inclusive sob reprocessamento.",
     "QUALITY_GATES reúne regressões sintéticas, identidade e casos reais validados; eles protegem o motor mas não classificam produtos por Marca+Modelo em runtime.",
-    "Nenhuma seção/campo de política sem executor correspondente pode permanecer no JSON operacional."
+    "Nenhuma seção/campo de política sem executor correspondente pode permanecer no JSON operacional.",
+    "Stage 0 valida identidade/qualidade da evidência antes da classificação.",
+    "Stage 1.5 reduz candidatos para a LLM por score, suporte e identidade; a LLM nunca recebe a taxonomia inteira.",
+    "LOW_TARGET_EVIDENCE e TAXONOMY_GAP são estados distintos."
   ],
   "TAXONOMY_PAIRS": [
     {
@@ -59,10 +62,6 @@
     {
       "category_general": "OTHERS",
       "family": "JIGSAW"
-    },
-    {
-      "category_general": "OTHERS",
-      "family": "OTHERS"
     },
     {
       "category_general": "OTHERS",
@@ -127,10 +126,6 @@
     {
       "category_general": "OTHERS",
       "family": "CUT-OFF SAW"
-    },
-    {
-      "category_general": "OTHERS",
-      "family": "MITRE SAW"
     },
     {
       "category_general": "OTHERS",
@@ -422,10 +417,6 @@
     },
     {
       "category_general": "OTHERS",
-      "family": "RIVETER"
-    },
-    {
-      "category_general": "OTHERS",
       "family": "REBITADOR"
     },
     {
@@ -559,6 +550,82 @@
     {
       "category_general": "OTHERS",
       "family": "HIGH PERFORMANCE FRONT MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BELT SANDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BRAKING GRINDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MINI BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PAINT MIXER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PLUNGE SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RATCHET WRENCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SANDING ROLLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SCARIFIER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TABLE SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NIBBLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LINE LASER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONCRETE VIBRATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VACUUM CLEANER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONCRETE SCREED"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SPRAY GUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY SANDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MINI GRINDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "EDGER"
     }
   ],
   "PRODUCT_TYPES": {
@@ -612,7 +679,10 @@
         "cordless hedge trimmer",
         "aparador de cerca viva",
         "cortasetos",
-        "corta setos"
+        "corta setos",
+        "кусторез",
+        "аккумуляторный кусторез",
+        "ножницы для живой изгороди"
       ]
     },
     "TRIMMER": {
@@ -660,7 +730,10 @@
         "battery chainsaw",
         "battery chain saw",
         "brushless chainsaw",
-        "brushless chain saw"
+        "brushless chain saw",
+        "цепная пила",
+        "аккумуляторная цепная пила",
+        "пила аккумуляторная цепная"
       ],
       "negative_aliases": [
         "mini chainsaw",
@@ -703,7 +776,12 @@
         "sabre saw",
         "sabre saws",
         "saber saw",
-        "saber saws"
+        "saber saws",
+        "all-purpose saw",
+        "all purpose saw",
+        "universal saw",
+        "multi-purpose saw",
+        "multipurpose saw"
       ]
     },
     "IMPACT WRENCH": {
@@ -758,7 +836,9 @@
         "jackhammer",
         "jack hammer",
         "martelo demolidor",
-        "martelo rompedor"
+        "martelo rompedor",
+        "demolition breaker",
+        "demolition breaker hammer"
       ]
     },
     "DRILL": {
@@ -959,11 +1039,7 @@
         "miter saw",
         "compound miter saw",
         "sliding miter saw",
-        "serra de esquadria"
-      ]
-    },
-    "MITRE SAW": {
-      "aliases": [
+        "serra de esquadria",
         "mitre saw",
         "compound mitre saw",
         "sliding mitre saw"
@@ -1264,8 +1340,8 @@
         "cargador rapido"
       ],
       "fallback_pair": [
-        "OTHERS",
-        "OTHERS"
+        "PARTS & ACCESSORIES",
+        "ACCESSORIES"
       ]
     },
     "ACCESSORY": {
@@ -1391,7 +1467,16 @@
         "waterpump",
         "motobomba",
         "bomba d'água",
-        "bomba de agua"
+        "bomba de agua",
+        "garden pump",
+        "submersible pump",
+        "sewage pump",
+        "peripheral pump",
+        "bomba periférica",
+        "bomba periferica",
+        "bomba sumergible",
+        "bomba submersível",
+        "bomba submersivel"
       ]
     },
     "ROBOTIC LAWN MOWER": {
@@ -1481,7 +1566,10 @@
         "blind rivet tool",
         "cordless rivet tool",
         "rebitador",
-        "rebiteador"
+        "rebiteador",
+        "rivet gun",
+        "rivet gun tool",
+        "rivet gun (tool)"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -1523,43 +1611,6 @@
     "TOOL GRINDER": {
       "aliases": [
         "tool grinder"
-      ]
-    },
-    "RIVETER": {
-      "aliases": [
-        "riveter",
-        "rebitador",
-        "rivet gun",
-        "rivet gun tool",
-        "rivet gun (tool)"
-      ]
-    },
-    "UTILITY SCISSORS": {
-      "aliases": [
-        "utility scissors",
-        "utility scissor",
-        "universal scissors",
-        "multi-purpose scissors",
-        "multipurpose scissors",
-        "tesoura universal",
-        "tesouras universais",
-        "tesoura multiuso",
-        "tesouras multiuso",
-        "tesoura multifuncional",
-        "general purpose scissors"
-      ],
-      "negative_aliases": [
-        "pruning shears",
-        "pruning shear",
-        "garden pruner",
-        "tesoura de poda",
-        "hedge shears",
-        "metal shears",
-        "sheet metal shears"
-      ],
-      "fallback_pair": [
-        "OTHERS",
-        "OTHERS"
       ]
     },
     "GREASE GUN": {
@@ -1614,7 +1665,7 @@
       ],
       "fallback_pair": [
         "OTHERS",
-        "OTHERS"
+        "GARDEN PRUNER"
       ]
     },
     "INVERTER GENERATOR": {
@@ -1710,13 +1761,27 @@
         "universal shears",
         "cordless universal shear",
         "power shear",
-        "power shears"
+        "power shears",
+        "utility scissors",
+        "utility scissor",
+        "universal scissors",
+        "multi-purpose scissors",
+        "multipurpose scissors",
+        "tesoura universal",
+        "tesouras universais",
+        "tesoura multiuso",
+        "tesouras multiuso",
+        "tesoura multifuncional",
+        "general purpose scissors"
       ],
       "negative_aliases": [
         "pruning shears",
         "garden pruner",
         "hedge shears",
-        "sheet metal shears"
+        "sheet metal shears",
+        "pruning shear",
+        "tesoura de poda",
+        "metal shears"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -1734,7 +1799,13 @@
         "taladro percutor inalambrico",
         "taladro percutor inalámbrico",
         "furadeira de impacto",
-        "furadeira percutora"
+        "furadeira percutora",
+        "impact drill",
+        "cordless impact drill",
+        "brushless cordless impact drill",
+        "compact cordless impact drill",
+        "impact drill driver",
+        "drill impact"
       ],
       "negative_aliases": [
         "impact wrench",
@@ -1776,7 +1847,10 @@
         "cortador de grama",
         "cortacésped",
         "cortacesped",
-        "lawnmower"
+        "lawnmower",
+        "cortadora de césped",
+        "cortadora de cesped",
+        "cortadora de grama"
       ],
       "negative_aliases": [
         "ride-on mower",
@@ -1963,7 +2037,11 @@
         "mezclador electrico",
         "misturador de tinta",
         "misturador elétrico",
-        "misturador eletrico"
+        "misturador eletrico",
+        "cordless mixer",
+        "battery mixer",
+        "cordless power mixer",
+        "cordless paddle mixer"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -1977,7 +2055,13 @@
         "water booster pump",
         "bomba elevadora",
         "bomba de elevación",
-        "bomba de elevacion"
+        "bomba de elevacion",
+        "bomba pressurizadora",
+        "bomba presurizadora",
+        "bomba pressurizadora de água",
+        "bomba presurizadora de agua",
+        "pressurizer pump",
+        "pressure booster pump"
       ],
       "negative_aliases": [
         "centrifugal pump"
@@ -2160,6 +2244,348 @@
         "OTHERS",
         "HIGH PERFORMANCE FRONT MOWER"
       ]
+    },
+    "BELT SANDER": {
+      "aliases": [
+        "belt sander",
+        "belt sanding machine",
+        "cordless belt sander",
+        "lijadora de banda",
+        "lixadeira de cinta",
+        "lixadeira de correia"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BELT SANDER"
+      ]
+    },
+    "BRAKING GRINDER": {
+      "aliases": [
+        "braking grinder",
+        "brake grinder",
+        "grinder with brake",
+        "angle grinder with brake",
+        "braking angle grinder",
+        "amoladora con freno",
+        "amoladora angular con freno",
+        "esmerilhadeira com freio",
+        "esmerilhadeira angular com freio"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BRAKING GRINDER"
+      ]
+    },
+    "FAN": {
+      "aliases": [
+        "cordless fan",
+        "battery fan",
+        "jobsite fan",
+        "worksite fan",
+        "portable jobsite fan",
+        "ventilador a bateria",
+        "ventilador portátil a bateria",
+        "ventilador portatil a bateria"
+      ],
+      "negative_aliases": [
+        "blower fan",
+        "hvac fan",
+        "radiator fan",
+        "cooling fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN"
+      ]
+    },
+    "MINI BLOWER": {
+      "aliases": [
+        "mini blower",
+        "cordless mini blower",
+        "compact air blower",
+        "mini air blower",
+        "mini dust blower",
+        "mini soprador",
+        "soprador compacto"
+      ],
+      "negative_aliases": [
+        "blower motor",
+        "blower fan",
+        "mist blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MINI BLOWER"
+      ]
+    },
+    "PAINT MIXER": {
+      "aliases": [
+        "paint mixer",
+        "paint and mortar mixer",
+        "paint paddle mixer",
+        "mezclador de pintura",
+        "mezclador pintura",
+        "misturador de tinta",
+        "misturador para tinta"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PAINT MIXER"
+      ]
+    },
+    "PLUNGE SAW": {
+      "aliases": [
+        "plunge saw",
+        "plunge-cut saw",
+        "plunge cut saw",
+        "track saw",
+        "guide rail saw",
+        "serra de imersão",
+        "serra de imersao",
+        "sierra de inmersión",
+        "sierra de inmersion"
+      ],
+      "negative_aliases": [
+        "table saw"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PLUNGE SAW"
+      ]
+    },
+    "RATCHET WRENCH": {
+      "aliases": [
+        "ratchet wrench",
+        "cordless ratchet wrench",
+        "powered ratchet",
+        "electric ratchet wrench",
+        "chave catraca a bateria",
+        "chave de catraca a bateria",
+        "llave de carraca a batería",
+        "llave de carraca a bateria",
+        "llave de trinquete inalámbrica",
+        "llave de trinquete inalambrica"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "RATCHET WRENCH"
+      ]
+    },
+    "SANDING ROLLER": {
+      "aliases": [
+        "sanding roller",
+        "cordless sanding roller",
+        "brush sander roller",
+        "surface conditioning roller",
+        "lijadora de rodillo",
+        "lijadora de rodillos",
+        "lixadeira de rolo",
+        "lixadeira de rolos"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SANDING ROLLER"
+      ]
+    },
+    "SCARIFIER": {
+      "aliases": [
+        "scarifier",
+        "lawn scarifier",
+        "garden scarifier",
+        "cordless scarifier",
+        "scarifier aerator",
+        "aerator scarifier",
+        "escarificador",
+        "escarificador de gramado",
+        "escarificador de césped",
+        "escarificador de cesped"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SCARIFIER"
+      ]
+    },
+    "TABLE SAW": {
+      "aliases": [
+        "table saw",
+        "jobsite table saw",
+        "bench table saw",
+        "portable table saw",
+        "serra de bancada",
+        "serra circular de bancada",
+        "sierra de mesa",
+        "sierra circular de mesa"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TABLE SAW"
+      ]
+    },
+    "NIBBLER": {
+      "aliases": [
+        "nibbler",
+        "cordless nibbler",
+        "electric nibbler",
+        "sheet metal nibbler",
+        "roedora",
+        "roedora elétrica",
+        "roedora eletrica",
+        "punzonadora de chapa"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "NIBBLER"
+      ]
+    },
+    "LINE LASER": {
+      "aliases": [
+        "line laser",
+        "laser line",
+        "cross line laser",
+        "cross-line laser",
+        "laser level",
+        "line laser level",
+        "nivel laser",
+        "nível laser"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "LINE LASER"
+      ]
+    },
+    "CONCRETE VIBRATOR": {
+      "aliases": [
+        "concrete vibrator",
+        "concrete vibration tool",
+        "needle vibrator",
+        "vibrador de concreto",
+        "vibrador para concreto",
+        "vibrador de hormigón",
+        "vibrador de hormigon"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CONCRETE VIBRATOR"
+      ]
+    },
+    "VACUUM CLEANER": {
+      "aliases": [
+        "vacuum cleaner",
+        "cordless vacuum cleaner",
+        "wet dry vacuum",
+        "wet/dry vacuum",
+        "shop vacuum",
+        "dust extractor",
+        "aspirador de pó",
+        "aspirador de po",
+        "aspiradora",
+        "aspirador"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "VACUUM CLEANER"
+      ]
+    },
+    "CONCRETE SCREED": {
+      "aliases": [
+        "concrete screed",
+        "cordless concrete screed",
+        "power screed",
+        "vibrating screed",
+        "vibratory screed",
+        "regla vibratoria",
+        "régua vibratória",
+        "regua vibratoria"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CONCRETE SCREED"
+      ]
+    },
+    "SPRAY GUN": {
+      "aliases": [
+        "spray gun",
+        "cordless spray gun",
+        "paint spray gun",
+        "paint sprayer gun",
+        "pistola de pintura",
+        "pistola pulverizadora",
+        "pistola de pulverização",
+        "pistola de pulverizacao"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SPRAY GUN"
+      ],
+      "negative_aliases": [
+        "pressure washer",
+        "pressure washer gun",
+        "power washer",
+        "high pressure washer",
+        "high-pressure washer"
+      ]
+    },
+    "ROTARY SANDER": {
+      "aliases": [
+        "rotary sander",
+        "rotary sanding machine",
+        "disc sander",
+        "rotary disc sander",
+        "lijadora rotativa",
+        "lixadeira rotativa"
+      ],
+      "negative_aliases": [
+        "random orbital sander",
+        "orbital sander",
+        "angle grinder"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ROTARY SANDER"
+      ]
+    },
+    "MINI GRINDER": {
+      "aliases": [
+        "mini grinder",
+        "mini-grinder",
+        "mini grinding tool",
+        "mini rotary grinder",
+        "mini esmeril",
+        "mini retífica",
+        "mini retifica"
+      ],
+      "negative_aliases": [
+        "angle grinder",
+        "bench grinder"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MINI GRINDER"
+      ]
+    },
+    "EDGER": {
+      "aliases": [
+        "lawn edger",
+        "grass edger",
+        "cordless lawn edger",
+        "battery lawn edger",
+        "electric lawn edger",
+        "edger tool",
+        "straight shaft edger",
+        "power edger",
+        "cordless edger",
+        "battery edger",
+        "electric edger"
+      ],
+      "negative_aliases": [
+        "hedge trimmer",
+        "string trimmer",
+        "line trimmer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "EDGER"
+      ]
     }
   },
   "POWER_RULES": {
@@ -2209,7 +2635,9 @@
         "54v",
         "56v",
         "60v",
-        "80v"
+        "80v",
+        "42v",
+        "82v"
       ],
       "negative_keywords": [
         "corded",
@@ -2363,14 +2791,8 @@
       "repuesto bateria",
       "batería de repuesto",
       "bateria de repuesto",
-      "manual de instrucciones",
       "registration and warranty",
       "warranty registration",
-      "instruction manual",
-      "user manual",
-      "operator manual",
-      "owner manual",
-      "manual de usuario",
       "replacement reel",
       "replacement spool",
       "replacement fan",
@@ -2388,11 +2810,6 @@
     "negative_title_terms": [
       "parts",
       "parts catalog",
-      "instruction manual",
-      "user manual",
-      "operator manual",
-      "owner manual",
-      "manual de usuario",
       "replacement reel",
       "replacement spool",
       "spare reel",
@@ -2619,13 +3036,6 @@
       "power": "*",
       "category_general": "OTHERS",
       "family": "MITER SAW",
-      "priority": 140
-    },
-    {
-      "primary_type": "MITRE SAW",
-      "power": "*",
-      "category_general": "OTHERS",
-      "family": "MITRE SAW",
       "priority": 140
     },
     {
@@ -3047,12 +3457,6 @@
       "priority": 125
     },
     {
-      "primary_type": "RIVETER",
-      "category_general": "OTHERS",
-      "family": "RIVETER",
-      "priority": 125
-    },
-    {
       "primary_type": "DRAIN SNAKE",
       "category_general": "OTHERS",
       "family": "DRAIN SNAKE",
@@ -3063,13 +3467,6 @@
       "category_general": "OTHERS",
       "family": "DIE GRINDER",
       "priority": 130
-    },
-    {
-      "primary_type": "UTILITY SCISSORS",
-      "power": "*",
-      "category_general": "OTHERS",
-      "family": "OTHERS",
-      "priority": 140
     },
     {
       "primary_type": "POLE PRUNER",
@@ -3096,8 +3493,8 @@
       "primary_type": "POLE PRUNER",
       "power": "*",
       "category_general": "OTHERS",
-      "family": "OTHERS",
-      "priority": 120
+      "family": "GARDEN PRUNER",
+      "priority": 140
     },
     {
       "primary_type": "INVERTER GENERATOR",
@@ -3329,6 +3726,146 @@
       "category_general": "OTHERS",
       "family": "HIGH PERFORMANCE FRONT MOWER",
       "priority": 205
+    },
+    {
+      "primary_type": "BELT SANDER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "BELT SANDER",
+      "priority": 210
+    },
+    {
+      "primary_type": "BRAKING GRINDER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "BRAKING GRINDER",
+      "priority": 210
+    },
+    {
+      "primary_type": "FAN",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "FAN",
+      "priority": 210
+    },
+    {
+      "primary_type": "MINI BLOWER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "MINI BLOWER",
+      "priority": 210
+    },
+    {
+      "primary_type": "PAINT MIXER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "PAINT MIXER",
+      "priority": 210
+    },
+    {
+      "primary_type": "PLUNGE SAW",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "PLUNGE SAW",
+      "priority": 210
+    },
+    {
+      "primary_type": "RATCHET WRENCH",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "RATCHET WRENCH",
+      "priority": 210
+    },
+    {
+      "primary_type": "SANDING ROLLER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "SANDING ROLLER",
+      "priority": 210
+    },
+    {
+      "primary_type": "SCARIFIER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "SCARIFIER",
+      "priority": 210
+    },
+    {
+      "primary_type": "TABLE SAW",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "TABLE SAW",
+      "priority": 210
+    },
+    {
+      "primary_type": "NIBBLER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "NIBBLER",
+      "priority": 210
+    },
+    {
+      "primary_type": "LINE LASER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "LINE LASER",
+      "priority": 210
+    },
+    {
+      "primary_type": "CONCRETE VIBRATOR",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "CONCRETE VIBRATOR",
+      "priority": 210
+    },
+    {
+      "primary_type": "VACUUM CLEANER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "VACUUM CLEANER",
+      "priority": 210
+    },
+    {
+      "primary_type": "CONCRETE SCREED",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "CONCRETE SCREED",
+      "priority": 210
+    },
+    {
+      "primary_type": "SPRAY GUN",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "SPRAY GUN",
+      "priority": 210
+    },
+    {
+      "primary_type": "CHARGER",
+      "power": "*",
+      "category_general": "PARTS & ACCESSORIES",
+      "family": "ACCESSORIES",
+      "priority": 220
+    },
+    {
+      "primary_type": "ROTARY SANDER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "ROTARY SANDER",
+      "priority": 205
+    },
+    {
+      "primary_type": "MINI GRINDER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "MINI GRINDER",
+      "priority": 205
+    },
+    {
+      "primary_type": "EDGER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "EDGER",
+      "priority": 205
     }
   ],
   "COMPONENT_CONTEXT_RULES": {
@@ -3378,7 +3915,8 @@
       "CRIMPING JAW",
       "BLOWER FAN",
       "BLOWER MOTOR",
-      "DISC MOWER"
+      "DISC MOWER",
+      "CHARGER"
     ],
     "specificity_groups": [
       [
@@ -3441,6 +3979,47 @@
       [
         "TRIMMER",
         "CUTTER"
+      ],
+      [
+        "MINI BLOWER",
+        "BLOWER"
+      ],
+      [
+        "PLUNGE SAW",
+        "CIRCULAR SAW"
+      ],
+      [
+        "TABLE SAW",
+        "CIRCULAR SAW"
+      ],
+      [
+        "PAINT MIXER",
+        "ELECTRIC MIXER"
+      ],
+      [
+        "BRAKING GRINDER",
+        "ANGLE GRINDER"
+      ],
+      [
+        "SANDING ROLLER",
+        "ANGLE GRINDER"
+      ],
+      [
+        "RATCHET WRENCH",
+        "IMPACT WRENCH"
+      ],
+      [
+        "BELT SANDER",
+        "ELECTRIC SANDER"
+      ],
+      [
+        "ROTARY SANDER",
+        "ELECTRIC SANDER"
+      ],
+      [
+        "MINI GRINDER",
+        "DIE GRINDER",
+        "ANGLE GRINDER"
       ]
     ],
     "output_voltage_not_input_power_types": [
@@ -3450,7 +4029,7 @@
     ],
     "output_voltage_rule": "Para GENERATOR, INVERTER GENERATOR e INVERTER WELDER, tensão isolada pode ser saída. O engine deve suprimir power inferido somente por voltage/amp keywords quando houver um desses tipos na mesma fonte.",
     "replacement_compatibility_rule": "ACCESSORY/PART exige evidência de que o Brand+Model consultado é o próprio componente. Página com replacement/spare/repuesto/compatible/para/for pode apenas referenciar o equipamento-alvo; não transformar automaticamente o modelo pesquisado em ACCESSORY/PART.",
-    "source_conflict_rule": "Em conflito entre fontes, preferir a fonte que identifica explicitamente Brand+Model e o substantivo físico do produto. Página de peça, manual ou compatibilidade é evidência secundária e não deve vencer fonte de identidade exata.",
+    "source_conflict_rule": "Em conflito entre fontes, preferir a fonte que identifica explicitamente Brand+Model e o substantivo físico do produto. Página de peça/replacement/compatibilidade é evidência secundária. Manual oficial ou ficha técnica do SKU pode ser evidência primária quando Brand+Model e o tipo físico aparecem de forma explícita.",
     "agricultural_mower_rule": "front/rear/disc/mounted mower e mower-conditioner de implementos agrícolas => DISC MOWER; não usar RIDER/LAWN MOWER apenas pela palavra mower."
   },
   "RESOLUTION_POLICY": {
@@ -3483,7 +4062,23 @@
       "grease gun": "GREASE GUN",
       "pistola engrasadora": "GREASE GUN",
       "heat gun": "HEAT GUN",
-      "brush cutter": "TRIMMER"
+      "brush cutter": "TRIMMER",
+      "mezclador de pintura": "PAINT MIXER",
+      "mezclador pintura": "PAINT MIXER",
+      "misturador de tinta": "PAINT MIXER",
+      "paint mixer": "PAINT MIXER",
+      "rivet gun": "RIVET TOOL",
+      "rivet gun tool": "RIVET TOOL",
+      "utility scissors": "UTILITY SHEARS",
+      "utility scissor": "UTILITY SHEARS",
+      "universal scissors": "UTILITY SHEARS",
+      "multi-purpose scissors": "UTILITY SHEARS",
+      "multipurpose scissors": "UTILITY SHEARS",
+      "tesoura universal": "UTILITY SHEARS",
+      "tesoura multiuso": "UTILITY SHEARS",
+      "mitre saw": "MITER SAW",
+      "compound mitre saw": "MITER SAW",
+      "sliding mitre saw": "MITER SAW"
     }
   },
   "CLASSIFICATION_POLICY": {
@@ -3495,7 +4090,16 @@
       "min_candidate_share_without_title": 0.45,
       "require_identity_at_least": "PROBABLE",
       "no_candidate_means_no_llm": true,
-      "block_multi_primary_title_conflict": true
+      "block_multi_primary_title_conflict": true,
+      "candidate_funnel": {
+        "max_candidates": 4,
+        "relative_score_floor": 0.45,
+        "minimum_score": 0.7,
+        "require_identity_at_least": "PROBABLE",
+        "require_title_support_or_min_sources": 2,
+        "block_when_candidates_exceed_max": true,
+        "single_candidate_can_resolve_without_llm": true
+      }
     }
   },
   "COMPOSITE_TYPE_RULES": [
@@ -3590,6 +4194,38 @@
         "leaf blower",
         "soprador de folhas",
         "soplador de hojas"
+      ]
+    },
+    {
+      "target_type": "WATERPUMP",
+      "all_groups": [
+        [
+          "bomba",
+          "pump"
+        ],
+        [
+          "riego",
+          "irrigation",
+          "lavado",
+          "wash",
+          "succión",
+          "succion",
+          "suction",
+          "caudal",
+          "flow",
+          "altura máxima",
+          "altura maxima",
+          "head",
+          "hp"
+        ]
+      ],
+      "none": [
+        "bomba presurizadora",
+        "bomba pressurizadora",
+        "pressure washer",
+        "hidrolavadora",
+        "lavadora de alta presión",
+        "lavadora de alta pressao"
       ]
     }
   ],
@@ -4194,6 +4830,157 @@
             "ANGLE GRINDER"
           ]
         }
+      },
+      {
+        "id": "r93_trailing_4_impact_drill",
+        "brand": "INGCO",
+        "model": "CIDLI201668 4",
+        "title": "INGCO CIDLI201668 Brushless Cordless Impact Drill",
+        "content": "20V brushless cordless impact drill",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "HAMMER DRILL",
+          "power": "BATTERY",
+          "category_general": "OTHERS",
+          "family": "POWER TOOLS"
+        }
+      },
+      {
+        "id": "r93_restore_belt_sander",
+        "brand": "MAKITA",
+        "model": "9911",
+        "title": "Makita 9911 Belt Sander",
+        "content": "corded 650W electric belt sander",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "BELT SANDER",
+          "power": "CORDED",
+          "category_general": "OTHERS",
+          "family": "BELT SANDER"
+        }
+      },
+      {
+        "id": "r93_nibbler",
+        "brand": "MAKITA",
+        "model": "JN1601",
+        "title": "Makita 5 Amp 16-Gauge Nibbler JN1601",
+        "content": "corded electric sheet metal nibbler",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "NIBBLER",
+          "power": "CORDED",
+          "category_general": "OTHERS",
+          "family": "NIBBLER"
+        }
+      },
+      {
+        "id": "r93_wrong_brand_near_model_must_not_classify",
+        "brand": "TOTAL",
+        "model": "TCNLI9005",
+        "results": [
+          {
+            "title": "Ingco Concrete Nailer 15-40mm 20V CCNLI9005",
+            "content": "INGCO cordless concrete nailer CCNLI9005",
+            "url": "https://example.com/ingco-ccnli9005"
+          },
+          {
+            "title": "INGCO CCNLI9005 Concrete Nailer",
+            "content": "20V nail gun",
+            "url": "https://example.net/ccnli9005"
+          }
+        ],
+        "expect": {
+          "state": "UNRESOLVED",
+          "forbidden_type_candidates": [
+            "NAIL GUN"
+          ]
+        }
+      },
+      {
+        "id": "r93_no_token_stitch_across_related_products",
+        "brand": "INGCO",
+        "model": "CTVLI20018 4",
+        "results": [
+          {
+            "title": "Buy Ingco CGTLI20018 20V Grass Trimmer online",
+            "content": "Related product: CTVLI2010 ceramic tile levelling machine. Main product CGTLI20018 grass trimmer.",
+            "url": "https://example.com/cgtli20018"
+          }
+        ],
+        "expect": {
+          "state": "UNRESOLVED",
+          "forbidden_type_candidates": [
+            "TRIMMER"
+          ]
+        }
+      },
+      {
+        "id": "r93_russian_chainsaw_exact_model",
+        "brand": "GREENWORKS",
+        "model": "2006262",
+        "results": [
+          {
+            "title": "Пила аккумуляторная цепная Greenworks 48V 2006262",
+            "content": "аккумуляторная цепная пила",
+            "url": "https://example.com/2006262"
+          },
+          {
+            "title": "Greenworks 80V Lawn Mower",
+            "content": "push lawn mower",
+            "url": "https://example.com/unrelated-mower"
+          }
+        ],
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "CHAINSAW",
+          "power": "BATTERY",
+          "category_general": "BATTERY PRODUCT",
+          "family": "BATTERY CHAINSAW",
+          "forbidden_type_candidates": [
+            "WALK BEHIND MOWER",
+            "LAWN MOWER"
+          ]
+        }
+      },
+      {
+        "id": "nebraska_contextual_waterpump",
+        "brand": "NEBRASKA",
+        "model": "NEBC075",
+        "title": "Bomba Nebraska NEBC075 550W 3/4HP - Ideal Riego O Lavado",
+        "content": "Frecuencia 50Hz monofásica 220V altura máxima 23m succión 6m",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "WATERPUMP",
+          "power": "CORDED",
+          "category_general": "WATERPUMPS",
+          "family": "WATERPUMP"
+        }
+      },
+      {
+        "id": "einhell_all_purpose_recip_saw",
+        "brand": "EINHELL",
+        "model": "TE AP 750 E",
+        "title": "EINHELL TE-AP 750 E - 750W All Purpose Saw",
+        "content": "230V corded all-purpose saw",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "RECIPROCATING SAW",
+          "power": "CORDED"
+        }
+      },
+      {
+        "id": "greenworks_revision_blower",
+        "brand": "GREENWORKS",
+        "model": "BB42XA1",
+        "title": "Greenworks 82V OPTIMUS 42N Backpack Blower | BB42X",
+        "content": "82V cordless backpack blower",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "BLOWER",
+          "power": "BATTERY",
+          "category_general": "BATTERY PRODUCT",
+          "family": "BATTERY BLOWER"
+        }
       }
     ],
     "REAL_VALIDATED_CASES": [
@@ -4795,6 +5582,94 @@
         "content": "cordless impact wrench",
         "expect": {
           "min_level": "PROBABLE",
+          "model_match": "EXACT"
+        }
+      },
+      {
+        "id": "standalone_market_suffix_4",
+        "brand": "INGCO",
+        "model": "CIDLI201668 4",
+        "title": "INGCO CIDLI201668 Brushless Cordless Impact Drill",
+        "content": "20V cordless impact drill",
+        "expect": {
+          "min_level": "STRONG",
+          "model_match": "EXACT"
+        }
+      },
+      {
+        "id": "no_global_token_stitch",
+        "brand": "INGCO",
+        "model": "CTVLI20018 4",
+        "title": "INGCO CGTLI20018 Grass Trimmer",
+        "content": "Related CTVLI2010 tile tool. 20018 series products.",
+        "expect": {
+          "max_level": "CONTEXTUAL",
+          "model_match": "NONE"
+        }
+      },
+      {
+        "id": "voltage_model_mismatch_not_match",
+        "brand": "BOSCH",
+        "model": "GGS 12V 23 PLC",
+        "title": "Bosch GGS 18V-23 PLC Cordless Straight Grinder",
+        "content": "GGS 18V-23 PLC",
+        "expect": {
+          "max_level": "CONTEXTUAL",
+          "model_match": "NONE"
+        }
+      },
+      {
+        "id": "alternate_slash_identifier",
+        "brand": "GREENWORKS",
+        "model": "G24HG/3400207",
+        "title": "Greenworks G24HG 24V Cordless Heat Gun",
+        "content": "battery heat gun",
+        "expect": {
+          "min_level": "STRONG",
+          "model_match": "CORE"
+        }
+      },
+      {
+        "id": "catalog_prefix_plus_commercial_model",
+        "brand": "NAPPO",
+        "model": "628439 NHJ 051",
+        "title": "Nappo NHJ-051 Petrol Trimmer",
+        "content": "petrol brushcutter",
+        "expect": {
+          "min_level": "STRONG",
+          "model_match": "CORE"
+        }
+      },
+      {
+        "id": "short_sku_without_brand_c6a1",
+        "brand": "GREENWORKS",
+        "model": "C6A1",
+        "title": "C6 and C6A1 7.62-mm Medium Machine Gun - Canada.ca",
+        "content": "C6A1 military reference",
+        "expect": {
+          "max_level": "WEAK",
+          "model_match": "EXACT"
+        }
+      },
+      {
+        "id": "short_sku_wrong_brand_ms52",
+        "brand": "BRUTE",
+        "model": "MS52",
+        "title": "MATRIX MS-52 Universal Urethane Clearcoat",
+        "content": "Matrix MS-52 clearcoat",
+        "expect": {
+          "max_level": "WEAK",
+          "model_match": "EXACT"
+        }
+      },
+      {
+        "id": "greenworks_revision_suffix_a1",
+        "brand": "GREENWORKS",
+        "model": "BB42XA1",
+        "title": "Greenworks 82V OPTIMUS 42N Backpack Blower | BB42X",
+        "content": "82V cordless backpack blower",
+        "expect": {
+          "min_level": "STRONG",
           "model_match": "EXACT"
         }
       }
