@@ -1,116 +1,183 @@
-# Product Enricher — R9.4 RC4
+# R9.5 — Collection Quality Gate + Target Isolation Funnel
 
-**Release Candidate para piloto controlado. Não considerar STABLE até validação humana do lote piloto.**
+## Objetivo
 
-## Arquitetura
+Fortalecer a etapa que alimenta todo o pipeline. A R9.5 mantém Stage 1, Stage 1.5, taxonomia e a política de LLM da R9.4/HF1, mas muda a coleta para que **somente evidência associada ao SKU alvo chegue à classificação**.
 
-Tavily RAW/cache → Stage 0 Evidence Gate → Stage 1 regras determinísticas → Stage 1.5 Candidate Funnel → NVIDIA → Groq → OpenRouter → taxonomia determinística.
+Princípio central:
 
-### Stage 0 — Evidence Gate
-- não classifica o produto;
-- valida identidade Marca + Modelo e qualidade da fonte;
-- usa Modelo original preservado + `search_model` derivado;
-- aceita variações controladas de separadores, revisão/sufixos e SKUs embutidos;
-- não usa `exact_match` no Tavily;
-- separa `LOW_TARGET_EVIDENCE` de `TAXONOMY_GAP_NO_ALIAS`;
-- resultados WEAK/CONTEXTUAL não sustentam TYPE/POWER sozinhos.
+> RAW pode conter ruído para auditoria; `curated_results` não pode.
 
-### Stage 1 — Regras determinísticas
-- PRODUCT_TYPE nasce somente de aliases/regras do JSON;
-- negativos, especificidade, componentes e colisões são executados no Python;
-- Category General/FAMILY nunca são escolhidos pela LLM.
-
-### Stage 1.5 — Candidate Funnel
-- reduz os candidatos antes da LLM;
-- máximo de 4 candidatos;
-- janela relativa de score = 0.45;
-- identidade mínima = PROBABLE;
-- exige TITLE ou suporte suficiente entre fontes;
-- 1 candidato bem sustentado pode ser resolvido sem LLM;
-- excesso de candidatos/multi-produto bloqueia chamada para evitar arbitragem de ruído.
-
-### LLM
-Rota padrão:
-1. NVIDIA `nvidia/nemotron-3.5-lightning-30b-a3b`
-2. Groq `openai/gpt-oss-120b`
-3. OpenRouter `openai/gpt-oss-120b:free`
-
-A LLM atua como **árbitro**, não como classificador aberto. Ela recebe apenas candidatos sobreviventes do Stage 1.5 e não pode criar PRODUCT_TYPE, Category General ou FAMILY.
-
-## Tavily / nova coleta
-- `exact_match=false`;
-- query primária: `{brand} {search_model} product specifications`;
-- fallback apenas quando não há evidência target suficiente;
-- query fallback: `{brand} {search_model} product details manual technical data`;
-- recoleta seletiva para RAW vazio/ruim;
-- cache antigo é preservado em `tavily_cache_history` antes de substituição.
-
-## Proteções preservadas
-- `Revisão B.I=OK` = HARD LOCK absoluto;
-- Manual não é sobrescrito;
-- Opção 4 = recuperação/classificação com cache, sem Tavily;
-- MERCHANDISING removido;
-- `EARTH AUGER → DRILLERS | DRILLERS`;
-- `UTILITY SCISSORS` consolidado em `UTILITY SHEARS`;
-- `MITRE SAW` consolidado em `MITER SAW`;
-- `RIVETER` consolidado em `RIVET TOOL`;
-- `CHARGER → PARTS & ACCESSORIES | ACCESSORIES`;
-- `OTHERS | OTHERS` proibido pelo validador.
-
-## Validação executada em 11/09/2026
+## Fluxo R9.5
 
 ```text
-Pipeline:       3.9.4-rc4
-Rules:          2026-09-11-v3.0.4-stage0-funnel-taxonomy-cleanup-r9.4-rc4
-semantic_hash:  ff98ea9e4051
-quality_hash:   bb8a834d0bbb
-
-Python compile:             OK
-Rules/schema validation:    OK
-Synthetic gates:            48/48
-Identity gates:             14/14
-Real teacher executáveis:   22/22
-Reference-only:             12
-Cache validado:             3430 produtos
-Variantes mescladas:        30
-PRODUCT_TYPES:              132
-POWER_TYPES:                7
+Base de Produtos
+  ↓
+Search Model derivado (Marca/Modelo originais preservados)
+  ↓
+Tavily Search ABERTO
+  - sem include_domains
+  - sem country filter
+  - sem language filter
+  - exact_match = false
+  - auto_parameters = false
+  ↓
+Identity Gate (Marca + SKU + campo do match)
+  ↓
+Tavily Extract nas URLs elegíveis
+  ↓
+Target Isolation Funnel
+  - página dedicada: limpa a cauda de related products
+  - catálogo/listagem: isola o bloco/linha do SKU
+  - outro SKU vira fronteira e não contamina o target
+  - compatibilidade/related-only são rejeitados
+  ↓
+Collection Quality Gate
+  ↓
+_collection.curated_results
+  ↓
+Stage 1 → Stage 1.5 → NVIDIA/Groq → Taxonomia
 ```
 
-Replay offline do cohort real de 236 itens problemáticos, sem Tavily e sem LLM:
+## Search e Extract
+
+A Tavily documenta `chunks_per_source` no Search (1–3 chunks, até 500 caracteres por chunk) e no Extract (1–5 chunks). O Extract aceita `query`, usada para reranquear os chunks da URL. A R9.5 usa esse fluxo para localizar o SKU sem induzir TYPE.
+
+Configuração inicial:
+
+- Search PRIMARY: `basic`, 2 chunks, 5 resultados.
+- Search FALLBACK: `basic` se a evidência ainda não estiver pronta.
+- Search RESCUE: `advanced` somente no residual.
+- Extract: `basic`, 3 chunks por URL.
+- Extract Advanced: retry seletivo apenas quando catálogo/tabela contém o SKU mas o Basic não permitiu isolá-lo.
+- Tavily score: apenas ordenação secundária; nunca prova identidade.
+
+Documentação usada:
+- https://docs.tavily.com/documentation/api-reference/endpoint/search
+- https://docs.tavily.com/documentation/api-reference/endpoint/extract
+- https://docs.tavily.com/documentation/best-practices/best-practices-extract
+
+## Estados de fonte
+
+- `ACCEPT_TARGET_CLEAN`: página dedicada ao SKU, sem contaminação estrutural detectada.
+- `ACCEPT_TARGET_ISOLATED`: página multi-produto/catálogo, mas o bloco do SKU foi isolado com sucesso.
+- `REJECT_WRONG_MODEL`: SKU alvo não aparece na evidência.
+- `REJECT_COMPATIBILITY_ONLY`: SKU aparece apenas como compatibilidade/substituição.
+- `REJECT_RELATED_ONLY`: SKU aparece apenas em related products.
+- `REJECT_GENERIC_NO_TARGET_BLOCK`: página genérica sem bloco do SKU recuperável.
+- `REJECT_NON_ISOLATABLE`: SKU aparece, mas o texto ainda mistura outros SKUs após a tentativa de isolamento.
+- `REJECT_WEAK_IDENTITY`: reservado para políticas futuras de identidade fraca.
+- `REJECT_EXTRACT_FAILED`: reservado para falha explícita de extração.
+
+## Estados do produto após coleta
+
+- `READY_FOR_CLASSIFICATION`
+- `PARTIAL_TARGET_EVIDENCE`
+- `LOW_TARGET_EVIDENCE`
+- `NO_TARGET_EVIDENCE`
+
+`READY_FOR_CLASSIFICATION` ocorre quando há fonte STRONG suficiente, duas fontes PROBABLE independentes ou um bloco multi-produto isolado de forma exata conforme a policy.
+
+## RAW x Curated
+
+O cache continua preservando `results` do Search para auditoria. A R9.5 acrescenta `_collection`, que guarda:
+
+- `curated_results`
+- `source_audit`
+- `query_audit`
+- `raw_extract_results`
+- `credits`
+- `state`
+
+Quando `_collection` existe, o Stage 1 **não faz fallback para `results`**. Se `curated_results` estiver vazio, a classificação recebe zero fontes e permanece pendente em vez de consumir RAW contaminado.
+
+## Catálogos multi-produto
+
+Exemplo:
 
 ```text
-RESOLVED_RULE                 99
-RESOLVED_FUNNEL               19
-LOW_TARGET_EVIDENCE           88
-MULTI_PRODUCT_TARGET          19
-TAXONOMY_GAP_NO_ALIAS          7
-NO_LLM_ELIGIBLE_TARGET_EVIDENCE 1
-LLM realmente elegíveis        3
-TOTAL                        236
+TOTAL Power Tools Catalogue
+TL5508216 planer 550W
+TGSLI20126 vacuum cleaner 20V
+TDLI20012 drill 20V
 ```
 
-Ou seja: **118/236 foram resolvidos deterministicamente e apenas 3 precisariam de LLM nesse replay**.
+Para `TL5508216`, a fonte não é descartada. O Target Isolation Funnel libera somente:
 
-O replay integral dos 3430 itens foi iniciado neste ambiente, mas excedeu a janela de execução disponível; por isso a versão permanece RC e deve ser validada em piloto antes de escalar.
+```text
+TL5508216 planer 550W
+```
 
-## Piloto recomendado
+`TGSLI20126`, `TDLI20012`, `vacuum cleaner`, `drill` e seus atributos não chegam ao Stage 1 daquele produto.
 
-1. Substituir somente `pipeline_produtos.py`, `regras_negocio.json`, `pipeline_config.json` e `README.md`.
-2. Não substituir `.env`, `cache_tavily.sqlite`, `pipeline_v3.sqlite`, Base Final, Consolidado ou backups.
-3. Executar a **Opção 4** com limite de **30** itens.
-4. Confirmar no início:
-   - Pipeline `3.9.4-rc4`;
-   - Rules `...v3.0.4...rc4`;
-   - `QUALITY GATES OK`;
-   - `tavily_calls=0`.
-5. Revisar os 30 produtos antes de liberar o restante dos pendentes.
-6. Só depois retomar nova coleta e o lote de ~1000 produtos.
+## Curadoria do cache atual sem gastar Tavily
 
-## Git
+Nova opção do menu:
 
-Commit sugerido:
+```text
+6 - CURAR CACHE LEGADO R9.5 (SEM TAVILY / 0 CRÉDITOS)
+```
 
-`R9.4 RC4 - Stage0 evidence gate, candidate funnel e taxonomia revisada`
+Ela usa `raw_content`/`content` já persistidos para criar `_collection.curated_results`, sem nova chamada de Search ou Extract. Cada atualização mantém a versão anterior em `tavily_cache_history`.
 
-Não versionar `.env`, `*.sqlite`, Excel operacional ou backups.
+Sugestão operacional:
+
+1. Fazer backup dos arquivos atuais.
+2. Rodar a opção 6 com um piloto pequeno (ex.: 100 produtos).
+3. Auditar `Curadoria_Cache_R9_5.xlsx`.
+4. Rodar a coleta R9.5 apenas para os que continuarem com evidência insuficiente.
+5. Auditar `Coleta_Tavily_R9_5.xlsx`.
+6. Só então rodar a classificação.
+
+Observação: a curadoria altera o `raw_hash` semântico porque passa a existir uma camada de evidência curada. O baseline Excel não é modificado pela opção 6. `Revisão B.I=OK` continua HARD LOCK na classificação.
+
+## Relatórios
+
+`Coleta_Tavily_R9_5.xlsx` terá:
+
+- `Resumo`: estados, decisões e créditos observados.
+- `Produtos`: estado final da coleta por Marca/Modelo.
+- `Fontes`: decisão e motivo por URL.
+- `Queries`: PRIMARY/FALLBACK/RESCUE e estado após cada etapa.
+
+`Curadoria_Cache_R9_5.xlsx` usa a mesma estrutura, com créditos Tavily iguais a zero.
+
+## Arquivos do pacote
+
+- `pipeline_produtos.py`
+- `pipeline_config.json`
+- `collection_quality_policy.json`
+- `test_collection_quality.py`
+- `README.md`
+- `regras_negocio.json` — sem alteração semântica nesta revisão.
+
+## Validações executadas
+
+- `py_compile`: OK.
+- `Rules.validate()`: 0 erros.
+- Quality gates existentes: 50/50 synthetic, 14/14 identity, 22/22 real explicit.
+- Fonte dedicada: aceita.
+- Catálogo multi-produto: target isolado; outros SKUs removidos.
+- Compatibility-only: rejeitado.
+- Related-only: rejeitado.
+- Página dedicada com related footer: footer contaminante removido.
+- `_collection.curated_results=[]`: Stage 1 não volta ao RAW sujo.
+
+## SUMMARY
+
+`feat: add R9.5 collection quality gate and target isolation funnel`
+
+## DESCRIPTION
+
+- Keeps product search fully open with no domain, country or strict language filtering and exact_match disabled.
+- Splits discovery from evidence consumption using Tavily Search followed by selective Tavily Extract.
+- Adds deterministic SKU identity validation before TYPE/POWER detection.
+- Adds Target Isolation Funnel for catalogues, listings and multi-product pages instead of discarding them by default.
+- Prevents other SKUs, related products and compatibility-only references from contaminating the target product evidence.
+- Stores raw Search/Extract data for audit while exposing only curated_results to Stage 1.
+- Adds selective Advanced Extract retry for non-isolatable catalogue/table sources.
+- Adds PRIMARY, FALLBACK and ADVANCED RESCUE search stages without injecting guessed product type into queries.
+- Adds collection states, source decisions, query audit and Tavily credit telemetry.
+- Adds zero-credit cache curation mode to reuse existing raw_content before spending new Tavily credits.
+- Preserves Revisão B.I=OK as an absolute HARD LOCK.
+- Preserves R9.4 deterministic classification rules, Stage 1.5 Candidate Funnel and NVIDIA/Groq routing.

@@ -1,0 +1,72 @@
+{
+  "VERSION": "2026-09-12-r9.5-collection-quality-v1",
+  "DESIGN_PRINCIPLES": [
+    "Busca primaria 100% aberta: sem include_domains, country, language filter ou exact_match.",
+    "Marca e Modelo originais nunca sao alterados; Search Model existe apenas para busca e identidade.",
+    "Tavily score ordena fontes, mas nunca prova identidade do SKU.",
+    "Pagina multi-produto nao e descartada automaticamente: primeiro tenta isolar deterministicamente o bloco do SKU alvo.",
+    "TYPE e POWER so podem ser extraidos depois que a fonte/bloco passou pelo Collection Quality Gate.",
+    "RAW de Search/Extract permanece auditavel; Stage 1 recebe somente curated_results.",
+    "Compatibilidade, related products e outro produto dominante nao podem contaminar a evidencia do target.",
+    "Falha de isolamento nao vira classificacao: permanece pendencia/recoleta."
+  ],
+  "identity": {
+    "direct_accept_levels": ["STRONG", "PROBABLE"],
+    "allow_contextual_extract_rescue": true,
+    "ready_if_strong_sources": 1,
+    "ready_if_probable_sources": 2,
+    "ready_if_exact_isolated_sources": 1
+  },
+  "isolation": {
+    "chunk_separator_regex": "\\s*\\[\\.\\.\\.\\]\\s*",
+    "target_window_chars": 850,
+    "minimum_block_chars": 12,
+    "max_other_skus_after_isolation": 0,
+    "require_target_in_block_for_multi_product": true,
+    "allow_dedicated_page_chunks_without_repeated_sku": true,
+    "advanced_extract_retry_on_non_isolatable": true,
+    "advanced_extract_retry_max_urls": 3
+  },
+  "generic_page_terms": [
+    "catalog", "catalogue", "catalogo", "catálogo", "product catalog", "product catalogue",
+    "our products", "product range", "products range", "linha de produtos", "gama de productos",
+    "all products", "todos os produtos", "todos los productos", "search results", "resultados de busca",
+    "product list", "lista de produtos", "listado de productos"
+  ],
+  "related_section_terms": [
+    "related products", "related items", "similar products", "recommended products", "recommended items",
+    "you may also like", "customers also viewed", "other products", "outros produtos", "productos relacionados",
+    "produtos relacionados", "itens relacionados", "accesorios relacionados", "accessories related"
+  ],
+  "compatibility_terms": [
+    "compatible with", "compatibility with", "fits model", "fits models", "fits the", "for model", "for models",
+    "replacement for", "replaces", "suitable for", "works with", "designed for", "use with",
+    "compatível com", "compativel com", "serve para", "para o modelo", "para os modelos", "substitui",
+    "compatible con", "para modelo", "para modelos", "reemplazo para", "apto para"
+  ],
+  "model_token_ignore_regexes": [
+    "^[0-9]+(?:V|W|KW|AH|MAH|HP|MM|CM|BAR|PSI|RPM|HZ|KG|G|ML|NM|A|VAC|VDC)$",
+    "^IPX[0-9]+$",
+    "^M[0-9]{1,3}$",
+    "^ISO[0-9]+$",
+    "^DIN[0-9]+$",
+    "^[0-9]{4}$"
+  ],
+  "states": {
+    "ready": "READY_FOR_CLASSIFICATION",
+    "partial": "PARTIAL_TARGET_EVIDENCE",
+    "low": "LOW_TARGET_EVIDENCE",
+    "none": "NO_TARGET_EVIDENCE"
+  },
+  "source_decisions": [
+    "ACCEPT_TARGET_CLEAN",
+    "ACCEPT_TARGET_ISOLATED",
+    "REJECT_WRONG_MODEL",
+    "REJECT_COMPATIBILITY_ONLY",
+    "REJECT_RELATED_ONLY",
+    "REJECT_GENERIC_NO_TARGET_BLOCK",
+    "REJECT_NON_ISOLATABLE",
+    "REJECT_WEAK_IDENTITY",
+    "REJECT_EXTRACT_FAILED"
+  ]
+}

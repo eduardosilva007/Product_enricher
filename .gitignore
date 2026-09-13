@@ -1,43 +1,146 @@
-# Segredos / ambiente
+# ============================================================
+
+# SEGREDOS / AMBIENTE
+
+# ============================================================
+
 .env
 .env.*
 !.env.example
 
-# Python
-__pycache__/
+# Chaves / certificados
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+# ============================================================
+
+# PYTHON
+
+# ============================================================
+
+**pycache**/
 *.py[cod]
+*$py.class
+
 .venv/
 venv/
+env/
+ENV/
 
-# Bancos locais / cache
+# Build / distribuição
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ============================================================
+
+# TESTES / QUALIDADE / COBERTURA
+
+# ============================================================
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ============================================================
+
+# JUPYTER
+
+# ============================================================
+
+.ipynb_checkpoints/
+
+# ============================================================
+
+# BANCOS LOCAIS / CACHE
+
+# ============================================================
+
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.sqlite-journal
 *.db
+*.db-shm
+*.db-wal
 
-# Bases e outputs
+# ============================================================
+
+# BASES E OUTPUTS OPERACIONAIS
+
+# ============================================================
+
 *.xlsx
 *.xls
+*.xlsm
 *.csv
 
-# Backups / temporários
+# ============================================================
+
+# BACKUPS / TEMPORÁRIOS
+
+# ============================================================
+
 Backups_Baseline/
 backup/
 backups/
 temp/
 tmp/
+
 Market Assessment/
 _BACKUP - SCRIPT ATUAL - PIPELINE ENRIQUECEDOR DE PRODUTOS/
-*.tmp
-*.bak
 
-# Logs
+*.tmp
+*.temp
+*.bak
+*.old
+*.orig
+*.swp
+*.swo
+
+# Excel temporário
+
+~$*.xlsx
+~$*.xls
+~$*.xlsm
+
+# ============================================================
+
+# LOGS
+
+# ============================================================
+
 *.log
+logs/
+
+# ============================================================
 
 # IDE
+
+# ============================================================
+
 .vscode/
 .idea/
 
-# Sistema
+# ============================================================
+
+# SISTEMA OPERACIONAL
+
+# ============================================================
+
 Thumbs.db
+Desktop.ini
 .DS_Store

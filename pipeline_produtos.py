@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.4-rc4-hf1
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf1
 
 Arquitetura:
-    Stage 0 - Evidence Gate target-aware sobre Tavily RAW
+    Stage 0A - Tavily Search aberto + Target Identity Gate
+    Stage 0B - Target Isolation Funnel + Tavily Extract
+    Stage 0C - Collection Quality Gate (somente evidencia curada segue)
     Stage 1 - Regras determinísticas do JSON
     Stage 1.5 - Candidate Funnel determinístico
     Stage 2 - NVIDIA (model failover) -> Groq somente para ambiguidade real
@@ -48,10 +50,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote
 
-PIPELINE_VERSION = "3.9.4-rc4-hf1"
+PIPELINE_VERSION = "3.9.5"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.4-RC4 HF1 NVIDIA Failover + Cohort Safety Fix"
+BUILD_LABEL = "v3.9.5 Collection Quality Gate + Target Isolation Funnel"
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -649,9 +651,23 @@ class RawEvidence:
 
     @property
     def raw_hash(self) -> str:
+        """Hash semantico do RAW + evidencia curada da coleta R9.5.
+
+        Metricas volateis (tempo/request_id/creditos) nao entram no checkpoint.
+        Se o cache for legado, mantem o comportamento anterior e usa results.
+        """
         if not self.payload:
             return ""
-        return stable_json_hash(self.payload.get("results", []) or [])
+        collection = self.payload.get("_collection")
+        if not isinstance(collection, dict):
+            return stable_json_hash(self.payload.get("results", []) or [])
+        semantic = {
+            "results": self.payload.get("results", []) or [],
+            "collection_version": safe(collection.get("version")),
+            "collection_state": safe(collection.get("state")),
+            "curated_results": collection.get("curated_results", []) or [],
+        }
+        return stable_json_hash(semantic)
 
 
 class TavilyReadOnlyStore:
@@ -701,10 +717,16 @@ class TavilyReadOnlyStore:
         if not rows:
             return RawEvidence("RAW_MISSING", brand, model, reason="Produto não existe na tabela tavily_cache")
 
+        # RAW Search continua sendo consolidado entre variantes estruturais, mas o
+        # bloco de Collection Quality deve vir somente do payload mais recente que
+        # o possua. Isso evita misturar decisoes de curadoria de versoes diferentes.
         merged_results: List[Dict[str, Any]] = []
         seen = set()
         valid_payloads = 0
         cache_keys = []
+        newest_collection: Optional[Tuple[str, Dict[str, Any]]] = None
+        newest_search_meta: Optional[Tuple[str, Dict[str, Any]]] = None
+
         for row in rows:
             cache_keys.append(safe(row["cache_key"]))
             try:
@@ -717,6 +739,15 @@ class TavilyReadOnlyStore:
             if not isinstance(results, list):
                 continue
             valid_payloads += 1
+            created_at = safe(row["created_at"])
+            collection = payload.get("_collection")
+            if isinstance(collection, dict):
+                if newest_collection is None or created_at >= newest_collection[0]:
+                    newest_collection = (created_at, collection)
+            search_meta = payload.get("_search_meta")
+            if isinstance(search_meta, dict):
+                if newest_search_meta is None or created_at >= newest_search_meta[0]:
+                    newest_search_meta = (created_at, search_meta)
             for res in results:
                 if not isinstance(res, dict):
                     continue
@@ -728,7 +759,11 @@ class TavilyReadOnlyStore:
 
         if valid_payloads == 0:
             return RawEvidence("RAW_CORRUPT", brand, model, " | ".join(cache_keys), reason="Nenhuma variante contém JSON Tavily válido")
-        payload = {"results": merged_results}
+        payload: Dict[str, Any] = {"results": merged_results}
+        if newest_collection is not None:
+            payload["_collection"] = newest_collection[1]
+        if newest_search_meta is not None:
+            payload["_search_meta"] = newest_search_meta[1]
         if not merged_results:
             return RawEvidence("RAW_EMPTY", brand, model, " | ".join(cache_keys), payload, "Tavily persistiu resposta sem resultados")
         state = "RAW_OK_MERGED" if len(rows) > 1 else "RAW_OK"
@@ -1055,14 +1090,50 @@ def export_precollection_report(plan: PreCollectionPlan) -> None:
     os.replace(tmp, plan.report_path)
 
 
+def _collection_policy(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return cfg.get("_collection_policy", {}) or {}
+
+
+def validate_collection_policy(policy: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    if not isinstance(policy, dict) or not policy:
+        return ["COLLECTION_POLICY ausente/vazia"]
+    identity = policy.get("identity", {}) or {}
+    isolation = policy.get("isolation", {}) or {}
+    if not identity.get("direct_accept_levels"):
+        errors.append("COLLECTION_POLICY.identity.direct_accept_levels ausente")
+    if int(isolation.get("target_window_chars", 0) or 0) < 100:
+        errors.append("COLLECTION_POLICY.isolation.target_window_chars muito baixo")
+    if int(isolation.get("minimum_block_chars", 0) or 0) < 5:
+        errors.append("COLLECTION_POLICY.isolation.minimum_block_chars muito baixo")
+    decisions = set(policy.get("source_decisions", []) or [])
+    required = {
+        "ACCEPT_TARGET_CLEAN", "ACCEPT_TARGET_ISOLATED", "REJECT_WRONG_MODEL",
+        "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY",
+        "REJECT_GENERIC_NO_TARGET_BLOCK", "REJECT_NON_ISOLATABLE",
+        "REJECT_WEAK_IDENTITY", "REJECT_EXTRACT_FAILED",
+    }
+    missing = sorted(required - decisions)
+    if missing:
+        errors.append(f"COLLECTION_POLICY.source_decisions faltando={missing}")
+    return errors
+
+
+def _payload_collection_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    collection = payload.get("_collection")
+    if isinstance(collection, dict):
+        rows = collection.get("curated_results", [])
+        if isinstance(rows, list):
+            return [x for x in rows if isinstance(x, dict)]
+    return [x for x in (payload.get("results", []) or []) if isinstance(x, dict)]
+
+
 def _payload_target_evidence_level(brand: str, model: str, payload: Dict[str, Any], cfg: Dict[str, Any]) -> str:
-    """Melhor nível de identidade target-aware no payload, sem classificar o produto."""
+    """Melhor nivel de identidade sobre evidencia que realmente alimentara Stage 1."""
     suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
     rank = {"WEAK": 0, "CONTEXTUAL": 1, "PROBABLE": 2, "STRONG": 3}
     best = "WEAK"
-    for res in (payload.get("results", []) or []):
-        if not isinstance(res, dict):
-            continue
+    for res in _payload_collection_results(payload):
         title = safe(res.get("title"))
         content = safe(res.get("content"))
         url = safe(res.get("url"))
@@ -1090,214 +1161,838 @@ def _merge_tavily_payloads(payloads: Sequence[Dict[str, Any]], search_meta: Dict
     return {"results": results, "_search_meta": search_meta}
 
 
-def tavily_search(brand: str, model: str, cfg: Dict[str, Any], limiter: RateLimiter) -> Dict[str, Any]:
-    """Consulta Tavily de forma adaptativa; erro nunca é gravado como RAW válido.
+def _url_key(url: str) -> str:
+    value = safe(url).strip()
+    value = re.sub(r"#.*$", "", value)
+    return value.rstrip("/").casefold()
 
-    RC4:
-    - preserva Marca/Modelo originais;
-    - usa Search Model derivado apenas para consulta/identidade;
-    - exact_match permanece desligado;
-    - fallback universal só ocorre se a consulta primária não trouxer fonte
-      PROBABLE/STRONG do target.
-    """
+
+def _tavily_usage_credits(payload: Dict[str, Any]) -> float:
     try:
-        import requests
-    except ImportError as exc:
-        raise RuntimeError("Pacote requests não instalado. Rode: pip install requests") from exc
+        return float(((payload.get("usage") or {}).get("credits", 0)) or 0)
+    except Exception:
+        return 0.0
 
+
+def _source_identity_for_result(brand: str, model: str, res: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
+    level, score, match, weight, field_name = _source_identity_baseline(
+        brand, model,
+        safe(res.get("title")), safe(res.get("content")), safe(res.get("url")), suffixes,
+        int((cfg.get("identity", {}) or {}).get("short_model_requires_brand_length", 5) or 5),
+    )
+    return {
+        "level": level, "score": int(score), "model_match": match,
+        "model_match_field": field_name, "source_weight": float(weight),
+    }
+
+
+def _term_present(text: str, terms: Sequence[str]) -> bool:
+    folded = norm_text(text)
+    return any(norm_text(x) and norm_text(x) in folded for x in terms or [])
+
+
+def _target_model_patterns(model: str, cfg: Dict[str, Any]) -> List[re.Pattern]:
+    suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
+    pats: List[re.Pattern] = []
+    seen = set()
+    for compact_variant, _ in _model_identity_variants(model, suffixes):
+        if compact_variant and compact_variant not in seen:
+            seen.add(compact_variant)
+            pats.append(_model_exact_pattern(compact_variant))
+    return pats
+
+
+def _target_spans(text: str, model: str, cfg: Dict[str, Any]) -> List[Tuple[int, int]]:
+    hay = strip_accents(unquote(safe(text))).casefold()
+    spans: List[Tuple[int, int]] = []
+    for pat in _target_model_patterns(model, cfg):
+        for m in pat.finditer(hay):
+            spans.append((m.start(), m.end()))
+    spans.sort()
+    dedup: List[Tuple[int, int]] = []
+    for span in spans:
+        if span not in dedup:
+            dedup.append(span)
+    return dedup
+
+
+def _looks_like_other_sku_token(token: str, start: int, text: str, model: str, policy: Dict[str, Any]) -> bool:
+    raw = safe(token).upper().strip(".,:;()[]{}")
+    compact_token = compact(raw)
+    if not compact_token:
+        return False
+    target_compacts = {x[0] for x in _model_identity_variants(model, [])}
+    if compact_token in target_compacts:
+        return False
+    for expr in policy.get("model_token_ignore_regexes", []) or []:
+        try:
+            if re.fullmatch(expr, raw, flags=re.I):
+                return False
+        except re.error:
+            continue
+    has_alpha = bool(re.search(r"[A-Z]", raw, re.I))
+    has_digit = bool(re.search(r"\d", raw))
+    if has_alpha and has_digit:
+        return len(compact_token) >= 5
+    if compact_token.isdigit() and 6 <= len(compact_token) <= 10:
+        prefix = text[max(0, start - 3):start]
+        return start == 0 or bool(re.search(r"(?:^|[\n|;])\s*$", prefix))
+    return False
+
+
+def _other_sku_spans(text: str, model: str, policy: Dict[str, Any]) -> List[Tuple[int, int, str]]:
+    out: List[Tuple[int, int, str]] = []
+    # Conservador: so tokens com estrutura de codigo; palavras comuns nao viram fronteira.
+    for m in re.finditer(r"(?<![A-Za-z0-9])([A-Za-z0-9][A-Za-z0-9._/-]{4,})(?![A-Za-z0-9])", safe(text)):
+        token = m.group(1)
+        if _looks_like_other_sku_token(token, m.start(), text, model, policy):
+            out.append((m.start(), m.end(), token))
+    return out
+
+
+def _cut_related_tail(text: str, policy: Dict[str, Any], target_end: int = 0) -> str:
+    folded = strip_accents(text).casefold()
+    cut = len(text)
+    for term in policy.get("related_section_terms", []) or []:
+        t = strip_accents(term).casefold()
+        pos = folded.find(t, max(0, target_end))
+        if pos >= 0:
+            cut = min(cut, pos)
+    return text[:cut].strip()
+
+
+def _target_context_has_only_relation(text: str, model: str, cfg: Dict[str, Any], terms: Sequence[str], window: int = 150) -> bool:
+    folded = strip_accents(safe(text)).casefold()
+    spans = _target_spans(text, model, cfg)
+    if not spans:
+        return False
+    normalized_terms = [strip_accents(x).casefold() for x in terms or [] if safe(x)]
+    relation_hits = 0
+    for a, b in spans:
+        context = folded[max(0, a-window):min(len(folded), b+window)]
+        if any(t in context for t in normalized_terms):
+            relation_hits += 1
+    return relation_hits == len(spans)
+
+
+def _isolate_target_block(
+    brand: str,
+    model: str,
+    title: str,
+    url: str,
+    extracted_text: str,
+    search_content: str,
+    cfg: Dict[str, Any],
+    policy: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Isola o bloco do SKU antes de TYPE/POWER.
+
+    Multi-produto/catalogo pode ser aceito, mas somente o trecho entre fronteiras
+    de outros SKUs chega ao Stage 1. Compatibilidade/related-only e paginas sem
+    bloco target recuperavel sao rejeitadas.
+    """
+    iso = policy.get("isolation", {}) or {}
+    generic_terms = policy.get("generic_page_terms", []) or []
+    related_terms = policy.get("related_section_terms", []) or []
+    compatibility_terms = policy.get("compatibility_terms", []) or []
+    minimum_chars = int(iso.get("minimum_block_chars", 12) or 12)
+    window = int(iso.get("target_window_chars", 850) or 850)
+    max_other = int(iso.get("max_other_skus_after_isolation", 0) or 0)
+
+    raw = safe(extracted_text) or safe(search_content)
+    title_url_target = bool(_target_spans(f"{title}\n{url}", model, cfg))
+    body_target = bool(_target_spans(raw, model, cfg))
+    search_target = bool(_target_spans(search_content, model, cfg))
+    if not (title_url_target or body_target or search_target):
+        return {"decision": "REJECT_WRONG_MODEL", "reason": "SKU alvo nao aparece em TITLE/URL/conteudo extraido", "content": "", "flags": ["NO_TARGET_MODEL"], "other_skus": []}
+
+    other_spans = _other_sku_spans(raw, model, policy)
+    generic = _term_present(f"{title}\n{url}\n{raw[:1200]}", generic_terms)
+    multi = bool(other_spans)
+    flags: List[str] = []
+    if generic:
+        flags.append("GENERIC_PAGE")
+    if multi:
+        flags.append("MULTI_PRODUCT_SOURCE")
+
+    # Se o target so aparece como compatibilidade/related e nao domina TITLE/URL,
+    # essa fonte nao pode definir o produto principal.
+    if not title_url_target and _target_context_has_only_relation(raw, model, cfg, compatibility_terms):
+        return {"decision": "REJECT_COMPATIBILITY_ONLY", "reason": "SKU aparece somente em contexto de compatibilidade/substituicao", "content": "", "flags": flags + ["COMPATIBILITY_ONLY"], "other_skus": [x[2] for x in other_spans]}
+    if not title_url_target and _target_context_has_only_relation(raw, model, cfg, related_terms):
+        return {"decision": "REJECT_RELATED_ONLY", "reason": "SKU aparece somente em secao de produtos relacionados", "content": "", "flags": flags + ["RELATED_ONLY"], "other_skus": [x[2] for x in other_spans]}
+
+    # Fonte dedicada: modelo em TITLE/URL e sem sinais estruturais de outros SKUs.
+    # Mesmo assim corta cauda de related products antes de liberar o texto.
+    if title_url_target and not multi and not generic:
+        clean = _cut_related_tail(raw, policy)
+        if len(clean) >= minimum_chars:
+            return {"decision": "ACCEPT_TARGET_CLEAN", "reason": "Fonte dedicada ao SKU; sem contaminacao estrutural detectada", "content": clean, "flags": flags, "other_skus": []}
+
+    # Multi-produto/generico: o target precisa aparecer dentro do texto isolavel.
+    if not body_target:
+        return {"decision": "REJECT_GENERIC_NO_TARGET_BLOCK", "reason": "Fonte generica/multi-produto sem bloco textual do SKU alvo", "content": "", "flags": flags, "other_skus": [x[2] for x in other_spans]}
+
+    chunks = [x.strip() for x in re.split(policy.get("isolation", {}).get("chunk_separator_regex", r"\s*\[\.\.\.\]\s*"), raw) if x.strip()]
+    if not chunks:
+        chunks = [raw]
+
+    isolated_regions: List[str] = []
+    for chunk in chunks:
+        target_spans = _target_spans(chunk, model, cfg)
+        if not target_spans:
+            # Em fonte dedicada, Extract pode omitir o SKU no chunk; aceita apenas
+            # chunk sem outro SKU e sem heading de related/compatibilidade.
+            if title_url_target and bool(iso.get("allow_dedicated_page_chunks_without_repeated_sku", True)):
+                if not _other_sku_spans(chunk, model, policy) and not _term_present(chunk, related_terms):
+                    isolated_regions.append(chunk)
+            continue
+        other = _other_sku_spans(chunk, model, policy)
+        for a, b in target_spans:
+            left = max(0, a - window)
+            right = min(len(chunk), b + window)
+            for oa, ob, _ in other:
+                if ob <= a:
+                    left = max(left, ob)
+                elif oa >= b:
+                    right = min(right, oa)
+                    break
+            region = chunk[left:right].strip(" \n\t|;,-")
+            local_target = _target_spans(region, model, cfg)
+            target_end = local_target[0][1] if local_target else 0
+            region = _cut_related_tail(region, policy, target_end=target_end)
+            if len(region) >= minimum_chars:
+                isolated_regions.append(region)
+
+    # Dedupe mantendo ordem.
+    unique_regions: List[str] = []
+    seen_regions = set()
+    for region in isolated_regions:
+        key = re.sub(r"\s+", " ", region).strip().casefold()
+        if key and key not in seen_regions:
+            seen_regions.add(key)
+            unique_regions.append(region)
+    isolated = "\n[...]\n".join(unique_regions).strip()
+    if not isolated:
+        return {"decision": "REJECT_NON_ISOLATABLE", "reason": "SKU existe, mas nao foi possivel separar bloco target confiavel", "content": "", "flags": flags + ["TARGET_ISOLATION_FAILED"], "other_skus": [x[2] for x in other_spans]}
+
+    residual_other = _other_sku_spans(isolated, model, policy)
+    if len(residual_other) > max_other:
+        return {"decision": "REJECT_NON_ISOLATABLE", "reason": f"Bloco isolado ainda contem {len(residual_other)} SKU(s) concorrente(s)", "content": "", "flags": flags + ["RESIDUAL_OTHER_SKU"], "other_skus": [x[2] for x in residual_other]}
+
+    return {
+        "decision": "ACCEPT_TARGET_ISOLATED" if (generic or multi or not title_url_target) else "ACCEPT_TARGET_CLEAN",
+        "reason": "Bloco do SKU alvo isolado antes da deteccao de TYPE/POWER",
+        "content": isolated,
+        "flags": flags + (["TARGET_ISOLATED"] if (generic or multi or not title_url_target) else []),
+        "other_skus": [x[2] for x in other_spans],
+    }
+
+
+def _collection_state(brand: str, model: str, curated: List[Dict[str, Any]], cfg: Dict[str, Any], policy: Dict[str, Any]) -> str:
+    states = policy.get("states", {}) or {}
+    if not curated:
+        return safe(states.get("none")) or "NO_TARGET_EVIDENCE"
+    identity_policy = policy.get("identity", {}) or {}
+    strong = 0
+    probable = 0
+    exact_isolated = 0
+    urls = set()
+    for res in curated:
+        key = _url_key(res.get("url", ""))
+        if key and key in urls:
+            continue
+        if key:
+            urls.add(key)
+        meta = _source_identity_for_result(brand, model, res, cfg)
+        if meta["level"] == "STRONG":
+            strong += 1
+        elif meta["level"] == "PROBABLE":
+            probable += 1
+        if safe(res.get("_collection_decision")) == "ACCEPT_TARGET_ISOLATED" and bool(_target_spans(safe(res.get("content")), model, cfg)):
+            exact_isolated += 1
+    if strong >= int(identity_policy.get("ready_if_strong_sources", 1) or 1):
+        return safe(states.get("ready")) or "READY_FOR_CLASSIFICATION"
+    if exact_isolated >= int(identity_policy.get("ready_if_exact_isolated_sources", 1) or 1):
+        return safe(states.get("ready")) or "READY_FOR_CLASSIFICATION"
+    if probable >= int(identity_policy.get("ready_if_probable_sources", 2) or 2):
+        return safe(states.get("ready")) or "READY_FOR_CLASSIFICATION"
+    if strong or probable or exact_isolated:
+        return safe(states.get("partial")) or "PARTIAL_TARGET_EVIDENCE"
+    return safe(states.get("low")) or "LOW_TARGET_EVIDENCE"
+
+
+def _make_curated_result(search_res: Dict[str, Any], isolation: Dict[str, Any], extract_depth: str, source_mode: str) -> Dict[str, Any]:
+    return {
+        "title": safe(search_res.get("title")),
+        "url": safe(search_res.get("url")),
+        "content": safe(isolation.get("content")),
+        "score": search_res.get("score"),
+        "raw_content": None,
+        "_collection_decision": safe(isolation.get("decision")),
+        "_collection_reason": safe(isolation.get("reason")),
+        "_collection_quality_flags": list(isolation.get("flags", []) or []),
+        "_collection_other_skus": list(isolation.get("other_skus", []) or []),
+        "_collection_extract_depth": extract_depth,
+        "_collection_source_mode": source_mode,
+    }
+
+
+def _tavily_post_with_retry(url: str, body: Dict[str, Any], cfg: Dict[str, Any], limiter: RateLimiter) -> Dict[str, Any]:
+    import requests
     api_key = os.getenv("TAVILY_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("TAVILY_API_KEY não configurada no .env")
-
     tc = cfg.get("tavily", {}) or {}
     retries = max(1, int(tc.get("retries", 4)))
     backoffs = tc.get("retry_backoff_seconds", [2, 5, 10, 20]) or [2, 5, 10, 20]
     timeout = float(tc.get("timeout_seconds", 60))
-    search_model = derive_search_model(brand, model, cfg)
-    primary_tpl = safe(tc.get("primary_query_template")) or "{brand} {search_model} product specifications"
-    fallback_tpl = safe(tc.get("fallback_query_template")) or "{brand} {search_model} product details manual technical data"
-    adaptive = bool(tc.get("adaptive_queries", True))
-    fallback_only_low = bool(tc.get("fallback_only_when_no_target_evidence", True))
-
-    queries = [primary_tpl.format(brand=brand, model=model, search_model=search_model)]
-    if adaptive and fallback_tpl:
-        q2 = fallback_tpl.format(brand=brand, model=model, search_model=search_model)
-        if q2 not in queries:
-            queries.append(q2)
-
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    last: Optional[Exception] = None
+    for attempt in range(retries):
+        limiter.wait()
+        try:
+            response = requests.post(url, headers=headers, json=body, timeout=timeout)
+            status = int(response.status_code)
+            if status == 200:
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    raise RuntimeError("Tavily retornou JSON inválido")
+                return payload
+            if status in {401, 403}:
+                raise OperationalPause("TAVILY_AUTH", f"Tavily HTTP {status}: autenticação/permissão")
+            if status in {432, 433}:
+                raise OperationalPause("TAVILY_PLAN_LIMIT", f"Tavily HTTP {status}: limite de plano/uso atingido")
+            if status == 429 or 500 <= status <= 599:
+                last = RuntimeError(f"Tavily HTTP {status}: {response.text[:500]}")
+            else:
+                raise RuntimeError(f"Tavily HTTP {status}: {response.text[:800]}")
+        except OperationalPause:
+            raise
+        except Exception as exc:
+            last = exc
+        if attempt + 1 < retries:
+            base_wait = float(backoffs[min(attempt, len(backoffs) - 1)])
+            wait = base_wait + random.uniform(0, min(1.5, base_wait * 0.2))
+            LOG.warning("Tavily retry %d/%d | endpoint=%s | em %.1fs | %s", attempt + 1, retries, url.rsplit('/', 1)[-1], wait, last)
+            time.sleep(wait)
+    if "429" in safe(last):
+        raise OperationalPause("TAVILY_RATE_LIMIT", f"Rate limit Tavily persistiu após retries: {last}")
+    raise RuntimeError(f"Tavily falhou após {retries} tentativas: {last}")
 
-    def run_one(query: str) -> Dict[str, Any]:
+
+def _tavily_extract(urls: Sequence[str], query: str, depth: str, cfg: Dict[str, Any], limiter: RateLimiter) -> Dict[str, Any]:
+    tc = cfg.get("tavily", {}) or {}
+    ecfg = tc.get("extract", {}) or {}
+    body = {
+        "urls": list(urls),
+        "query": query,
+        "chunks_per_source": max(1, min(5, int(ecfg.get("chunks_per_source", 3) or 3))),
+        "extract_depth": depth,
+        "include_images": False,
+        "include_favicon": False,
+        "format": safe(ecfg.get("format", "markdown")) or "markdown",
+        "timeout": max(1, min(60, float(ecfg.get("timeout_seconds", 30) or 30))),
+        "include_usage": True,
+    }
+    return _tavily_post_with_retry("https://api.tavily.com/extract", body, cfg, limiter)
+
+
+def _curate_search_results(
+    brand: str,
+    search_model: str,
+    search_results: Sequence[Dict[str, Any]],
+    extract_payload: Optional[Dict[str, Any]],
+    extract_depth: str,
+    cfg: Dict[str, Any],
+    source_mode: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+    policy = _collection_policy(cfg)
+    extracted_by_url = {
+        _url_key(x.get("url", "")): x
+        for x in ((extract_payload or {}).get("results", []) or [])
+        if isinstance(x, dict)
+    }
+    failed_urls = {
+        _url_key(x.get("url", ""))
+        for x in ((extract_payload or {}).get("failed_results", []) or [])
+        if isinstance(x, dict)
+    }
+    curated: List[Dict[str, Any]] = []
+    audit: List[Dict[str, Any]] = []
+    advanced_retry_urls: List[str] = []
+    for res in search_results:
+        if not isinstance(res, dict):
+            continue
+        url = safe(res.get("url"))
+        key = _url_key(url)
+        identity_before = _source_identity_for_result(brand, search_model, res, cfg)
+        ext = extracted_by_url.get(key)
+        extracted_text = safe((ext or {}).get("raw_content"))
+        if not extracted_text and key in failed_urls:
+            source_mode_local = "SEARCH_CHUNK_AFTER_EXTRACT_FAIL"
+        else:
+            source_mode_local = source_mode
+        isolation = _isolate_target_block(
+            brand, search_model, safe(res.get("title")), url,
+            extracted_text, safe(res.get("content")), cfg, policy,
+        )
+        decision = safe(isolation.get("decision"))
+        if decision.startswith("ACCEPT_"):
+            row = _make_curated_result(res, isolation, extract_depth, source_mode_local)
+            identity_after = _source_identity_for_result(brand, search_model, row, cfg)
+            row["_collection_identity"] = identity_after["level"]
+            curated.append(row)
+        else:
+            identity_after = {"level": "WEAK", "score": 0, "model_match_field": "NONE"}
+            if decision in {"REJECT_NON_ISOLATABLE", "REJECT_GENERIC_NO_TARGET_BLOCK"}:
+                advanced_retry_urls.append(url)
+        audit.append({
+            "url": url,
+            "title": safe(res.get("title")),
+            "tavily_score": res.get("score"),
+            "identity_before": identity_before["level"],
+            "model_match_field_before": identity_before["model_match_field"],
+            "decision": decision,
+            "reason": safe(isolation.get("reason")),
+            "quality_flags": list(isolation.get("flags", []) or []),
+            "other_skus": list(isolation.get("other_skus", []) or []),
+            "isolated_chars": len(safe(isolation.get("content"))),
+            "extract_depth": extract_depth,
+            "source_mode": source_mode_local,
+            "identity_after": identity_after.get("level", "WEAK"),
+        })
+    return curated, audit, [x for x in advanced_retry_urls if x]
+
+
+def _dedupe_curated(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    by_url: Dict[str, Dict[str, Any]] = {}
+    rank = {"STRONG": 4, "PROBABLE": 3, "CONTEXTUAL": 2, "WEAK": 1}
+    for row in rows:
+        key = _url_key(row.get("url", "")) or stable_json_hash(row)[:16]
+        cur = by_url.get(key)
+        if cur is None:
+            by_url[key] = row
+            continue
+        old = (rank.get(safe(cur.get("_collection_identity")), 0), len(safe(cur.get("content"))))
+        new = (rank.get(safe(row.get("_collection_identity")), 0), len(safe(row.get("content"))))
+        if new > old:
+            by_url[key] = row
+    return list(by_url.values())
+
+
+def tavily_search(brand: str, model: str, cfg: Dict[str, Any], limiter: RateLimiter) -> Dict[str, Any]:
+    """R9.5: Search aberto -> Identity Gate -> Extract -> Target Isolation Funnel.
+
+    Nenhum include_domains/country/language filter/exact_match e nenhum TYPE e
+    injetado na query. Tavily score e apenas criterio secundario de ordenacao.
+    """
+    try:
+        import requests  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError("Pacote requests não instalado. Rode: pip install requests") from exc
+    if not os.getenv("TAVILY_API_KEY", "").strip():
+        raise RuntimeError("TAVILY_API_KEY não configurada no .env")
+
+    tc = cfg.get("tavily", {}) or {}
+    policy = _collection_policy(cfg)
+    search_model = derive_search_model(brand, model, cfg)
+    scfg = tc.get("search", {}) or {}
+    ecfg = tc.get("extract", {}) or {}
+    primary = safe(scfg.get("primary_query_template")) or "{brand} {search_model} product specifications"
+    fallback = safe(scfg.get("fallback_query_template")) or "{brand} {search_model} product details manual technical data"
+    rescue = safe(scfg.get("rescue_query_template")) or "{brand} {search_model} manual datasheet specifications technical data"
+    plans = [
+        ("PRIMARY", primary, safe(scfg.get("primary_depth", "basic")) or "basic"),
+    ]
+    if bool(scfg.get("fallback_enabled", True)) and fallback:
+        plans.append(("FALLBACK", fallback, safe(scfg.get("fallback_depth", "basic")) or "basic"))
+    if bool(scfg.get("rescue_enabled", True)) and rescue:
+        plans.append(("RESCUE", rescue, safe(scfg.get("rescue_depth", "advanced")) or "advanced"))
+
+    raw_results: List[Dict[str, Any]] = []
+    raw_seen = set()
+    curated_all: List[Dict[str, Any]] = []
+    source_audit: List[Dict[str, Any]] = []
+    query_audit: List[Dict[str, Any]] = []
+    raw_extract_results: List[Dict[str, Any]] = []
+    extracted_basic_urls = set()
+    extracted_advanced_urls = set()
+    search_credits = 0.0
+    extract_credits = 0.0
+    collection_state = "NO_TARGET_EVIDENCE"
+
+    id_rank = {"WEAK": 0, "CONTEXTUAL": 1, "PROBABLE": 2, "STRONG": 3}
+    allow_contextual = bool((policy.get("identity", {}) or {}).get("allow_contextual_extract_rescue", True))
+    max_urls = max(1, min(20, int(ecfg.get("max_urls_per_product", 5) or 5)))
+    query_for_extract = (safe(ecfg.get("query_template")) or "{brand} {search_model} product model specifications technical data").format(brand=brand, search_model=search_model, model=model)
+
+    for qidx, (qname, template, depth) in enumerate(plans, 1):
+        query = template.format(brand=brand, model=model, search_model=search_model).strip()
         body = {
-            "query": query.strip(),
-            "search_depth": safe(tc.get("search_depth", "basic")) or "basic",
-            "max_results": int(tc.get("max_results", 5)),
+            "query": query,
+            "search_depth": depth,
+            "chunks_per_source": max(1, min(3, int(scfg.get("chunks_per_source", 2) or 2))),
+            "max_results": max(1, min(20, int(scfg.get("max_results", 5) or 5))),
+            "topic": "general",
             "include_answer": False,
-            "include_raw_content": safe(tc.get("include_raw_content", "markdown")) or "markdown",
+            "include_raw_content": False,
+            "include_images": False,
+            "include_image_descriptions": False,
+            "include_favicon": False,
+            "auto_parameters": False,
+            "exact_match": False,
+            "include_usage": True,
         }
-        # exact_match deliberadamente não é enviado; recall é prioritário no Stage 0.
-        last: Optional[Exception] = None
-        for attempt in range(retries):
-            limiter.wait()
-            try:
-                response = requests.post("https://api.tavily.com/search", headers=headers, json=body, timeout=timeout)
-                status = int(response.status_code)
-                if status == 200:
-                    payload = response.json()
-                    if not isinstance(payload, dict):
-                        raise RuntimeError("Tavily retornou JSON inválido")
-                    if not isinstance(payload.get("results", []), list):
-                        raise RuntimeError("Tavily retornou results inválido")
-                    return payload
-                if status in {401, 403}:
-                    raise OperationalPause("TAVILY_AUTH", f"Tavily HTTP {status}: autenticação/permissão")
-                if status in {432, 433}:
-                    raise OperationalPause("TAVILY_PLAN_LIMIT", f"Tavily HTTP {status}: limite de plano/uso atingido")
-                if status == 429 or 500 <= status <= 599:
-                    last = RuntimeError(f"Tavily HTTP {status}: {response.text[:500]}")
-                else:
-                    raise RuntimeError(f"Tavily HTTP {status}: {response.text[:800]}")
-            except OperationalPause:
-                raise
-            except Exception as exc:
-                last = exc
+        sp = _tavily_post_with_retry("https://api.tavily.com/search", body, cfg, limiter)
+        search_credits += _tavily_usage_credits(sp)
+        results = [x for x in (sp.get("results", []) or []) if isinstance(x, dict)]
+        for res in results:
+            annotated = dict(res)
+            annotated["_search_query"] = query
+            annotated["_search_stage"] = qname
+            annotated["_search_depth"] = depth
+            key = _url_key(annotated.get("url", ""))
+            if key and key in raw_seen:
+                continue
+            if key:
+                raw_seen.add(key)
+            raw_results.append(annotated)
 
-            if attempt + 1 < retries:
-                base_wait = float(backoffs[min(attempt, len(backoffs) - 1)])
-                wait = base_wait + random.uniform(0, min(1.5, base_wait * 0.2))
-                LOG.warning("Tavily retry %d/%d para %s | %s em %.1fs", attempt + 1, retries, brand, model, wait)
-                time.sleep(wait)
-        if "429" in safe(last):
-            raise OperationalPause("TAVILY_RATE_LIMIT", f"Rate limit Tavily persistiu após retries: {last}")
-        raise RuntimeError(f"Tavily falhou após {retries} tentativas: {last}")
+        candidates: List[Tuple[int, float, Dict[str, Any]]] = []
+        for res in results:
+            im = _source_identity_for_result(brand, search_model, res, cfg)
+            eligible = im["level"] in {"STRONG", "PROBABLE"}
+            if not eligible and allow_contextual:
+                eligible = im["level"] == "CONTEXTUAL" and im["model_match_field"] == "BODY"
+            if eligible:
+                try:
+                    tv_score = float(res.get("score", 0) or 0)
+                except Exception:
+                    tv_score = 0.0
+                candidates.append((id_rank.get(im["level"], 0), tv_score, res))
+        candidates.sort(key=lambda x: (-x[0], -x[1]))
+        selected = [x[2] for x in candidates[:max_urls]]
+        urls = [safe(x.get("url")) for x in selected if safe(x.get("url")) and _url_key(x.get("url", "")) not in extracted_basic_urls]
+        ep: Dict[str, Any] = {"results": [], "failed_results": [], "usage": {"credits": 0}}
+        if bool(ecfg.get("enabled", True)) and urls:
+            ep = _tavily_extract(urls, query_for_extract, safe(ecfg.get("depth", "basic")) or "basic", cfg, limiter)
+            extract_credits += _tavily_usage_credits(ep)
+            extracted_basic_urls.update(_url_key(x) for x in urls)
+            raw_extract_results.extend([dict(x, _extract_depth=safe(ecfg.get("depth", "basic")) or "basic") for x in (ep.get("results", []) or []) if isinstance(x, dict)])
+        curated, audits, retry_urls = _curate_search_results(
+            brand, search_model, selected, ep,
+            safe(ecfg.get("depth", "basic")) or "basic", cfg, "TAVILY_EXTRACT",
+        )
+        curated_all.extend(curated)
+        source_audit.extend([dict(x, search_stage=qname, search_query=query) for x in audits])
 
-    payloads: List[Dict[str, Any]] = []
-    query_levels: List[Dict[str, str]] = []
-    for idx, query in enumerate(queries):
-        payload = run_one(query)
-        payloads.append(payload)
-        level = _payload_target_evidence_level(brand, search_model, payload, cfg)
-        query_levels.append({"query": query, "target_level": level})
-        if idx == 0 and fallback_only_low and level in {"STRONG", "PROBABLE"}:
+        # Catalogos/tabelas que ainda nao ficaram isolaveis ganham UM retry Advanced.
+        iso = policy.get("isolation", {}) or {}
+        retry_urls = [u for u in retry_urls if _url_key(u) not in extracted_advanced_urls]
+        retry_urls = retry_urls[:max(0, int(iso.get("advanced_extract_retry_max_urls", 3) or 3))]
+        if bool(iso.get("advanced_extract_retry_on_non_isolatable", True)) and retry_urls:
+            ap = _tavily_extract(retry_urls, query_for_extract, "advanced", cfg, limiter)
+            extract_credits += _tavily_usage_credits(ap)
+            extracted_advanced_urls.update(_url_key(x) for x in retry_urls)
+            raw_extract_results.extend([dict(x, _extract_depth="advanced") for x in (ap.get("results", []) or []) if isinstance(x, dict)])
+            retry_search = [x for x in selected if _url_key(x.get("url", "")) in {_url_key(u) for u in retry_urls}]
+            curated2, audits2, _ = _curate_search_results(
+                brand, search_model, retry_search, ap, "advanced", cfg, "TAVILY_EXTRACT_ADVANCED_RETRY",
+            )
+            curated_all.extend(curated2)
+            source_audit.extend([dict(x, search_stage=qname, search_query=query, advanced_retry=True) for x in audits2])
+
+        curated_all = _dedupe_curated(curated_all)
+        collection_state = _collection_state(brand, search_model, curated_all, cfg, policy)
+        query_audit.append({
+            "stage": qname,
+            "query": query,
+            "search_depth": depth,
+            "results": len(results),
+            "extract_candidates": len(selected),
+            "accepted_total_after_stage": len(curated_all),
+            "collection_state_after_stage": collection_state,
+            "search_credits_total": search_credits,
+            "extract_credits_total": extract_credits,
+        })
+        if collection_state == "READY_FOR_CLASSIFICATION":
             break
 
-    return _merge_tavily_payloads(
-        payloads,
-        {
+    # Ordena apenas para consumo; identidade manda e Tavily score desempata.
+    curated_all.sort(key=lambda r: (
+        -id_rank.get(safe(r.get("_collection_identity")), 0),
+        -float(r.get("score", 0) or 0),
+        _url_key(r.get("url", "")),
+    ))
+    curated_all = curated_all[:max(1, int((cfg.get("evidence", {}) or {}).get("max_results", 5) or 5))]
+    collection_state = _collection_state(brand, search_model, curated_all, cfg, policy)
+
+    return {
+        "results": raw_results,
+        "_search_meta": {
             "brand_original": brand,
             "model_original": model,
             "search_model": search_model,
-            "queries": query_levels,
             "exact_match": False,
+            "include_domains": False,
+            "country_filter": False,
+            "language_filter": False,
+            "auto_parameters": False,
         },
-    )
+        "_collection": {
+            "version": safe(policy.get("VERSION")) or "R9.5",
+            "state": collection_state,
+            "search_model": search_model,
+            "curated_results": curated_all,
+            "source_audit": source_audit,
+            "query_audit": query_audit,
+            "raw_extract_results": raw_extract_results,
+            "credits": {
+                "search": round(search_credits, 4),
+                "extract": round(extract_credits, 4),
+                "total": round(search_credits + extract_credits, 4),
+            },
+        },
+    }
+
+
+def _curate_existing_payload(brand: str, model: str, payload: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Aplica R9.5 ao cache legado sem nova chamada Tavily.
+
+    Usa raw_content quando existente; caso contrario, usa somente os chunks de
+    Search ja persistidos. Nunca inventa conteudo faltante.
+    """
+    policy = _collection_policy(cfg)
+    search_model = derive_search_model(brand, model, cfg)
+    raw_results = [x for x in (payload.get("results", []) or []) if isinstance(x, dict)]
+    curated: List[Dict[str, Any]] = []
+    audit: List[Dict[str, Any]] = []
+    for res in raw_results:
+        identity = _source_identity_for_result(brand, search_model, res, cfg)
+        raw_content = safe(res.get("raw_content"))
+        isolation = _isolate_target_block(
+            brand, search_model, safe(res.get("title")), safe(res.get("url")),
+            raw_content, safe(res.get("content")), cfg, policy,
+        )
+        decision = safe(isolation.get("decision"))
+        if decision.startswith("ACCEPT_"):
+            row = _make_curated_result(res, isolation, "CACHE_RAW", "CACHE_REBUILD_NO_TAVILY")
+            row["_collection_identity"] = _source_identity_for_result(brand, search_model, row, cfg)["level"]
+            curated.append(row)
+        audit.append({
+            "url": safe(res.get("url")), "title": safe(res.get("title")), "tavily_score": res.get("score"),
+            "identity_before": identity["level"], "model_match_field_before": identity["model_match_field"],
+            "decision": decision, "reason": safe(isolation.get("reason")),
+            "quality_flags": list(isolation.get("flags", []) or []), "other_skus": list(isolation.get("other_skus", []) or []),
+            "isolated_chars": len(safe(isolation.get("content"))), "extract_depth": "CACHE_RAW",
+            "source_mode": "CACHE_REBUILD_NO_TAVILY",
+        })
+    curated = _dedupe_curated(curated)
+    curated.sort(key=lambda x: (safe(x.get("_collection_identity")) != "STRONG", -float(x.get("score", 0) or 0)))
+    state = _collection_state(brand, search_model, curated, cfg, policy)
+    out = dict(payload)
+    out["_collection"] = {
+        "version": safe(policy.get("VERSION")) or "R9.5",
+        "state": state,
+        "search_model": search_model,
+        "curated_results": curated[:max(1, int((cfg.get("evidence", {}) or {}).get("max_results", 5) or 5))],
+        "source_audit": audit,
+        "query_audit": [{"stage": "CACHE_REBUILD", "query": "", "search_depth": "CACHE_RAW", "results": len(raw_results), "extract_candidates": 0, "accepted_total_after_stage": len(curated), "collection_state_after_stage": state, "search_credits_total": 0, "extract_credits_total": 0}],
+        "raw_extract_results": [],
+        "credits": {"search": 0, "extract": 0, "total": 0},
+    }
+    return out
+
+
+def _export_collection_quality_report(products: List[Dict[str, Any]], sources: List[Dict[str, Any]], queries: List[Dict[str, Any]], path: Path) -> None:
+    import pandas as pd
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.stem + f".tmp_{os.getpid()}" + path.suffix)
+    state_counts = defaultdict(int)
+    decision_counts = defaultdict(int)
+    credits = 0.0
+    for row in products:
+        state_counts[safe(row.get("Collection State"))] += 1
+        try:
+            credits += float(row.get("Tavily Credits", 0) or 0)
+        except Exception:
+            pass
+    for row in sources:
+        decision_counts[safe(row.get("Decision"))] += 1
+    resumo = [
+        {"Indicador": "Produtos processados", "Valor": len(products)},
+        {"Indicador": "Fontes auditadas", "Valor": len(sources)},
+        {"Indicador": "Queries executadas", "Valor": len(queries)},
+        {"Indicador": "Créditos Tavily observados", "Valor": round(credits, 4)},
+    ]
+    resumo += [{"Indicador": f"STATE::{k}", "Valor": v} for k, v in sorted(state_counts.items()) if k]
+    resumo += [{"Indicador": f"SOURCE::{k}", "Valor": v} for k, v in sorted(decision_counts.items()) if k]
+    with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
+        pd.DataFrame(resumo).to_excel(writer, sheet_name="Resumo", index=False)
+        pd.DataFrame(products).to_excel(writer, sheet_name="Produtos", index=False)
+        pd.DataFrame(sources).to_excel(writer, sheet_name="Fontes", index=False)
+        pd.DataFrame(queries).to_excel(writer, sheet_name="Queries", index=False)
+    os.replace(tmp, path)
 
 
 def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> bool:
     input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
     cache_path = Path(args.cache or cfg["files"]["cache"])
     db_path = Path(args.db or cfg["files"]["classification_db"])
-    pre_report = Path(
-        args.precollection_output
-        or cfg.get("files", {}).get("precollection_report", "Pre_Coleta_Normalizacao_v3.xlsx")
-    )
+    pre_report = Path(args.precollection_output or cfg.get("files", {}).get("precollection_report", "Pre_Coleta_R9_5.xlsx"))
+    report_path = Path(cfg.get("files", {}).get("collection_report", "Coleta_Tavily_R9_5.xlsx"))
 
-    # ETAPA ANTERIOR À COLETA: nenhuma chamada Tavily até terminar este plano.
     plan = build_precollection_plan(
-        input_path=input_path,
-        cache_path=cache_path,
-        report_path=pre_report,
-        recollect_empty=bool(args.recollect_empty),
-        recollect_low_evidence=bool(args.recollect_low_evidence),
-        cfg=cfg,
-        max_tavily_new=int(args.max_tavily_new or 0),
+        input_path=input_path, cache_path=cache_path, report_path=pre_report,
+        recollect_empty=bool(args.recollect_empty), recollect_low_evidence=bool(args.recollect_low_evidence),
+        cfg=cfg, max_tavily_new=int(args.max_tavily_new or 0),
     )
-    candidates = [
-        (r.brand_original, r.model_original, r.raw_state)
-        for r in plan.candidates
-    ]
+    candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
 
     print()
     print("=" * 78)
-    print(" PRÉ-COLETA — NORMALIZAÇÃO / DEDUPLICAÇÃO / CACHE")
+    print(" R9.5 PRÉ-COLETA — OPEN SEARCH + COLLECTION QUALITY GATE")
     print("=" * 78)
-    labels = [
-        "Linhas recebidas",
-        "Linhas válidas",
-        "Linhas inválidas",
-        "Produtos únicos por business_key",
-        "Duplicidades internas removidas",
-        "Já no cache",
-        "RAW_EMPTY",
-        "RAW_CORRUPT",
-        "RAW_MISSING",
-        "Fila real Tavily antes do limite",
-        "Fila Tavily desta execução",
-    ]
-    for label in labels:
+    for label in [
+        "Linhas recebidas", "Linhas válidas", "Linhas inválidas", "Produtos únicos por business_key",
+        "Duplicidades internas removidas", "Já no cache", "RAW_EMPTY", "RAW_CORRUPT", "RAW_MISSING",
+        "Fila real Tavily antes do limite", "Fila Tavily desta execução",
+    ]:
         print(f"{label:.<50} {plan.summary.get(label, 0)}")
     print("-" * 78)
-    print("Business key................................... AGRESSIVA / SEM FUZZY")
-    print("Chamadas Tavily realizadas até aqui............ 0")
+    print("Search......................................... ABERTO / SEM DOMAIN-COUNTRY-LANGUAGE FILTER")
+    print("exact_match.................................... FALSE")
+    print("Stage 1 recebe................................. SOMENTE curated_results")
     print(f"Relatório pré-coleta............................ {pre_report}")
     print("=" * 78)
 
     if not candidates:
         LOG.info("Nenhuma nova consulta Tavily necessária.")
         return True
-
     if not args.yes:
-        print()
-        print(f"Fila real desta execução: {len(candidates)} consulta(s) Tavily.")
-        print("Marca e Modelo originais permanecem preservados.")
-        if input("Digite CONFIRMAR para iniciar a coleta: ").strip().upper() != "CONFIRMAR":
-            LOG.info("Coleta cancelada após pré-coleta. Nenhuma chamada Tavily foi realizada.")
+        print(f"Fila real desta execução: {len(candidates)} produto(s).")
+        if input("Digite CONFIRMAR para iniciar Search/Extract: ").strip().upper() != "CONFIRMAR":
+            LOG.info("Coleta cancelada. Nenhuma chamada Tavily foi realizada.")
             return False
 
-    tc = cfg.get("tavily", {}) or {}
-    limiter = RateLimiter(float(tc.get("requests_per_minute", 30)))
+    limiter = RateLimiter(float((cfg.get("tavily", {}) or {}).get("requests_per_minute", 30)))
     db = ClassificationDB(db_path)
-    run_id = db.start_run("collect", rules.hash, "TAVILY")
+    run_id = db.start_run("collect", rules.hash, "TAVILY_R9_5_SEARCH_EXTRACT")
     writer = TavilyWritableStore(cache_path)
-    rows = []
+    product_rows: List[Dict[str, Any]] = []
+    source_rows: List[Dict[str, Any]] = []
+    query_rows: List[Dict[str, Any]] = []
     completed = True
     try:
-        for i, (brand, model, prior_state) in enumerate(candidates, 1):
+        for idx, (brand, model, prior_state) in enumerate(candidates, 1):
             key = business_key(brand, model)
             try:
                 payload = tavily_search(brand, model, cfg, limiter)
-                writer.put(brand, model, payload, archive_reason=("RECOLLECT_LOW_EVIDENCE" if prior_state in {"RAW_OK", "RAW_OK_MERGED"} else "COLLECT"))
-                n = len(payload.get("results", []) or [])
-                db.event(run_id, key, "TAVILY_SAVED", f"results={n}; prior={prior_state}")
-                rows.append({"Marca": brand, "Modelo": model, "Anterior": prior_state, "Status": "SAVED", "Resultados": n, "Data": now_iso()})
+                coll = payload.get("_collection", {}) or {}
+                state = safe(coll.get("state")) or "NO_TARGET_EVIDENCE"
+                writer.put(
+                    brand, model, payload,
+                    archive_reason=("RECOLLECT_LOW_EVIDENCE_R9_5" if prior_state in {"RAW_OK", "RAW_OK_MERGED"} else "COLLECT_R9_5"),
+                )
+                credits = coll.get("credits", {}) or {}
+                curated = coll.get("curated_results", []) or []
+                raw_n = len(payload.get("results", []) or [])
+                product_rows.append({
+                    "Marca": brand, "Modelo": model, "Search Model": safe(coll.get("search_model")),
+                    "Estado Anterior": prior_state, "Collection State": state,
+                    "RAW Results": raw_n, "Curated Sources": len(curated),
+                    "Search Credits": credits.get("search", 0), "Extract Credits": credits.get("extract", 0),
+                    "Tavily Credits": credits.get("total", 0), "Data": now_iso(),
+                })
+                for s in coll.get("source_audit", []) or []:
+                    source_rows.append({
+                        "Marca": brand, "Modelo": model, "Search Model": safe(coll.get("search_model")),
+                        "URL": s.get("url"), "Title": s.get("title"), "Tavily Score": s.get("tavily_score"),
+                        "Identity Before": s.get("identity_before"), "Model Field": s.get("model_match_field_before"),
+                        "Decision": s.get("decision"), "Reason": s.get("reason"),
+                        "Quality Flags": " | ".join(s.get("quality_flags", []) or []),
+                        "Other SKUs": " | ".join(s.get("other_skus", []) or []),
+                        "Isolated Chars": s.get("isolated_chars"), "Extract Depth": s.get("extract_depth"),
+                        "Source Mode": s.get("source_mode"), "Search Stage": s.get("search_stage"),
+                    })
+                for q in coll.get("query_audit", []) or []:
+                    query_rows.append({"Marca": brand, "Modelo": model, **q})
+                db.event(run_id, key, "TAVILY_R9_5_SAVED", f"state={state}; raw={raw_n}; curated={len(curated)}; credits={credits.get('total', 0)}")
+                LOG.info("COLETA R9.5 %d/%d | %s %s | state=%s | raw=%d curated=%d | credits=%s", idx, len(candidates), brand, model, state, raw_n, len(curated), credits.get("total", 0))
             except OperationalPause as exc:
                 db.event(run_id, key, exc.code, safe(exc))
-                rows.append({"Marca": brand, "Modelo": model, "Anterior": prior_state, "Status": exc.code, "Resultados": "", "Data": now_iso()})
+                product_rows.append({"Marca": brand, "Modelo": model, "Estado Anterior": prior_state, "Collection State": exc.code, "Data": now_iso()})
                 LOG.error("%s. Coleta pausada com segurança; tudo salvo até aqui permanece persistido.", exc)
                 completed = False
                 break
             except Exception as exc:
-                # Não grava erro no cache. Na próxima execução continua elegível.
-                db.event(run_id, key, "TAVILY_ERROR", safe(exc))
-                rows.append({"Marca": brand, "Modelo": model, "Anterior": prior_state, "Status": "ERROR_RETRY_NEXT_RUN", "Resultados": "", "Data": now_iso()})
-                LOG.error("Falha Tavily %s | %s: %s", brand, model, exc)
-
-            if i % 25 == 0 or i == len(candidates):
-                LOG.info("COLETA %d/%d", i, len(candidates))
-
-        import pandas as pd
-        report_path = Path(cfg.get("files", {}).get("collection_report", "Coleta_Tavily_v3.xlsx"))
-        pd.DataFrame(rows).to_excel(report_path, index=False)
-        db.finish_run(run_id, "COMPLETED" if completed else "PAUSED", f"executados={len(rows)} planejados={len(candidates)}")
-        LOG.info("Relatório de coleta: %s", report_path)
+                db.event(run_id, key, "TAVILY_R9_5_ERROR", safe(exc))
+                product_rows.append({"Marca": brand, "Modelo": model, "Estado Anterior": prior_state, "Collection State": "ERROR_RETRY_NEXT_RUN", "Reason": safe(exc), "Data": now_iso()})
+                LOG.error("Falha coleta R9.5 %s | %s: %s", brand, model, exc)
+            if idx % 25 == 0:
+                _export_collection_quality_report(product_rows, source_rows, query_rows, report_path)
+        _export_collection_quality_report(product_rows, source_rows, query_rows, report_path)
+        db.finish_run(run_id, "COMPLETED" if completed else "PAUSED", f"executados={len(product_rows)} planejados={len(candidates)}")
+        LOG.info("Relatório Collection Quality: %s", report_path)
         return completed
     except KeyboardInterrupt:
-        db.finish_run(run_id, "INTERRUPTED", "RAW já commitado por produto")
-        LOG.warning("Coleta interrompida. Tudo salvo até o último produto permanece no cache.")
+        _export_collection_quality_report(product_rows, source_rows, query_rows, report_path)
+        db.finish_run(run_id, "INTERRUPTED", "RAW/Collection Quality commitado por produto")
+        LOG.warning("Coleta interrompida. Cache preservado até o último produto concluído.")
         raise
     finally:
         writer.close()
         db.close()
+
+
+def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
+    """Migra/curta RAW legado para R9.5 sem consumir creditos Tavily."""
+    cache_path = Path(args.cache or cfg["files"]["cache"])
+    report_path = Path(cfg.get("files", {}).get("collection_report_cache_rebuild", "Curadoria_Cache_R9_5.xlsx"))
+    store = TavilyReadOnlyStore(cache_path)
+    writer = TavilyWritableStore(cache_path)
+    products: List[Dict[str, Any]] = []
+    sources: List[Dict[str, Any]] = []
+    queries: List[Dict[str, Any]] = []
+    try:
+        catalog = store.catalog()
+        if args.max_items:
+            catalog = catalog[:int(args.max_items)]
+        for idx, (brand, model, key) in enumerate(catalog, 1):
+            raw = store.get(brand, model)
+            if raw.state not in {"RAW_OK", "RAW_OK_MERGED"} or not raw.payload:
+                continue
+            existing = raw.payload.get("_collection") if isinstance(raw.payload, dict) else None
+            if isinstance(existing, dict) and safe(existing.get("version")) == safe((_collection_policy(cfg)).get("VERSION")):
+                continue
+            rebuilt = _curate_existing_payload(brand, model, raw.payload, cfg)
+            coll = rebuilt.get("_collection", {}) or {}
+            writer.put(brand, model, rebuilt, archive_reason="CACHE_CURATED_R9_5_NO_TAVILY")
+            products.append({
+                "Marca": brand, "Modelo": model, "Search Model": coll.get("search_model"),
+                "Collection State": coll.get("state"), "RAW Results": len(rebuilt.get("results", []) or []),
+                "Curated Sources": len(coll.get("curated_results", []) or []), "Tavily Credits": 0, "Data": now_iso(),
+            })
+            for s in coll.get("source_audit", []) or []:
+                sources.append({
+                    "Marca": brand, "Modelo": model, "URL": s.get("url"), "Title": s.get("title"),
+                    "Tavily Score": s.get("tavily_score"), "Identity Before": s.get("identity_before"),
+                    "Model Field": s.get("model_match_field_before"), "Decision": s.get("decision"), "Reason": s.get("reason"),
+                    "Quality Flags": " | ".join(s.get("quality_flags", []) or []), "Other SKUs": " | ".join(s.get("other_skus", []) or []),
+                    "Isolated Chars": s.get("isolated_chars"), "Extract Depth": "CACHE_RAW", "Source Mode": "CACHE_REBUILD_NO_TAVILY",
+                })
+            for q in coll.get("query_audit", []) or []:
+                queries.append({"Marca": brand, "Modelo": model, **q})
+            if idx % 100 == 0:
+                LOG.info("CURADORIA CACHE %d/%d | salvos=%d", idx, len(catalog), len(products))
+                _export_collection_quality_report(products, sources, queries, report_path)
+        _export_collection_quality_report(products, sources, queries, report_path)
+        LOG.info("CURADORIA CACHE R9.5 CONCLUIDA | produtos=%d | creditos Tavily=0 | arquivo=%s", len(products), report_path)
+    finally:
+        store.close()
+        writer.close()
 
 
 # -----------------------------------------------------------------------------
@@ -1322,6 +2017,10 @@ class Source:
     type_scores: Dict[str, float] = field(default_factory=dict)
     power_scores: Dict[str, float] = field(default_factory=dict)
     type_evidence_fields: Dict[str, List[str]] = field(default_factory=dict)
+    collection_decision: str = ""
+    collection_reason: str = ""
+    tavily_score: float = 0.0
+    collection_source_mode: str = ""
 
     @property
     def text(self) -> str:
@@ -1570,21 +2269,41 @@ class DeterministicEngine:
         return flags
 
     def build_sources(self, brand: str, model: str, payload: Dict[str, Any]) -> List[Source]:
+        """Stage 1 consome somente evidencia aprovada pelo Collection Gate R9.5.
+
+        Cache legado continua compativel: se _collection nao existir, usa results.
+        Se _collection existir e curated_results estiver vazio, nao faz fallback
+        silencioso para RAW contaminado.
+        """
         out: List[Source] = []
         identity_model = derive_search_model(brand, model, self.cfg)
-        for i, res in enumerate((payload.get("results", []) or [])[: self.max_results], 1):
-            title = safe((res or {}).get("title"))
-            content = safe((res or {}).get("content"))[: self.content_chars]
-            url = safe((res or {}).get("url"))
+        if isinstance(payload.get("_collection"), dict):
+            source_rows = payload.get("_collection", {}).get("curated_results", []) or []
+        else:
+            source_rows = payload.get("results", []) or []
+        for i, res in enumerate([x for x in source_rows if isinstance(x, dict)][: self.max_results], 1):
+            title = safe(res.get("title"))
+            content = safe(res.get("content"))[: self.content_chars]
+            url = safe(res.get("url"))
             level, score, match, sw, match_field = _source_identity_baseline(
                 brand, identity_model, title, content, url, self.suffixes,
                 int(self.identity_cfg.get("short_model_requires_brand_length", 5) or 5),
             )
+            collection_flags = [safe(x) for x in (res.get("_collection_quality_flags", []) or []) if safe(x)]
+            flags = list(dict.fromkeys(self._source_quality_flags(title, content) + collection_flags))
+            try:
+                tv_score = float(res.get("score", 0) or 0)
+            except Exception:
+                tv_score = 0.0
             out.append(Source(
                 source_id=i, title=title, content=content, url=url,
-                relevance=level, quality_flags=self._source_quality_flags(title, content),
+                relevance=level, quality_flags=flags,
                 identity_score=score, model_match=match, model_match_field=match_field,
                 source_weight=sw,
+                collection_decision=safe(res.get("_collection_decision")),
+                collection_reason=safe(res.get("_collection_reason")),
+                tavily_score=tv_score,
+                collection_source_mode=safe(res.get("_collection_source_mode")),
             ))
         return out
 
@@ -2661,7 +3380,7 @@ class OpenAICompatibleClassifier:
         except ImportError as exc:
             raise OperationalPause(
                 f"{self.provider.upper()}_REQUESTS_MISSING",
-                "Pacote requests não instalado. Instale requirements_v3.txt.",
+                "Pacote requests não instalado. Instale requirements.txt.",
             ) from exc
 
         if not os.getenv(self.api_key_env, "").strip():
@@ -6281,9 +7000,10 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v3")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "classify", "full", "recover", "repair"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
+    p.add_argument("--collection-policy", default="")
     p.add_argument("--input", default="")
     p.add_argument("--cache", default="")
     p.add_argument("--master", default="")
@@ -6321,19 +7041,19 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     parser = build_parser()
     print("=" * 78)
     print(f" PIPELINE ENRIQUECEDOR DE PRODUTOS {PIPELINE_VERSION} | {BUILD_LABEL}")
-    print(" Tavily RAW -> Stage 0 -> Regras -> Stage 1.5 -> NVIDIA (failover) -> Groq -> Taxonomia JSON")
+    print(" Open Search -> Identity -> Target Isolation -> Curated Evidence -> Stage 1 -> Funnel -> NVIDIA/Groq")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 78)
-    print("1 - COLETA / EXTRAÇÃO")
+    print("1 - COLETA / EXTRAÇÃO R9.5")
     print("2 - CLASSIFICAÇÃO")
     print("3 - PROCESSO COMPLETO")
     print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM TAVILY)")
     print("5 - AUDITORIA / REPARO BASE (SEM LLM)")
-    print("6 - SAIR")
+    print("6 - CURAR CACHE LEGADO R9.5 (SEM TAVILY / 0 CRÉDITOS)")
+    print("7 - SAIR")
     op = input("Opção: ").strip()
-
     if op == "1":
-        limite = _menu_limit("Limite de consultas Tavily para piloto (ENTER = todas): ")
+        limite = _menu_limit("Limite de produtos Tavily para piloto (ENTER = todos): ")
         argv = ["--mode", "collect"]
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
@@ -6348,7 +7068,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
     if op == "3":
-        limite_tavily = _menu_limit("Limite de consultas Tavily (ENTER = todas): ")
+        limite_tavily = _menu_limit("Limite de produtos na coleta Tavily (ENTER = todos): ")
         limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
         argv = ["--mode", "full"]
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
@@ -6367,7 +7087,14 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(argv)
     if op == "5":
         return parser.parse_args(["--mode", "repair"])
+    if op == "6":
+        limite = _menu_limit("Limite de produtos do cache para piloto (ENTER = todos): ")
+        argv = ["--mode", "curate"]
+        if limite:
+            argv += ["--max-items", str(limite)]
+        return parser.parse_args(argv)
     raise SystemExit(0)
+
 
 def run_baseline_repair(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
     """Audita e saneia baseline local sem Tavily e sem LLM."""
@@ -6414,6 +7141,16 @@ def main() -> int:
     rules_path = (base / args.rules).resolve() if not Path(args.rules).is_absolute() else Path(args.rules)
     env_info = load_env_file(base / ".env")
     cfg = read_json(cfg_path)
+    collection_policy_name = args.collection_policy or safe((cfg.get("files", {}) or {}).get("collection_policy")) or "collection_quality_policy.json"
+    collection_policy_path = (base / collection_policy_name).resolve() if not Path(collection_policy_name).is_absolute() else Path(collection_policy_name)
+    collection_policy = read_json(collection_policy_path)
+    collection_errors = validate_collection_policy(collection_policy)
+    if collection_errors:
+        for e in collection_errors:
+            LOG.error(e)
+        return 2
+    cfg["_collection_policy"] = collection_policy
+    cfg["_collection_policy_path"] = str(collection_policy_path)
     rules = Rules(rules_path)
 
     if env_info["exists"]:
@@ -6428,7 +7165,7 @@ def main() -> int:
     else:
         LOG.warning(".env não encontrado em: %s", env_info["path"])
 
-    LOG.info("Pipeline=%s | Rules=%s | semantic_hash=%s | quality_hash=%s", PIPELINE_VERSION, rules.version, rules.hash[:12], rules.quality_hash[:12])
+    LOG.info("Pipeline=%s | Rules=%s | semantic_hash=%s | quality_hash=%s | CollectionPolicy=%s", PIPELINE_VERSION, rules.version, rules.hash[:12], rules.quality_hash[:12], safe(collection_policy.get("VERSION")))
     errors = rules.validate()
     if errors:
         for e in errors[:50]:
@@ -6453,6 +7190,9 @@ def main() -> int:
         if not os.getenv("TAVILY_API_KEY", "").strip():
             raise RuntimeError("TAVILY_API_KEY não configurada no .env")
         collect_products(args, cfg, rules)
+        return 0
+    if args.mode == "curate":
+        curate_cache_without_tavily(args, cfg, rules)
         return 0
     if args.mode == "classify":
         run_pipeline(args, cfg, rules)
