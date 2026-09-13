@@ -50,10 +50,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote
 
-PIPELINE_VERSION = "3.9.5"
+PIPELINE_VERSION = "3.9.5-hf1"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5 Collection Quality Gate + Target Isolation Funnel"
+BUILD_LABEL = "v3.9.5-HF1 Operational Suffix Identity + Title Evidence Coverage"
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -149,6 +149,52 @@ def derive_search_model(brand: str, model: str, cfg: Dict[str, Any]) -> str:
     if len(tokens) > 1 and canonical_display(tokens[-1]) in suffixes:
         work = " ".join(tokens[:-1]).strip()
 
+    # Especificacoes operacionais anexadas ao final do campo Modelo (ex.:
+    # ``DJG02 355 220V``) nao fazem parte do SKU publicado. A remocao e
+    # deliberadamente conservadora: somente token FINAL, regex configurada e
+    # nucleo anterior contendo letras + numeros. Assim ``GSA 18V 32`` permanece
+    # intacto, enquanto ``DJG02 355 220V`` vira ``DJG02 355`` apenas para busca
+    # e identidade. Marca/Modelo originais e business_key nunca sao alterados.
+    trailing_patterns = [
+        safe(x) for x in (icfg.get("trailing_spec_suffix_regexes", []) or []) if safe(x)
+    ]
+    max_trailing = max(0, int(icfg.get("max_trailing_spec_suffixes", 2) or 2))
+    for _ in range(max_trailing):
+        toks = work.split()
+        if len(toks) <= 1 or not trailing_patterns:
+            break
+        candidates_to_try: List[Tuple[str, str]] = [
+            (toks[-1], " ".join(toks[:-1]).strip())
+        ]
+        # Tambem cobre base operacional escrita como ``220 V`` / ``50 Hz``.
+        if len(toks) >= 3:
+            candidates_to_try.append((toks[-2] + toks[-1], " ".join(toks[:-2]).strip()))
+
+        stripped = False
+        for candidate, core in candidates_to_try:
+            core_c = compact(core)
+            core_is_model_like = (
+                len(core_c) >= 5
+                and bool(re.search(r"[a-z]", core_c))
+                and bool(re.search(r"\d", core_c))
+            )
+            if not core_is_model_like:
+                continue
+            matched = False
+            for expr in trailing_patterns:
+                try:
+                    if re.fullmatch(expr, candidate, flags=re.I):
+                        matched = True
+                        break
+                except re.error:
+                    continue
+            if matched:
+                work = core
+                stripped = True
+                break
+        if not stripped:
+            break
+
     # Revisões anexadas ao SKU, somente por marca explicitamente configurada.
     revision_map = icfg.get("revision_suffixes_by_brand", {}) or {}
     revision_suffixes = sorted(
@@ -199,8 +245,17 @@ def canonical_display(text: str) -> str:
 
 @lru_cache(maxsize=4096)
 def alias_pattern(alias: str) -> re.Pattern:
-    parts = [re.escape(x) for x in re.split(r"\s+", strip_accents(alias).casefold().strip()) if x]
-    body = r"\s+".join(parts)
+    """Alias lexical com tolerancia apenas a separadores estruturais.
+
+    Hifen, barra, ponto, underscore e espaco sao equivalentes ENTRE os mesmos
+    tokens (ex.: ``multi-tool`` == ``multi tool``; ``drill/driver`` ==
+    ``drill driver``). Nao ha fuzzy, stemming, reordenacao ou expansao semantica.
+    """
+    folded = strip_accents(alias).casefold().strip()
+    parts = [re.escape(x) for x in re.split(r"[\s\-_./+]+", folded) if x]
+    if not parts:
+        return re.compile(r"(?!x)x")
+    body = r"[\s\-_./+]+".join(parts)
     return re.compile(rf"(?<![a-z0-9]){body}(?![a-z0-9])", re.I)
 
 
@@ -4612,6 +4667,38 @@ def record_for_raw_state(raw: RawEvidence) -> Dict[str, Any]:
 
 
 
+def record_for_uncurated_cache(raw: RawEvidence) -> Dict[str, Any]:
+    """Bloqueia classificacao R9.5 sobre cache legado ainda nao curado."""
+    return {
+        "Marca": raw.brand,
+        "Modelo": raw.model,
+        "Raw State": raw.state,
+        "Resolution State": "PENDING_CURATION",
+        "Stage": "COLLECTION",
+        "O que é (Tipo)": "REVISAR",
+        "Alimentação": "UNKNOWN",
+        "Category General": "",
+        "FAMILY": "",
+        "Título Real": "",
+        "Fonte URL": "",
+        "Review Required": "SIM",
+        "Reason Code": "LEGACY_CACHE_NOT_CURATED",
+        "Motivo": (
+            "R9.5 exige Collection Quality antes da classificacao. "
+            "Cache RAW legado sem _collection; execute a opcao 6 (0 creditos) "
+            "ou uma nova coleta R9.5 antes de classificar."
+        ),
+        "Pipeline Version": PIPELINE_VERSION,
+        "Processed At": now_iso(),
+        "LLM Provider": "",
+        "LLM Model": "",
+        "LLM Cache": "",
+        "LLM Prompt Tokens": 0,
+        "LLM Completion Tokens": 0,
+        "LLM Total Tokens": 0,
+    }
+
+
 def llm_preflight_rejection_reason(rules: Rules, s1: Stage1Result) -> str:
     """Stage 0 + Stage 1.5 pre-flight; nenhuma chamada LLM inútil."""
     gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
@@ -6594,6 +6681,21 @@ def run_pipeline(
                 if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
                     rec = record_for_raw_state(raw)
                     stats[raw.state.lower()] += 1
+                    db.put_checkpoint(
+                        key, brand, model_, raw.raw_hash, rules.hash, rec, llm_identity
+                    )
+                    rows.append(rec)
+                    continue
+
+                require_curated = bool(
+                    (cfg.get("collection_quality", {}) or {}).get(
+                        "require_curated_evidence_for_classification", True
+                    )
+                )
+                has_collection = isinstance((raw.payload or {}).get("_collection"), dict)
+                if require_curated and not has_collection:
+                    rec = record_for_uncurated_cache(raw)
+                    stats["collection_uncurated"] += 1
                     db.put_checkpoint(
                         key, brand, model_, raw.raw_hash, rules.hash, rec, llm_identity
                     )

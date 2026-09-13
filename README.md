@@ -1,4 +1,4 @@
-# R9.5 — Collection Quality Gate + Target Isolation Funnel
+# R9.5 HF1 — Collection Quality Gate + Target Isolation + Title Evidence
 
 ## Objetivo
 
@@ -7,6 +7,31 @@ Fortalecer a etapa que alimenta todo o pipeline. A R9.5 mantém Stage 1, Stage 1
 Princípio central:
 
 > RAW pode conter ruído para auditoria; `curated_results` não pode.
+
+
+## HF1 — Correção de títulos explícitos e Modelo operacional
+
+A HF1 corrige uma classe real de falso-manual observada em modelos como `DJG02 355 220V`.
+O `220V` é preservado no campo Modelo original, mas removido somente do `Search Model`/identidade quando aparece como especificação técnica terminal e o núcleo anterior continua sendo um SKU estruturado.
+
+Exemplo:
+
+```text
+Modelo original: DJG02 355 220V
+Search Model:    DJG02 355
+Fonte:           Dongcheng DJG02-355 Electric Cut Off Machine
+Resultado:       CUT-OFF SAW
+```
+
+A regra é conservadora: `GSA 18V 32` continua inteiro porque a tensão está no meio do identificador e não como atributo terminal.
+
+Também foram fechados gaps lexicais comprovados: `cut off machine` -> `CUT-OFF SAW`, `oscillating multi tool` -> `OSCILLATING MULTI-TOOL` e `screwdriver` -> `SCREWDRIVER`. Separadores como hífen/barra/espaço passam a ser equivalentes somente entre os mesmos tokens, sem fuzzy matching.
+
+Um título descritivo sem vínculo com o SKU **não** é autoaprovado. Por exemplo, `Dongcheng 1300W Electric Reciprocating Saw` só resolve `DJF02 30` quando o mesmo SKU também está ancorado em URL/BODY isolado. Isso evita usar a descrição correta de um produto errado.
+
+### Cache legado
+
+Com `collection_quality.require_curated_evidence_for_classification=true`, cache antigo sem `_collection` não pode mais pular a R9.5. Ele recebe `PENDING_CURATION / LEGACY_CACHE_NOT_CURATED`; execute a opção 6 (0 créditos) ou uma nova coleta antes da classificação.
 
 ## Fluxo R9.5
 
@@ -149,13 +174,13 @@ Observação: a curadoria altera o `raw_hash` semântico porque passa a existir 
 - `collection_quality_policy.json`
 - `test_collection_quality.py`
 - `README.md`
-- `regras_negocio.json` — sem alteração semântica nesta revisão.
+- `regras_negocio.json` — atualizado na HF1 com aliases/tipo/regressões controladas para os gaps comprovados.
 
 ## Validações executadas
 
 - `py_compile`: OK.
 - `Rules.validate()`: 0 erros.
-- Quality gates existentes: 50/50 synthetic, 14/14 identity, 22/22 real explicit.
+- Quality gates HF1: 58/58 synthetic, 16/16 identity, 22/22 real explicit.
 - Fonte dedicada: aceita.
 - Catálogo multi-produto: target isolado; outros SKUs removidos.
 - Compatibility-only: rejeitado.

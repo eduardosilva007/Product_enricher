@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-12-r9.5-collection-quality-target-isolation-v1",
+  "VERSION": "2026-09-13-r9.5-hf1-title-evidence-operational-suffix",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -48,6 +48,9 @@
       ],
       "SENSEI": [
         "4"
+      ],
+      "DONG CHENG": [
+        "220V"
       ]
     },
     "embedded_sku_brands": [
@@ -61,7 +64,14 @@
         "A1",
         "A3"
       ]
-    }
+    },
+    "trailing_spec_suffix_regexes": [
+      "^\\d+(?:[.,]\\d+)?V$",
+      "^\\d+(?:[.,]\\d+)?VAC$",
+      "^\\d+(?:[.,]\\d+)?VDC$",
+      "^\\d+(?:[.,]\\d+)?HZ$"
+    ],
+    "max_trailing_spec_suffixes": 2
   },
   "tavily": {
     "requests_per_minute": 30,
@@ -194,5 +204,8 @@
   "quality_gates": {
     "source": "regras_negocio.json",
     "fail_before_classification": true
+  },
+  "collection_quality": {
+    "require_curated_evidence_for_classification": true
   }
 }

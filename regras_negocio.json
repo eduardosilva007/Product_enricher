@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-11-v3.0.5-r9.4-rc4-manual-gap-taxonomy-fix1",
+  "VERSION": "2026-09-13-v3.0.6-r9.5-hf1-title-evidence-gaps",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -1023,7 +1023,10 @@
         "sierra oscilante multiproposito",
         "serra oscilante",
         "serra oscilante multipropósito",
-        "serra oscilante multiproposito"
+        "serra oscilante multiproposito",
+        "oscillating multi tool",
+        "oscillating multi function tool",
+        "oscillating multi-function tool"
       ]
     },
     "MULTI-TOOL": {
@@ -1084,7 +1087,10 @@
         "cut-off saw",
         "cut off saw",
         "cutoff saw",
-        "power cutter"
+        "power cutter",
+        "cut-off machine",
+        "cut off machine",
+        "cutoff machine"
       ]
     },
     "ABRASIVE CUT-OFF": {
@@ -2598,6 +2604,30 @@
         "OTHERS",
         "EDGER"
       ]
+    },
+    "SCREWDRIVER": {
+      "aliases": [
+        "screwdriver",
+        "screw driver",
+        "electric screwdriver",
+        "electric screw driver",
+        "corded screwdriver",
+        "cordless screwdriver",
+        "power screwdriver",
+        "parafusadeira",
+        "atornillador"
+      ],
+      "negative_aliases": [
+        "impact screwdriver",
+        "impact driver",
+        "torque screwdriver bit",
+        "screwdriver bit",
+        "screwdriver bits"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "POWER TOOLS"
+      ]
     }
   },
   "POWER_RULES": {
@@ -3882,6 +3912,13 @@
       "category_general": "OTHERS",
       "family": "EDGER",
       "priority": 205
+    },
+    {
+      "primary_type": "SCREWDRIVER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "POWER TOOLS",
+      "priority": 140
     }
   ],
   "COMPONENT_CONTEXT_RULES": {
@@ -4036,6 +4073,14 @@
         "MINI GRINDER",
         "DIE GRINDER",
         "ANGLE GRINDER"
+      ],
+      [
+        "CORDLESS IMPACT",
+        "SCREWDRIVER"
+      ],
+      [
+        "OSCILLATING MULTI-TOOL",
+        "MULTI-TOOL"
       ]
     ],
     "output_voltage_not_input_power_types": [
@@ -5025,6 +5070,129 @@
           "category_general": "OTHERS",
           "family": "WATER BOOSTER PUMP"
         }
+      },
+      {
+        "id": "dongcheng_djf02_operational_voltage_reciprocating",
+        "brand": "DONG CHENG",
+        "model": "DJF02 30 220V",
+        "title": "Dongcheng 1300W Electric Reciprocating Saw",
+        "content": "Dongcheng DJF02-30 220V corded electric reciprocating saw",
+        "url": "https://example.com/dongcheng/djf02-30",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "RECIPROCATING SAW",
+          "power": "CORDED",
+          "category_general": "OTHERS",
+          "family": "RECIPROCATING SAW"
+        }
+      },
+      {
+        "id": "dongcheng_djg02_cut_off_machine",
+        "brand": "DONG CHENG",
+        "model": "DJG02 355 220V",
+        "title": "Dongcheng DJG02-355 Electric Cut Off Machine at ₹ 6900",
+        "content": "Dongcheng DJG02-355 electric cut off machine 220V",
+        "url": "https://example.com/dongcheng/djg02-355",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "CUT-OFF SAW",
+          "power": "CORDED",
+          "category_general": "OTHERS",
+          "family": "CUT-OFF SAW"
+        }
+      },
+      {
+        "id": "dongcheng_djg09_cut_off_machine",
+        "brand": "DONG CHENG",
+        "model": "DJG09 355 220V",
+        "title": "Dongcheng Electric Cut Off Machine DJG09-355",
+        "content": "DJG09-355 220V electric cut off machine",
+        "url": "https://example.com/dongcheng/djg09-355",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "CUT-OFF SAW",
+          "power": "CORDED",
+          "category_general": "OTHERS",
+          "family": "CUT-OFF SAW"
+        }
+      },
+      {
+        "id": "dongcheng_djx10_miter_saw",
+        "brand": "DONG CHENG",
+        "model": "DJX10 255 220V",
+        "title": "DongCheng DJX10-255 10-Inch Table Miter Saw for Wood",
+        "content": "DJX10-255 220V table miter saw",
+        "url": "https://example.com/dongcheng/djx10-255",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "MITER SAW",
+          "power": "CORDED",
+          "category_general": "OTHERS",
+          "family": "MITER SAW"
+        }
+      },
+      {
+        "id": "dongcheng_dmd320_oscillating_multi_tool",
+        "brand": "DONG CHENG",
+        "model": "DMD320 220V",
+        "title": "Dongcheng DMD320 320 Watt 6-Speed Shifting Gears Oscillating Multi Tool",
+        "content": "DMD320 220V corded oscillating multi tool",
+        "url": "https://example.com/dongcheng/dmd320",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "OSCILLATING MULTI-TOOL",
+          "power": "CORDED",
+          "category_general": "OTHERS",
+          "family": "OSCILLATING MULTI-TOOL"
+        }
+      },
+      {
+        "id": "dongcheng_dmq65k_jigsaw",
+        "brand": "DONG CHENG",
+        "model": "DMQ65K 220V",
+        "title": "Dongcheng Jig Saw DMQ65K Price & Specifications",
+        "content": "DMQ65K 220V corded electric jig saw",
+        "url": "https://example.com/dongcheng/dmq65k",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "JIGSAW",
+          "power": "CORDED",
+          "category_general": "OTHERS",
+          "family": "JIGSAW"
+        }
+      },
+      {
+        "id": "dongcheng_dpl6_screwdriver",
+        "brand": "DONG CHENG",
+        "model": "DPL6 220V",
+        "title": "Dongcheng DPL6 P1L FF 6 EN Screwdriver",
+        "content": "DPL6 220V corded electric screwdriver",
+        "url": "https://example.com/dongcheng/dpl6",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "SCREWDRIVER",
+          "power": "CORDED",
+          "category_general": "OTHERS",
+          "family": "POWER TOOLS"
+        }
+      },
+      {
+        "id": "dongcheng_dqf32_blower_with_explicit_mains",
+        "brand": "DONG CHENG",
+        "model": "DQF32",
+        "title": "DongCheng Blower Vacuum 680W/1.6-3.2 m³/min DQF32",
+        "content": "DongCheng DQF32 electric blower vacuum 220V 680W",
+        "url": "https://example.com/dongcheng/dqf32",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "BLOWER",
+          "power": "CORDED",
+          "category_general": "CORDED PRODUCT",
+          "family": "CORDED BLOWER",
+          "forbidden_type_candidates": [
+            "VACUUM CLEANER"
+          ]
+        }
       }
     ],
     "REAL_VALIDATED_CASES": [
@@ -5712,6 +5880,30 @@
         "model": "BB42XA1",
         "title": "Greenworks 82V OPTIMUS 42N Backpack Blower | BB42X",
         "content": "82V cordless backpack blower",
+        "expect": {
+          "min_level": "STRONG",
+          "model_match": "EXACT"
+        }
+      },
+      {
+        "id": "identity_dongcheng_trailing_220v",
+        "brand": "DONG CHENG",
+        "model": "DJG02 355 220V",
+        "title": "Dongcheng DJG02-355 Electric Cut Off Machine",
+        "content": "",
+        "url": "https://example.com/djg02-355",
+        "expect": {
+          "min_level": "STRONG",
+          "model_match": "EXACT"
+        }
+      },
+      {
+        "id": "identity_voltage_inside_model_not_stripped",
+        "brand": "BOSCH",
+        "model": "GSA 18V 32",
+        "title": "Bosch GSA 18V-32 Professional Reciprocating Saw",
+        "content": "",
+        "url": "https://example.com/gsa-18v-32",
         "expect": {
           "min_level": "STRONG",
           "model_match": "EXACT"
