@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf1
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf2
 
 Arquitetura:
     Stage 0A - Tavily Search aberto + Target Identity Gate
@@ -50,10 +50,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote
 
-PIPELINE_VERSION = "3.9.5-hf1"
+PIPELINE_VERSION = "3.9.5-hf2"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF1 Operational Suffix Identity + Title Evidence Coverage"
+BUILD_LABEL = "v3.9.5-HF2 Evidence-driven Taxonomy + Pump Safety Gate"
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -401,7 +401,7 @@ class Rules:
             "PRODUCT_TYPES", "POWER_RULES", "TAXONOMY_PAIRS", "TAXONOMY_RULES",
             "TYPE_POLICY", "RESOLUTION_POLICY", "CLASSIFICATION_POLICY",
             "SOURCE_RULES", "COMPONENT_CONTEXT_RULES",
-            "COMPOSITE_TYPE_RULES",
+            "COMPOSITE_TYPE_RULES", "TAXONOMY_EVIDENCE_RULES",
         )
         semantic_payload = {k: self.raw.get(k) for k in semantic_keys}
         self.hash = stable_json_hash(semantic_payload)
@@ -410,6 +410,7 @@ class Rules:
         self.types: Dict[str, Dict[str, Any]] = self.raw.get("PRODUCT_TYPES", {}) or {}
         self.power_rules: Dict[str, Dict[str, Any]] = self.raw.get("POWER_RULES", {}) or {}
         self.taxonomy_rules: List[Dict[str, Any]] = self.raw.get("TAXONOMY_RULES", []) or []
+        self.taxonomy_evidence_rules: List[Dict[str, Any]] = self.raw.get("TAXONOMY_EVIDENCE_RULES", []) or []
         self.valid_pairs = {
             (safe(x.get("category_general")), safe(x.get("family")))
             for x in (self.raw.get("TAXONOMY_PAIRS", []) or [])
@@ -485,8 +486,31 @@ class Rules:
             if p != "*" and p not in self.allowed_powers:
                 errors.append(f"TAXONOMY_RULE power inválido: {p}")
 
+        for i, r in enumerate(self.taxonomy_evidence_rules):
+            t = safe(r.get("primary_type"))
+            if t not in self.types:
+                errors.append(f"TAXONOMY_EVIDENCE_RULE desconhece type={t}")
+            pair = (safe(r.get("category_general")), safe(r.get("family")))
+            if pair not in self.valid_pairs:
+                errors.append(f"TAXONOMY_EVIDENCE_RULE par inválido: {pair}")
+            aliases = r.get("aliases", []) or []
+            if not isinstance(aliases, list):
+                errors.append(f"TAXONOMY_EVIDENCE_RULES[{i}].aliases deve ser lista")
+            neg = r.get("negative_aliases", []) or []
+            if not isinstance(neg, list):
+                errors.append(f"TAXONOMY_EVIDENCE_RULES[{i}].negative_aliases deve ser lista")
+            model_regex = safe(r.get("model_regex"))
+            if model_regex:
+                try:
+                    re.compile(model_regex, flags=re.I)
+                except re.error as exc:
+                    errors.append(f"TAXONOMY_EVIDENCE_RULES[{i}].model_regex inválido: {exc}")
+
         # Todo PRODUCT_TYPE precisa chegar a uma taxonomia executável.
+        # R9.5 HF2: tipos amplos podem depender de subtipo comprovado na evidência
+        # (ex.: WATERPUMP -> PERIPHERAL/SUBMERSIBLE/CIRCULATION...).
         mapped_types = {safe(r.get("primary_type")) for r in self.taxonomy_rules}
+        mapped_types.update(safe(r.get("primary_type")) for r in self.taxonomy_evidence_rules)
         for t, data in self.types.items():
             fp = data.get("fallback_pair")
             has_valid_fallback = bool(
@@ -604,7 +628,7 @@ class Rules:
             "TAXONOMY_PAIRS", "PRODUCT_TYPES", "POWER_RULES",
             "SOURCE_RULES", "TAXONOMY_RULES", "COMPONENT_CONTEXT_RULES",
             "TYPE_POLICY", "RESOLUTION_POLICY", "CLASSIFICATION_POLICY",
-            "COMPOSITE_TYPE_RULES", "QUALITY_GATES",
+            "COMPOSITE_TYPE_RULES", "TAXONOMY_EVIDENCE_RULES", "QUALITY_GATES",
         }
         for key in self.raw:
             if key not in allowed_root:
@@ -644,6 +668,17 @@ class Rules:
                 if key not in allowed_taxonomy_fields:
                     errors.append(f"UNKNOWN_TAXONOMY_RULE_FIELD: TAXONOMY_RULES[{i}].{key}")
 
+        allowed_taxonomy_evidence_fields = {
+            "primary_type", "category_general", "family", "aliases",
+            "negative_aliases", "priority", "brand", "model_regex",
+        }
+        for i, row in enumerate(self.taxonomy_evidence_rules):
+            for key in row:
+                if key not in allowed_taxonomy_evidence_fields:
+                    errors.append(
+                        f"UNKNOWN_TAXONOMY_EVIDENCE_RULE_FIELD: TAXONOMY_EVIDENCE_RULES[{i}].{key}"
+                    )
+
         for power, data in self.power_rules.items():
             for key in data:
                 if key == "negative_keywords" or key.endswith("_keywords"):
@@ -668,7 +703,59 @@ class Rules:
 
         return errors
 
-    def map_taxonomy(self, product_type: str, power: str) -> Tuple[str, str, str]:
+    def map_taxonomy(
+        self,
+        product_type: str,
+        power: str,
+        evidence_text: str = "",
+        brand: str = "",
+        model: str = "",
+    ) -> Tuple[str, str, str]:
+        """Mapeia Category/FAMILY de forma determinística.
+
+        HF2 introduz TAXONOMY_EVIDENCE_RULES para tipos fisicamente amplos cuja
+        família não pode ser decidida apenas por TYPE+POWER (principalmente
+        WATERPUMP e LIFT PUMP). Essas regras só usam evidência já aprovada pelo
+        Stage 0 / Collection Quality Gate; a LLM continua sem decidir taxonomia.
+        """
+        evidence_fold = strip_accents(evidence_text).casefold()
+        evidence_candidates = []
+        for r in self.taxonomy_evidence_rules:
+            if safe(r.get("primary_type")) != product_type:
+                continue
+            rule_brand = safe(r.get("brand"))
+            if rule_brand and canonical_display(rule_brand) != canonical_display(brand):
+                continue
+            model_regex = safe(r.get("model_regex"))
+            if model_regex and not re.search(model_regex, safe(model), flags=re.I):
+                continue
+            negatives = [x for x in (r.get("negative_aliases", []) or []) if safe(x)]
+            if negatives and any(contains_alias_prepared(evidence_fold, x) for x in negatives):
+                continue
+            aliases = [x for x in (r.get("aliases", []) or []) if safe(x)]
+            hits = [x for x in aliases if contains_alias_prepared(evidence_fold, x)]
+            if aliases and not hits:
+                continue
+            # Não existe regra evidence-only sem alias ou Brand+Model específico.
+            if not aliases and not (rule_brand and model_regex):
+                continue
+            pair = (safe(r.get("category_general")), safe(r.get("family")))
+            if pair not in self.valid_pairs:
+                continue
+            priority = int(r.get("priority", 0) or 0)
+            specificity = max([len(norm_text(x).split()) for x in hits] or [0])
+            constrained = int(bool(rule_brand)) + int(bool(model_regex))
+            evidence_candidates.append((priority, constrained, specificity, pair, hits))
+
+        if evidence_candidates:
+            evidence_candidates.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+            best = evidence_candidates[0]
+            # Empate real entre famílias diferentes => não arbitrar silenciosamente.
+            tied = [x for x in evidence_candidates if x[:3] == best[:3] and x[3] != best[3]]
+            if not tied:
+                hit_label = ",".join(best[4][:3]) or "BRAND_MODEL_RULE"
+                return best[3][0], best[3][1], f"TAXONOMY_EVIDENCE:{hit_label}"
+
         candidates = []
         for r in self.taxonomy_rules:
             if safe(r.get("primary_type")) != product_type:
@@ -690,6 +777,7 @@ class Rules:
             if pair in self.valid_pairs:
                 return pair[0], pair[1], "TYPE_FALLBACK_PAIR"
         return "OTHERS", "OTHERS", "TAXONOMY_UNMAPPED"
+
 
 
 # -----------------------------------------------------------------------------
@@ -2082,6 +2170,30 @@ class Source:
         return f"{self.title}\n{self.content}".strip()
 
 
+def taxonomy_evidence_text(
+    sources: Sequence["Source"],
+    product_type: str,
+    source_ids: Optional[Sequence[int]] = None,
+) -> str:
+    """Monta contexto taxonômico apenas de fontes target-aware que sustentam o TYPE."""
+    allowed_ids = {int(x) for x in (source_ids or []) if str(x).isdigit()}
+    chunks: List[str] = []
+    for src in sources:
+        if allowed_ids and src.source_id not in allowed_ids:
+            continue
+        if src.relevance not in {"STRONG", "PROBABLE"}:
+            continue
+        supports_type = (
+            product_type in (src.type_hits or {})
+            or float((src.type_scores or {}).get(product_type, 0.0) or 0.0) > 0.0
+        )
+        if not supports_type:
+            continue
+        if src.text:
+            chunks.append(src.text)
+    return "\n---SOURCE---\n".join(chunks)
+
+
 @dataclass
 class Stage1Result:
     state: str
@@ -2601,7 +2713,10 @@ class DeterministicEngine:
             reasons.append("POWER_UNKNOWN_ALLOWED_BY_TAXONOMY")
 
         if product_type:
-            cg, fam, tax_reason = self.rules.map_taxonomy(product_type, power or "UNKNOWN")
+            tax_evidence = taxonomy_evidence_text(sources, product_type)
+            cg, fam, tax_reason = self.rules.map_taxonomy(
+                product_type, power or "UNKNOWN", tax_evidence, brand, model
+            )
         else:
             cg, fam, tax_reason = "", "", ""
 
@@ -2772,7 +2887,8 @@ def _single_funnel_candidate_can_resolve(rules: Rules, s1: Stage1Result, typ: st
     if s1.power is None and _type_requires_specific_power_rules(rules, typ):
         return False
     power = s1.power or "UNKNOWN"
-    cg, fam, _ = rules.map_taxonomy(typ, power)
+    tax_evidence = taxonomy_evidence_text(s1.sources, typ)
+    cg, fam, _ = rules.map_taxonomy(typ, power, tax_evidence)
     return (cg, fam) in rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS")
 
 
@@ -4752,7 +4868,8 @@ def finalize_product(
     if s1.state == "RESOLVED_RULE":
         typ = s1.product_type or "REVISAR"
         power = s1.power or "UNKNOWN"
-        cg, fam, tax_reason = rules.map_taxonomy(typ, power)
+        tax_evidence = taxonomy_evidence_text(s1.sources, typ)
+        cg, fam, tax_reason = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
         title, url = choose_title_for_type(s1.sources, typ)
         return {
             **common,
@@ -4781,7 +4898,8 @@ def finalize_product(
         typ = funnel.candidates[0]
         if _single_funnel_candidate_can_resolve(rules, s1, typ):
             power = s1.power or "UNKNOWN"
-            cg, fam, tax_reason = rules.map_taxonomy(typ, power)
+            tax_evidence = taxonomy_evidence_text(s1.sources, typ)
+            cg, fam, tax_reason = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
             title, url = choose_title_for_type(s1.sources, typ)
             return {
                 **common,
@@ -4949,7 +5067,8 @@ def finalize_product(
         }
 
     power = safe(data.get("power"))
-    cg, fam, tax_reason = rules.map_taxonomy(typ, power)
+    tax_evidence = taxonomy_evidence_text(s1.sources, typ, refs)
+    cg, fam, tax_reason = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
     review = (cg, fam) not in rules.valid_pairs or (cg, fam) == ("OTHERS", "OTHERS")
     out_cg, out_fam = ("", "") if review else (cg, fam)
 

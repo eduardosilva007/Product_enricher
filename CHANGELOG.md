@@ -1,3 +1,15 @@
+# R9.5 HF2 — 2026-09-15
+
+- Added `TAXONOMY_EVIDENCE_RULES` with executable Python support.
+- Removed automatic `WATERPUMPS | WATERPUMP` taxonomy for `WATERPUMP`.
+- Removed generic `WATER BOOSTER PUMP` fallback for `LIFT PUMP`.
+- Preserved business TYPE as `WATERPUMP` / `LIFT PUMP` while deriving specific FAMILY from target-approved evidence.
+- Added pump subtype rules for centrifugal, peripheral, submersible, circulation, pool, priming, jet, pressure booster, pressurization, inverter booster and booster families.
+- Added high-confidence brand/series refinements learned from manually validated cases.
+- Ambiguous/generic pump evidence now remains REVIEW instead of being auto-taxonomized.
+- Added regression gates; validation: 69/69 synthetic, 16/16 identity, 22/22 explicit real cases.
+- On the 136 manually corrected pump cases, title-only simulation auto-resolved 39 and all 39 matched the validated FAMILY (0 false auto-resolutions).
+
 # R9.5 Collection Quality — Changelog
 
 ## 3.9.5-hf1 — Operational suffix identity + explicit title coverage

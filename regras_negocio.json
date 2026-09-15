@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-13-v3.0.6-r9.5-hf1-title-evidence-gaps",
+  "VERSION": "2026-09-15-v3.0.7-r9.5-hf2-taxonomy-evidence",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -24,7 +24,8 @@
     "Nenhuma seção/campo de política sem executor correspondente pode permanecer no JSON operacional.",
     "Stage 0 valida identidade/qualidade da evidência antes da classificação.",
     "Stage 1.5 reduz candidatos para a LLM por score, suporte e identidade; a LLM nunca recebe a taxonomia inteira.",
-    "LOW_TARGET_EVIDENCE e TAXONOMY_GAP são estados distintos."
+    "LOW_TARGET_EVIDENCE e TAXONOMY_GAP são estados distintos.",
+    "Category General e FAMILY podem usar TAXONOMY_EVIDENCE_RULES somente após TYPE resolvido e com evidência target-anchored; WATERPUMP/LIFT PUMP sem subtipo taxonômico comprovado devem permanecer em REVIEW, nunca cair em família genérica automática."
   ],
   "TAXONOMY_PAIRS": [
     {
@@ -388,10 +389,6 @@
       "family": "WASHER"
     },
     {
-      "category_general": "WATERPUMPS",
-      "family": "WATERPUMP"
-    },
-    {
       "category_general": "OTHERS",
       "family": "ORBITAL SANDER"
     },
@@ -638,6 +635,50 @@
     {
       "category_general": "OTHERS",
       "family": "PLANER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PERIPHERAL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SUBMERSIBLE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CIRCULATION PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MULTISTAGE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRIMING PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "POOL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "JET PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRESSURIZATION PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRESSURE BOOSTER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INVERTER BOOSTER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BOOSTER PUMP"
     }
   ],
   "PRODUCT_TYPES": {
@@ -1494,7 +1535,38 @@
         "bomba periferica",
         "bomba sumergible",
         "bomba submersível",
-        "bomba submersivel"
+        "bomba submersivel",
+        "centrifugal pump",
+        "bomba centrífuga",
+        "bomba centrifuga",
+        "circulation pump",
+        "circulating pump",
+        "circulator pump",
+        "recirculation pump",
+        "bomba circuladora",
+        "bomba de circulação",
+        "bomba de circulacao",
+        "bomba de circulación",
+        "bomba de circulacion",
+        "multistage pump",
+        "multi stage pump",
+        "multi-stage pump",
+        "vertical multistage pump",
+        "horizontal multistage pump",
+        "jet pump",
+        "self priming pump",
+        "self-priming pump",
+        "self priming water pump",
+        "self-priming water pump",
+        "pool pump",
+        "spa pump",
+        "jacuzzi pump",
+        "swimming pool pump",
+        "single stage inline pump",
+        "single-stage inline pump",
+        "end suction pump",
+        "single impeller pump",
+        "single-impeller pump"
       ]
     },
     "ROBOTIC LAWN MOWER": {
@@ -1991,25 +2063,6 @@
         "AIR FRYER"
       ]
     },
-    "CENTRIFUGAL PUMP": {
-      "aliases": [
-        "centrifugal pump",
-        "self priming centrifugal pump",
-        "self-priming centrifugal pump",
-        "bomba centrífuga",
-        "bomba centrifuga",
-        "bomba centrífuga autocebante",
-        "bomba centrifuga autocebante"
-      ],
-      "negative_aliases": [
-        "lift pump",
-        "pressure washer"
-      ],
-      "fallback_pair": [
-        "OTHERS",
-        "CENTRIFUGAL PUMP"
-      ]
-    },
     "INVERTER WELDER": {
       "aliases": [
         "inverter welder",
@@ -2083,10 +2136,6 @@
       ],
       "negative_aliases": [
         "centrifugal pump"
-      ],
-      "fallback_pair": [
-        "OTHERS",
-        "WATER BOOSTER PUMP"
       ]
     },
     "DELTA SANDER": {
@@ -3417,13 +3466,6 @@
       "priority": 150
     },
     {
-      "primary_type": "WATERPUMP",
-      "power": "*",
-      "category_general": "WATERPUMPS",
-      "family": "WATERPUMP",
-      "priority": 150
-    },
-    {
       "primary_type": "ROBOTIC LAWN MOWER",
       "power": "*",
       "category_general": "ROBOTIC",
@@ -3676,13 +3718,6 @@
       "priority": 180
     },
     {
-      "primary_type": "CENTRIFUGAL PUMP",
-      "power": "*",
-      "category_general": "OTHERS",
-      "family": "CENTRIFUGAL PUMP",
-      "priority": 185
-    },
-    {
       "primary_type": "INVERTER WELDER",
       "power": "*",
       "category_general": "OTHERS",
@@ -3702,13 +3737,6 @@
       "category_general": "OTHERS",
       "family": "ELECTRIC MIXER",
       "priority": 180
-    },
-    {
-      "primary_type": "LIFT PUMP",
-      "power": "*",
-      "category_general": "OTHERS",
-      "family": "WATER BOOSTER PUMP",
-      "priority": 185
     },
     {
       "primary_type": "DELTA SANDER",
@@ -4139,7 +4167,10 @@
       "tesoura multiuso": "UTILITY SHEARS",
       "mitre saw": "MITER SAW",
       "compound mitre saw": "MITER SAW",
-      "sliding mitre saw": "MITER SAW"
+      "sliding mitre saw": "MITER SAW",
+      "centrifugal pump": "WATERPUMP",
+      "bomba centrífuga": "WATERPUMP",
+      "bomba centrifuga": "WATERPUMP"
     }
   },
   "CLASSIFICATION_POLICY": {
@@ -4290,9 +4321,9 @@
       ]
     }
   ],
-  "SCHEMA_VERSION": "2.6",
+  "SCHEMA_VERSION": "2.7",
   "QUALITY_GATES": {
-    "VERSION": "2026-09-10-quality-gates-unified-v1",
+    "VERSION": "2026-09-15-r9.5-hf2-taxonomy-evidence",
     "POLICY": {
       "fail_before_classification": true,
       "synthetic_cases": "STRICT_EXPECTATION",
@@ -5010,11 +5041,9 @@
         "title": "Bomba Nebraska NEBC075 550W 3/4HP - Ideal Riego O Lavado",
         "content": "Frecuencia 50Hz monofásica 220V altura máxima 23m succión 6m",
         "expect": {
-          "state": "RESOLVED_RULE",
+          "state": "AMBIGUOUS",
           "product_type": "WATERPUMP",
-          "power": "CORDED",
-          "category_general": "WATERPUMPS",
-          "family": "WATERPUMP"
+          "power": "CORDED"
         }
       },
       {
@@ -5068,7 +5097,7 @@
           "product_type": "LIFT PUMP",
           "power": "UNKNOWN",
           "category_general": "OTHERS",
-          "family": "WATER BOOSTER PUMP"
+          "family": "PRESSURE BOOSTER PUMP"
         }
       },
       {
@@ -5192,6 +5221,145 @@
           "forbidden_type_candidates": [
             "VACUUM CLEANER"
           ]
+        }
+      },
+      {
+        "id": "pump_peripheral_leo",
+        "brand": "LEO",
+        "model": "APM60",
+        "title": "LEO APm60 Peripheral Water Pump",
+        "content": "peripheral pump 0.8 HP",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "WATERPUMP",
+          "category_general": "OTHERS",
+          "family": "PERIPHERAL PUMP"
+        }
+      },
+      {
+        "id": "pump_submersible_shimge",
+        "brand": "SHIMGE",
+        "model": "WVSD110F",
+        "title": "Shimge WVSD110F Submersible Sewage Pump",
+        "content": "submersible sewage pump",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "WATERPUMP",
+          "category_general": "OTHERS",
+          "family": "SUBMERSIBLE PUMP"
+        }
+      },
+      {
+        "id": "pump_circulation_grundfos",
+        "brand": "GRUNDFOS",
+        "model": "96281376",
+        "title": "Grundfos UPS 25-40-130 Circulation Pump 96281376",
+        "content": "circulating pump",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "WATERPUMP",
+          "category_general": "OTHERS",
+          "family": "CIRCULATION PUMP"
+        }
+      },
+      {
+        "id": "pump_centrifugal_shimge",
+        "brand": "SHIMGE",
+        "model": "CPM190",
+        "title": "Shimge CPm190 Centrifugal Water Pump",
+        "content": "centrifugal pump",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "WATERPUMP",
+          "category_general": "OTHERS",
+          "family": "CENTRIFUGAL PUMP"
+        }
+      },
+      {
+        "id": "pump_pool_leo",
+        "brand": "LEO",
+        "model": "LSPA600",
+        "title": "LEO LSPA600 SPA Pool Pump",
+        "content": "spa pool pump",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "WATERPUMP",
+          "category_general": "OTHERS",
+          "family": "POOL PUMP"
+        }
+      },
+      {
+        "id": "pump_priming_leo",
+        "brand": "LEO",
+        "model": "AJM45",
+        "title": "LEO AJm45 Jet Self Priming Pump",
+        "content": "self priming pump",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "WATERPUMP",
+          "category_general": "OTHERS",
+          "family": "PRIMING PUMP"
+        }
+      },
+      {
+        "id": "pump_jet_leo",
+        "brand": "LEO",
+        "model": "AJM45S",
+        "title": "LEO AJm45S Stainless Steel Jet Pump",
+        "content": "jet pump",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "WATERPUMP",
+          "category_general": "OTHERS",
+          "family": "JET PUMP"
+        }
+      },
+      {
+        "id": "lift_pressure_booster_vasser",
+        "brand": "VASSER",
+        "model": "QC PRES 22",
+        "title": "Bomba Presurizadora Vasser QC PRES 22",
+        "content": "bomba presurizadora de agua",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "LIFT PUMP",
+          "category_general": "OTHERS",
+          "family": "PRESSURE BOOSTER PUMP"
+        }
+      },
+      {
+        "id": "lift_pressurization_shimge",
+        "brand": "SHIMGE",
+        "model": "CA600",
+        "title": "Shimge CA600 Intelligent Permanent Magnet Booster Pump",
+        "content": "smart booster pump",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "LIFT PUMP",
+          "category_general": "OTHERS",
+          "family": "PRESSURIZATION PUMP"
+        }
+      },
+      {
+        "id": "lift_generic_booster_must_review",
+        "brand": "TEST",
+        "model": "BP100",
+        "title": "TEST BP100 Booster Pump",
+        "content": "booster pump",
+        "expect": {
+          "state": "AMBIGUOUS",
+          "product_type": "LIFT PUMP"
+        }
+      },
+      {
+        "id": "waterpump_generic_must_review",
+        "brand": "TEST",
+        "model": "WP100",
+        "title": "TEST WP100 Water Pump",
+        "content": "generic water pump",
+        "expect": {
+          "state": "AMBIGUOUS",
+          "product_type": "WATERPUMP"
         }
       }
     ],
@@ -5910,5 +6078,433 @@
         }
       }
     ]
-  }
+  },
+  "TAXONOMY_EVIDENCE_RULES": [
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "SUBMERSIBLE PUMP",
+      "aliases": [
+        "submersible sewage pump",
+        "submersible groundwater pump",
+        "submersible water pump",
+        "submersible pump",
+        "sewage pump",
+        "waste water pump",
+        "wastewater pump",
+        "grinder pump",
+        "bomba submersível",
+        "bomba submersivel",
+        "bomba sumergible",
+        "bomba fecal"
+      ],
+      "negative_aliases": [
+        "compatible for",
+        "replacement for"
+      ],
+      "priority": 320
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CIRCULATION PUMP",
+      "aliases": [
+        "circulation pump",
+        "circulating pump",
+        "circulator pump",
+        "recirculation pump",
+        "bomba circuladora",
+        "bomba de circulação",
+        "bomba de circulacao",
+        "bomba de circulación",
+        "bomba de circulacion"
+      ],
+      "priority": 315
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "PERIPHERAL PUMP",
+      "aliases": [
+        "peripheral water pump",
+        "peripheral pump",
+        "bomba periférica",
+        "bomba periferica"
+      ],
+      "priority": 310
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "POOL PUMP",
+      "aliases": [
+        "swimming pool pump",
+        "pool pump",
+        "spa pool pump",
+        "spa pump",
+        "jacuzzi pump",
+        "bomba para piscina",
+        "bomba de piscina",
+        "bomba para jacuzzi"
+      ],
+      "priority": 305
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "PRIMING PUMP",
+      "aliases": [
+        "jet self priming pump",
+        "self priming pump",
+        "self-priming pump",
+        "self priming water pump",
+        "self-priming water pump",
+        "bomba autocebante"
+      ],
+      "priority": 300
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "JET PUMP",
+      "aliases": [
+        "stainless steel jet pump",
+        "jet water pump",
+        "jet pump"
+      ],
+      "negative_aliases": [
+        "self priming",
+        "self-priming"
+      ],
+      "priority": 295
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "aliases": [
+        "single stage inline centrifugal pump",
+        "single-stage inline centrifugal pump",
+        "end suction centrifugal pump",
+        "single impeller centrifugal pump",
+        "single-impeller centrifugal pump",
+        "centrifugal water pump",
+        "centrifugal pump",
+        "bomba centrífuga",
+        "bomba centrifuga"
+      ],
+      "priority": 290
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CIRCULATION PUMP",
+      "brand": "GRUNDFOS",
+      "aliases": [
+        "grundfos ups",
+        "grundfos up ",
+        "grundfos magna",
+        "alpha2",
+        "magna3"
+      ],
+      "priority": 360
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "PRESSURIZATION PUMP",
+      "brand": "GRUNDFOS",
+      "aliases": [
+        "scala1"
+      ],
+      "priority": 365
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "SUBMERSIBLE PUMP",
+      "brand": "GRUNDFOS",
+      "aliases": [
+        "grundfos sp ",
+        "sp submersible groundwater"
+      ],
+      "priority": 355
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "GRUNDFOS",
+      "aliases": [
+        "grundfos cm",
+        "grundfos cr ",
+        "grundfos crn",
+        "grundfos crne",
+        "grundfos tp ",
+        "grundfos tpd",
+        "grundfos nbg",
+        "cm 1-",
+        "cm 3-",
+        "cm 5-",
+        "cm 10-",
+        "tp 50-",
+        "tp 65-",
+        "tp 80-",
+        "tp 100-",
+        "tp 125-",
+        "nbg "
+      ],
+      "priority": 340
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "SUBMERSIBLE PUMP",
+      "brand": "LOWARA",
+      "aliases": [
+        "lowara domo",
+        "domo7",
+        "domo 7",
+        "domo15",
+        "domo 15",
+        "domo20",
+        "domo 20"
+      ],
+      "priority": 350
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "MULTISTAGE PUMP",
+      "brand": "LOWARA",
+      "aliases": [
+        "lowara 15hm",
+        "lowara 22hm",
+        "15hm ",
+        "22hm "
+      ],
+      "priority": 345
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "LOWARA",
+      "aliases": [
+        "lowara cea",
+        "lowara ceam",
+        "single-impeller pump",
+        "single impeller pump",
+        "end suction pump"
+      ],
+      "priority": 335
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "SHIMGE",
+      "aliases": [
+        "cpm170",
+        "cpm190",
+        "cpm200",
+        "centrifugal water pump"
+      ],
+      "priority": 350
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "PERIPHERAL PUMP",
+      "brand": "SHIMGE",
+      "aliases": [
+        "qb60",
+        "qb70",
+        "qb80",
+        "pw125",
+        "pw550",
+        "peripheral pump"
+      ],
+      "priority": 345
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "SUBMERSIBLE PUMP",
+      "brand": "SHIMGE",
+      "aliases": [
+        "wvsd",
+        "wqd",
+        "submersible sewage pump",
+        "sewage pump"
+      ],
+      "priority": 350
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "PRIMING PUMP",
+      "brand": "SHIMGE",
+      "aliases": [
+        "zp15",
+        "zp 15"
+      ],
+      "priority": 340
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "PERIPHERAL PUMP",
+      "brand": "PLUVIUS",
+      "aliases": [
+        "qb-60",
+        "qb 60",
+        "qb-70",
+        "qb 70",
+        "qb-80",
+        "qb 80"
+      ],
+      "priority": 345
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "PERIPHERAL PUMP",
+      "brand": "VASSER",
+      "aliases": [
+        "qb 60",
+        "qb-60"
+      ],
+      "priority": 345
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "INVERTER BOOSTER PUMP",
+      "aliases": [
+        "inverter booster pump",
+        "variable speed inverter booster pump"
+      ],
+      "priority": 340
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "PRESSURE BOOSTER PUMP",
+      "aliases": [
+        "pressure booster pump",
+        "water pressure booster pump",
+        "bomba pressurizadora",
+        "bomba presurizadora",
+        "bomba pressurizadora de água",
+        "bomba presurizadora de agua"
+      ],
+      "priority": 325
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "PRESSURIZATION PUMP",
+      "aliases": [
+        "intelligent permanent magnet booster pump",
+        "smart booster pump",
+        "smart water pump"
+      ],
+      "priority": 330
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "PRESSURIZATION PUMP",
+      "brand": "GRUNDFOS",
+      "aliases": [
+        "scala1"
+      ],
+      "priority": 365
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "PRESSURIZATION PUMP",
+      "brand": "SHIMGE",
+      "aliases": [
+        "ca1000",
+        "ca600",
+        "ca200",
+        "pa500"
+      ],
+      "priority": 360
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "PRESSURE BOOSTER PUMP",
+      "brand": "VASSER",
+      "aliases": [
+        "pre 1",
+        "pre 2",
+        "qc pres",
+        "qc te"
+      ],
+      "priority": 355
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "PRESSURE BOOSTER PUMP",
+      "brand": "PLUVIUS",
+      "aliases": [
+        "pres 260",
+        "pres 500",
+        "pres vvi"
+      ],
+      "priority": 355
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "PERIPHERAL PUMP",
+      "brand": "SHIMGE",
+      "aliases": [
+        "pw550z",
+        "pw550"
+      ],
+      "priority": 355
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "LEO",
+      "model_regex": "^MRC75$",
+      "aliases": [
+        "booster pump",
+        "intelligent booster pump"
+      ],
+      "priority": 370
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "BOOSTER PUMP",
+      "brand": "WILO",
+      "model_regex": "^PW[ /_-]*175EA$",
+      "aliases": [
+        "booster pump"
+      ],
+      "priority": 370
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "PRESSURE BOOSTER PUMP",
+      "brand": "WILO",
+      "model_regex": "^MHIKE[ _/-]*803A$",
+      "aliases": [
+        "booster pump",
+        "water pressure"
+      ],
+      "priority": 370
+    }
+  ]
 }
