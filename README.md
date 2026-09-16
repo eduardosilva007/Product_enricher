@@ -226,3 +226,22 @@ subtipo comprovado?
 O TYPE de negocio permanece `WATERPUMP` ou `LIFT PUMP`. Submersible, peripheral, circulation, centrifugal, pool, jet, priming e booster são tratados como refinamentos taxonomicos, nao como TYPE livre da LLM.
 
 A regra `WATERPUMPS | WATERPUMP` foi removida do caminho automatico. Revisao B.I=OK continua HARD LOCK.
+
+## HF3 — Recovery Ladder
+
+HF3 corrige o comportamento `cache existe -> mas nada útil chega ao classificador`. A recuperação agora segue esta ordem:
+
+```text
+curated evidence
+  -> target-anchored Search title (TITLE_ONLY_RESCUE)
+  -> deterministic TYPE aliases
+  -> taxonomy consensus when TYPE remains ambiguous
+  -> LLM only when candidate policy allows
+  -> selective recollection for residual evidence gaps
+```
+
+`TITLE_ONLY_RESCUE` nunca usa BODY RAW. Ele exige identidade `STRONG` ou `PROBABLE` no título/URL e bloqueia fontes explicitamente marcadas como wrong-model, compatibility-only ou related-only.
+
+A Base Final passa a expor `Título Referência` e `Próxima Ação`. `Título Real` continua sendo a evidência promovida; `Título Referência` é apoio auditável para o usuário quando a evidência não pode ser promovida.
+
+A opção 4 agora reporta também `Collection State`, `Raw Search Results` e `Curated Sources`, evitando interpretar `RAW_OK` como sinônimo de evidência pronta para classificação.

@@ -50,10 +50,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote
 
-PIPELINE_VERSION = "3.9.5-hf2"
+PIPELINE_VERSION = "3.9.5-hf3"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF2 Evidence-driven Taxonomy + Pump Safety Gate"
+BUILD_LABEL = "v3.9.5-HF3 Recovery Ladder + Title Rescue + Taxonomy Consensus"
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -2435,17 +2435,79 @@ class DeterministicEngine:
             flags.append("NEGATIVE_PAGE_TERM")
         return flags
 
-    def build_sources(self, brand: str, model: str, payload: Dict[str, Any]) -> List[Source]:
-        """Stage 1 consome somente evidencia aprovada pelo Collection Gate R9.5.
+    def _title_only_rescue_rows(self, brand: str, model: str, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Recupera somente TITULOS target-anchored do RAW Search.
 
-        Cache legado continua compativel: se _collection nao existir, usa results.
-        Se _collection existir e curated_results estiver vazio, nao faz fallback
-        silencioso para RAW contaminado.
+        HF3: quando Extract/Target Isolation nao conseguiu produzir curated_results,
+        ainda podemos aproveitar um titulo de Search com identidade STRONG/PROBABLE.
+        O BODY RAW nunca entra nesta recuperacao. Decisoes explicitamente erradas
+        (wrong model / compatibility / related) continuam bloqueadas.
+        """
+        identity_model = derive_search_model(brand, model, self.cfg)
+        collection = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
+        hard_rejects = {
+            "REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY",
+        }
+        audit_by_url: Dict[str, str] = {}
+        for row in (collection.get("source_audit", []) or []):
+            if not isinstance(row, dict):
+                continue
+            key = _url_key(row.get("url", ""))
+            if key:
+                audit_by_url[key] = safe(row.get("decision"))
+
+        rank = self.IDENTITY_RANK
+        rescued: List[Dict[str, Any]] = []
+        for res in (payload.get("results", []) or []):
+            if not isinstance(res, dict):
+                continue
+            title, url = safe(res.get("title")), safe(res.get("url"))
+            if not title:
+                continue
+            prior_decision = audit_by_url.get(_url_key(url), "")
+            if prior_decision in hard_rejects:
+                continue
+            meta = _source_identity_for_result(brand, identity_model, res, self.cfg)
+            if meta["level"] not in {"STRONG", "PROBABLE"}:
+                continue
+            row = dict(res)
+            row["content"] = ""  # nunca deixa snippet/body RAW virar evidencia de TYPE
+            row["raw_content"] = None
+            row["_collection_decision"] = "ACCEPT_TITLE_ONLY_RESCUE"
+            row["_collection_reason"] = "Titulo RAW target-anchored recuperado sem usar BODY contaminado"
+            flags = [safe(x) for x in (row.get("_collection_quality_flags", []) or []) if safe(x)]
+            row["_collection_quality_flags"] = list(dict.fromkeys(flags + ["TITLE_ONLY_RESCUE"]))
+            row["_collection_source_mode"] = "RAW_SEARCH_TITLE_ONLY"
+            row["_collection_identity"] = meta["level"]
+            rescued.append(row)
+
+        def _score(row: Dict[str, Any]) -> Tuple[int, float]:
+            level = safe(row.get("_collection_identity"))
+            try:
+                tv = float(row.get("score", 0) or 0)
+            except Exception:
+                tv = 0.0
+            return rank.get(level, 0), tv
+
+        rescued.sort(key=_score, reverse=True)
+        return rescued[: self.max_results]
+
+    def build_sources(self, brand: str, model: str, payload: Dict[str, Any]) -> List[Source]:
+        """Stage 1 consome evidencia curada + titulo RAW target-anchored de resgate.
+
+        HF3 nao volta a usar BODY RAW quando _collection existe. Porem, se Search
+        encontrou Marca+Modelo no TITLE/URL e a extracao falhou, o titulo pode
+        gerar candidatos determinísticos. Isso evita transformar falha de Extract
+        em 100% de classificacao manual.
         """
         out: List[Source] = []
         identity_model = derive_search_model(brand, model, self.cfg)
         if isinstance(payload.get("_collection"), dict):
-            source_rows = payload.get("_collection", {}).get("curated_results", []) or []
+            curated = [x for x in (payload.get("_collection", {}).get("curated_results", []) or []) if isinstance(x, dict)]
+            rescue = self._title_only_rescue_rows(brand, model, payload)
+            seen_urls = {_url_key(x.get("url", "")) for x in curated if _url_key(x.get("url", ""))}
+            source_rows = list(curated)
+            source_rows.extend(x for x in rescue if not _url_key(x.get("url", "")) or _url_key(x.get("url", "")) not in seen_urls)
         else:
             source_rows = payload.get("results", []) or []
         for i, res in enumerate([x for x in source_rows if isinstance(x, dict)][: self.max_results], 1):
@@ -4718,6 +4780,76 @@ def choose_title_for_type(sources: List[Source], typ: str, refs: Sequence[int] =
     return candidates[0].title, candidates[0].url
 
 
+def choose_reference_title(
+    raw: RawEvidence, brand: str, model: str, cfg: Dict[str, Any]
+) -> Tuple[str, str, str, str]:
+    """Melhor titulo de Search para apoio humano; nunca vira evidencia sozinho.
+
+    Retorna (title, url, identity, collection_decision). Titulo de referencia pode
+    ser WEAK e portanto serve apenas para diagnostico/manual. A classificacao
+    automatica usa somente curated_results ou TITLE_ONLY_RESCUE STRONG/PROBABLE.
+    """
+    payload = raw.payload or {}
+    results = [x for x in (payload.get("results", []) or []) if isinstance(x, dict)]
+    if not results:
+        return "", "", "", ""
+    search_model = derive_search_model(brand, model, cfg)
+    collection = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
+    audit_by_url: Dict[str, str] = {}
+    for row in (collection.get("source_audit", []) or []):
+        if isinstance(row, dict) and _url_key(row.get("url", "")):
+            audit_by_url[_url_key(row.get("url", ""))] = safe(row.get("decision"))
+    rank = DeterministicEngine.IDENTITY_RANK
+    scored = []
+    hard_rejects = {"REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY"}
+    for res in results:
+        title, url = safe(res.get("title")), safe(res.get("url"))
+        if not title:
+            continue
+        meta = _source_identity_for_result(brand, search_model, res, cfg)
+        decision = audit_by_url.get(_url_key(url), "")
+        try:
+            tv = float(res.get("score", 0) or 0)
+        except Exception:
+            tv = 0.0
+        scored.append((
+            0 if decision in hard_rejects else 1,
+            rank.get(meta["level"], 0),
+            tv, title, url, meta["level"], decision
+        ))
+    if not scored:
+        return "", "", "", ""
+    scored.sort(reverse=True)
+    best = scored[0]
+    return best[3], best[4], best[5], best[6]
+
+
+def taxonomy_consensus_for_review(
+    rules: Rules, s1: Stage1Result, brand: str, model: str
+) -> Tuple[str, str, str]:
+    """Preenche Category/FAMILY quando todos os TYPE candidatos convergem.
+
+    Nao resolve o TYPE e nao remove Review Required. Ex.: DRILL + SCREWDRIVER
+    podem permanecer ambíguos, mas ambos pertencem a OTHERS | POWER TOOLS.
+    """
+    candidates = list(dict.fromkeys(s1.type_candidates or []))
+    if not candidates:
+        return "", "", ""
+    power = s1.power or "UNKNOWN"
+    mapped: List[Tuple[str, str, str]] = []
+    for typ in candidates:
+        evidence = taxonomy_evidence_text(s1.sources, typ)
+        cg, fam, why = rules.map_taxonomy(typ, power, evidence, brand, model)
+        if (cg, fam) not in rules.valid_pairs or (cg, fam) == ("OTHERS", "OTHERS"):
+            return "", "", ""
+        mapped.append((cg, fam, why))
+    pairs = {(x[0], x[1]) for x in mapped}
+    if len(pairs) != 1:
+        return "", "", ""
+    cg, fam = next(iter(pairs))
+    return cg, fam, "TAXONOMY_CONSENSUS:" + ",".join(candidates)
+
+
 def repair_llm_evidence_refs(data: Dict[str, Any], rules: Rules, s1: Stage1Result) -> Tuple[Dict[str, Any], bool]:
     """Repara somente IDs de evidência quando TYPE já é elegível e suportado.
 
@@ -4845,6 +4977,7 @@ def finalize_product(
     raw: RawEvidence,
     s1: Stage1Result,
     rules: Rules,
+    cfg: Dict[str, Any],
     llm: Optional[OpenAICompatibleClassifier],
     db: ClassificationDB,
     run_id: str,
@@ -4852,10 +4985,39 @@ def finalize_product(
     key = business_key(brand, model)
     funnel = candidate_funnel(rules, s1) if s1.type_candidates else CandidateFunnelResult([], {}, "NO_STAGE1_CANDIDATE", blocked=True)
 
+    ref_title, ref_url, ref_identity, ref_decision = choose_reference_title(raw, brand, model, cfg)
+    collection = (raw.payload or {}).get("_collection") if isinstance((raw.payload or {}).get("_collection"), dict) else {}
+    collection_state = safe(collection.get("state"))
+    curated_count = len([x for x in (collection.get("curated_results", []) or []) if isinstance(x, dict)])
+    raw_result_count = len([x for x in ((raw.payload or {}).get("results", []) or []) if isinstance(x, dict)])
+    title_rescue_count = sum(1 for src in s1.sources if safe(src.collection_decision) == "ACCEPT_TITLE_ONLY_RESCUE")
+    consensus_cg, consensus_fam, consensus_reason = taxonomy_consensus_for_review(rules, s1, brand, model)
+    if s1.state == "RESOLVED_RULE":
+        next_action = "CONCLUIDO"
+    elif not s1.type_candidates and ref_identity in {"STRONG", "PROBABLE"}:
+        next_action = "JSON_GAP_OU_LLM_GAP"
+    elif not s1.type_candidates and raw_result_count:
+        next_action = "RECOLETAR_EVIDENCIA_TARGET"
+    elif not s1.type_candidates:
+        next_action = "NOVA_COLETA"
+    elif consensus_cg and consensus_fam:
+        next_action = "TYPE_REVIEW_FAMILY_JA_DEFINIDA"
+    else:
+        next_action = "LLM_COM_CANDIDATOS_OU_REVISAO"
+
     common = {
         "Marca": brand,
         "Modelo": model,
         "Raw State": raw.state,
+        "Collection State": collection_state,
+        "Raw Search Results": raw_result_count,
+        "Curated Sources": curated_count,
+        "Title Rescue Sources": title_rescue_count,
+        "Título Referência": ref_title,
+        "Fonte Referência URL": ref_url,
+        "Título Referência Identity": ref_identity,
+        "Título Referência Decision": ref_decision,
+        "Próxima Ação": next_action,
         "Stage1 Type Candidates": " | ".join(s1.type_candidates),
         "Stage1.5 Type Candidates": " | ".join(funnel.candidates),
         "Stage1 Type Scores": json.dumps(s1.type_scores, ensure_ascii=False, sort_keys=True),
@@ -4944,13 +5106,13 @@ def finalize_product(
             "Stage": "STAGE0" if preflight_reason == "LOW_TARGET_EVIDENCE" else "FUNNEL",
             "O que é (Tipo)": s1.product_type or "REVISAR",
             "Alimentação": s1.power or "UNKNOWN",
-            "Category General": "",
-            "FAMILY": "",
+            "Category General": consensus_cg,
+            "FAMILY": consensus_fam,
             "Título Real": title,
             "Fonte URL": url,
             "Review Required": "SIM",
             "Reason Code": preflight_reason,
-            "Motivo": reason_text,
+            "Motivo": (reason_text + (f" | {consensus_reason}" if consensus_reason else "")),
             "LLM Provider": "",
             "LLM Model": "",
             "LLM Cache": "",
@@ -4967,13 +5129,13 @@ def finalize_product(
             "Stage": "FUNNEL",
             "O que é (Tipo)": s1.product_type or "REVISAR",
             "Alimentação": s1.power or "UNKNOWN",
-            "Category General": "",
-            "FAMILY": "",
+            "Category General": consensus_cg,
+            "FAMILY": consensus_fam,
             "Título Real": title,
             "Fonte URL": url,
             "Review Required": "SIM",
             "Reason Code": f"STAGE15_{s1.state}",
-            "Motivo": " | ".join(s1.reasons),
+            "Motivo": " | ".join(s1.reasons + ([consensus_reason] if consensus_reason else [])),
             "LLM Provider": "",
             "LLM Model": "",
             "LLM Cache": "",
@@ -5034,13 +5196,13 @@ def finalize_product(
             "Stage": "LLM",
             "O que é (Tipo)": "REVISAR",
             "Alimentação": "UNKNOWN",
-            "Category General": "",
-            "FAMILY": "",
+            "Category General": consensus_cg,
+            "FAMILY": consensus_fam,
             "Título Real": title,
             "Fonte URL": url,
             "Review Required": "SIM",
             "Reason Code": why,
-            "Motivo": f"{safe(data.get('reason_short'))}{suggestion} | POST_GATE={why}".strip(" |"),
+            "Motivo": (f"{safe(data.get('reason_short'))}{suggestion} | POST_GATE={why}" + (f" | {consensus_reason}" if consensus_reason else "")).strip(" |"),
             "Evidence Source IDs": ",".join(map(str, rejected_refs)),
         }
 
@@ -5056,13 +5218,13 @@ def finalize_product(
             "Stage": "LLM",
             "O que é (Tipo)": typ,
             "Alimentação": safe(data.get("power")),
-            "Category General": "",
-            "FAMILY": "",
+            "Category General": consensus_cg,
+            "FAMILY": consensus_fam,
             "Título Real": title,
             "Fonte URL": url,
             "Review Required": "SIM",
             "Reason Code": f"{provider_upper}_{decision}",
-            "Motivo": safe(data.get("reason_short")),
+            "Motivo": (safe(data.get("reason_short")) + (f" | {consensus_reason}" if consensus_reason else "")),
             "Evidence Source IDs": ",".join(map(str, refs)),
         }
 
@@ -5101,6 +5263,8 @@ BASELINE_FINAL_COLUMNS = [
     "Category General",
     "FAMILY",
     "Título Real",
+    "Título Referência",
+    "Próxima Ação",
     "Status",
     "Revisão",
     "Revisão B.I",
@@ -5112,7 +5276,14 @@ BASELINE_MASTER_FIELDS = [
     "Category General",
     "FAMILY",
     "Título Real",
+    "Título Referência",
+    "Próxima Ação",
     "Fonte URL",
+    "Fonte Referência URL",
+    "Collection State",
+    "Raw Search Results",
+    "Curated Sources",
+    "Title Rescue Sources",
     "Status",
     "Status Processamento",
     "Revisão",
@@ -5416,7 +5587,14 @@ def _copy_business_values(
         "Category General": ["Category General"],
         "FAMILY": ["FAMILY", "Family"],
         "Título Real": ["Título Real"],
+        "Título Referência": ["Título Referência"],
+        "Próxima Ação": ["Próxima Ação"],
         "Fonte URL": ["Fonte URL"],
+        "Fonte Referência URL": ["Fonte Referência URL"],
+        "Collection State": ["Collection State"],
+        "Raw Search Results": ["Raw Search Results"],
+        "Curated Sources": ["Curated Sources"],
+        "Title Rescue Sources": ["Title Rescue Sources"],
         "Status": ["Status"],
         "Status Processamento": ["Status Processamento"],
         "Revisão": ["Revisão", "Revisao"],
@@ -6382,6 +6560,7 @@ def build_cache_recovery_plan(
     with_cache_path: Path,
     without_cache_path: Path,
     rules: Rules,
+    cfg: Dict[str, Any],
     max_items: int = 0,
 ) -> Tuple[List[Tuple[str, str, str]], Dict[str, int]]:
     """Seleciona pendências + AUTO_APROVADO de regra antiga, sem Tavily."""
@@ -6409,6 +6588,7 @@ def build_cache_recovery_plan(
     target_all: List[Tuple[str, str, str]] = []
     seen = set()
     locked = good = stale_auto = stale_unknown_meta = 0
+    collection_counts: Dict[str, int] = defaultdict(int)
 
     for _, row in df.iterrows():
         brand, model = safe(row.get(b)), safe(row.get(m))
@@ -6436,12 +6616,23 @@ def build_cache_recovery_plan(
 
         raw = store.get(brand, model)
         meta = master_meta.get(key, {})
+        coll = (raw.payload or {}).get("_collection") if isinstance((raw.payload or {}).get("_collection"), dict) else {}
+        coll_state = safe(coll.get("state")) or ("SEM_COLLECTION" if raw.state in {"RAW_OK", "RAW_OK_MERGED"} else "")
+        curated_count = len([x for x in (coll.get("curated_results", []) or []) if isinstance(x, dict)])
+        raw_count = len([x for x in ((raw.payload or {}).get("results", []) or []) if isinstance(x, dict)])
+        if coll_state:
+            collection_counts[coll_state] += 1
+        collection_counts["CACHE_CURATED_GT0" if curated_count else "CACHE_CURATED_ZERO"] += 1
+
         rec: Dict[str, Any] = {
             "Marca": brand,
             "Modelo": model,
             "Business Key": key,
             **{name: (row.get(col) if col else "") for name, col in fields.items()},
             "Estado Cache": raw.state,
+            "Collection State": coll_state,
+            "Raw Search Results": raw_count,
+            "Curated Sources": curated_count,
             "Motivo Cache": raw.reason,
             "Motivo Recuperação": recovery_reason,
             "Rules Version Anterior": safe(meta.get("rules_version")),
@@ -6450,11 +6641,14 @@ def build_cache_recovery_plan(
             "Rules Hash Atual": rules.hash,
         }
         if raw.state in {"RAW_OK", "RAW_OK_MERGED"}:
-            rec["Ação"] = (
-                "REPROCESSAR_REGRA_OBSOLETA"
-                if recovery_reason == "AUTO_APROVADO_REGRA_OBSOLETA"
-                else "REPROCESSAR_CACHE"
-            )
+            if recovery_reason == "AUTO_APROVADO_REGRA_OBSOLETA":
+                rec["Ação"] = "REPROCESSAR_REGRA_OBSOLETA"
+            elif curated_count:
+                rec["Ação"] = "REPROCESSAR_CACHE_CURADO"
+            elif raw_count:
+                rec["Ação"] = "TITLE_RESCUE_OU_RECOLETA"
+            else:
+                rec["Ação"] = "RECOLETA_NECESSARIA"
             with_cache.append(rec)
             target_all.append((brand, model, key))
         else:
@@ -6475,6 +6669,7 @@ def build_cache_recovery_plan(
         "pendentes_sem_cache": len(without_cache),
         "targets_desta_execucao": len(targets),
         "tavily_calls": 0,
+        **dict(collection_counts),
     }
     return targets, stats
 
@@ -6490,7 +6685,7 @@ def run_cache_recovery(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     store = TavilyReadOnlyStore(cache_path)
     try:
         targets, plan_stats = build_cache_recovery_plan(
-            final_path, master_path, store, with_path, without_path, rules, args.max_items
+            final_path, master_path, store, with_path, without_path, rules, cfg, args.max_items
         )
     finally:
         store.close()

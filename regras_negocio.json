@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-15-v3.0.7-r9.5-hf2-taxonomy-evidence",
+  "VERSION": "2026-09-15-v3.0.8-r9.5-hf3-recovery-ladder",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -902,7 +902,11 @@
         "electric drill",
         "furadeira",
         "furadeira/parafusadeira",
-        "taladro"
+        "taladro",
+        "taladro atornillador",
+        "taladro/atornillador",
+        "taladro atornillador inalambrico",
+        "taladro atornillador inalámbrico"
       ],
       "negative_aliases": [
         "drill press",
@@ -2671,7 +2675,11 @@
         "impact driver",
         "torque screwdriver bit",
         "screwdriver bit",
-        "screwdriver bits"
+        "screwdriver bits",
+        "taladro atornillador",
+        "taladro/atornillador",
+        "drill driver",
+        "drill/driver"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4323,7 +4331,7 @@
   ],
   "SCHEMA_VERSION": "2.7",
   "QUALITY_GATES": {
-    "VERSION": "2026-09-15-r9.5-hf2-taxonomy-evidence",
+    "VERSION": "2026-09-15-hf3-recovery-ladder",
     "POLICY": {
       "fail_before_classification": true,
       "synthetic_cases": "STRICT_EXPECTATION",
@@ -5361,6 +5369,23 @@
           "state": "AMBIGUOUS",
           "product_type": "WATERPUMP"
         }
+      },
+      {
+        "id": "pektra_spanish_drill_driver",
+        "brand": "PEKTRA",
+        "model": "PKCD1210CK",
+        "title": "Pektra PKCD1210CK Taladro Atornillador Inalambrico 12v",
+        "content": "Taladro atornillador inalambrico 12V PKCD1210CK",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "DRILL",
+          "power": "BATTERY",
+          "category_general": "OTHERS",
+          "family": "POWER TOOLS",
+          "forbidden_type_candidates": [
+            "SCREWDRIVER"
+          ]
+        }
       }
     ],
     "REAL_VALIDATED_CASES": [
@@ -6080,6 +6105,33 @@
     ]
   },
   "TAXONOMY_EVIDENCE_RULES": [
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "LOWARA",
+      "model_regex": "^1016L[CD]\\d+",
+      "aliases": [],
+      "priority": 390
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "WILO",
+      "model_regex": "^MEDANA\\s+CH1",
+      "aliases": [],
+      "priority": 390
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "PERIPHERAL PUMP",
+      "brand": "SHIMGE",
+      "model_regex": "^PW\\d+Z$",
+      "aliases": [],
+      "priority": 390
+    },
     {
       "primary_type": "WATERPUMP",
       "category_general": "OTHERS",

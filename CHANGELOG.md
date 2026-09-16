@@ -1,3 +1,15 @@
+# R9.5 HF3 — Recovery Ladder / Title Rescue / Taxonomy Consensus
+
+- Diferencia presença de cache de evidência realmente utilizável (`Collection State`, `Raw Search Results`, `Curated Sources`).
+- Adiciona `TITLE_ONLY_RESCUE`: títulos de Search STRONG/PROBABLE podem gerar candidatos quando o Extract/Target Isolation falha, sem reutilizar BODY RAW.
+- Bloqueia title rescue para `REJECT_WRONG_MODEL`, `REJECT_COMPATIBILITY_ONLY` e `REJECT_RELATED_ONLY`.
+- Adiciona `Título Referência` para apoio humano mesmo quando nenhuma fonte pode ser promovida a `Título Real`.
+- Adiciona `Próxima Ação` para distinguir `JSON_GAP_OU_LLM_GAP`, recoleta e revisão de TYPE.
+- Adiciona consenso taxonômico: TYPE pode continuar em revisão enquanto Category/FAMILY são preenchidos quando todos os candidatos convergem para o mesmo par.
+- Corrige `Taladro Atornillador` como drill-driver (`DRILL`) e impede `SCREWDRIVER` de roubar a frase composta.
+- Adiciona regras estreitas de séries já sustentadas pela amostra validada: LOWARA `1016LC/1016LD` e WILO `MEDANA CH1` -> `CENTRIFUGAL PUMP`; SHIMGE `PW*Z` -> `PERIPHERAL PUMP`.
+- Mantém LLM sem poder inventar Category/FAMILY e preserva `Revisão B.I=OK` como HARD LOCK absoluto.
+
 # R9.5 HF2 — 2026-09-15
 
 - Added `TAXONOMY_EVIDENCE_RULES` with executable Python support.
@@ -49,3 +61,4 @@ feat: add R9.5 collection quality gate and target isolation funnel
 - Adds source/query audit, Collection State and Tavily credit telemetry.
 - Adds cache-only R9.5 curation mode with zero Tavily credits.
 - Preserves Stage 1/Stage 1.5/LLM architecture and BI hard lock; HF1 only extends controlled rule coverage for proven title gaps.
+
