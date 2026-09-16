@@ -50,10 +50,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote
 
-PIPELINE_VERSION = "3.9.5-hf3"
+PIPELINE_VERSION = "3.9.5-hf3.1"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3 Recovery Ladder + Title Rescue + Taxonomy Consensus"
+BUILD_LABEL = "v3.9.5-HF3.1 Recovery Ladder + Title Rescue + Taxonomy Consensus + Runtime Fix"
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -7035,7 +7035,7 @@ def run_pipeline(
 
                 try:
                     rec = finalize_product(
-                        brand, model_, raw, s1, rules, llm, db, run_id
+                        brand, model_, raw, s1, rules, cfg, llm, db, run_id
                     )
                 except OperationalPause as exc:
                     db.event(run_id, key, exc.code, safe(exc))

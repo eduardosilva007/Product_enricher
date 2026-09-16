@@ -1,3 +1,22 @@
+# R9.5 HF3.1 — Runtime Hotfix Validation
+
+HF3.1 fixes a runtime integration defect introduced by HF3: `finalize_product()` requires `cfg` before the LLM argument, but `run_pipeline()` still called it with the previous signature.
+
+Validated after patch:
+
+- `python -m py_compile pipeline_produtos.py` -> OK
+- `test_recovery_hf3.py` -> OK
+- `test_collection_quality.py` -> OK
+- `test_taxonomy_hf2.py` -> OK
+- Synthetic quality gates -> 70/70
+- Identity quality gates -> 16/16
+- Explicit real regression cases -> 22/22
+
+Pipeline version: `3.9.5-hf3.1`
+Rules version unchanged: `2026-09-15-v3.0.8-r9.5-hf3-recovery-ladder`
+
+---
+
 # R9.5 HF3 — Validation Report
 
 ## Source sample reviewed

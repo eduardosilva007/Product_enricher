@@ -1,3 +1,11 @@
+# R9.5 HF3.1 — Runtime hotfix
+
+- Fixes the HF3 runtime call to `finalize_product()` by passing the required `cfg` argument.
+- Prevents `TypeError: finalize_product() missing 1 required positional argument: 'run_id'` during cache recovery/classification.
+- No collection, taxonomy, identity, hard-lock or LLM policy behavior was relaxed.
+- The failed HF3 run stops before the first product is finalized, so rerunning option 4 is safe after replacing the script.
+- Regression validation: py_compile OK, HF3 Recovery OK, Collection Quality OK, HF2 Taxonomy OK, 70/70 synthetic, 16/16 identity, 22/22 explicit real cases.
+
 # R9.5 HF3 — Recovery Ladder / Title Rescue / Taxonomy Consensus
 
 - Diferencia presença de cache de evidência realmente utilizável (`Collection State`, `Raw Search Results`, `Curated Sources`).
