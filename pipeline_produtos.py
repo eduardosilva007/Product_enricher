@@ -53,7 +53,7 @@ from urllib.parse import quote, unquote
 PIPELINE_VERSION = "3.9.5-hf3.1"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3.1 Recovery Ladder + Title Rescue + Taxonomy Consensus + Runtime Fix"
+BUILD_LABEL = "v3.9.5-HF3.1p2 Schema-forward Baseline Export Fix"
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -6182,6 +6182,22 @@ def _export_base_final(
 
     out["Status"] = work.apply(final_status, axis=1)
     out["Revisão"] = work.apply(lambda row: _derive_final_review(row, work), axis=1)
+
+    # HF3.1p2: schema-forward baseline export.
+    # Diagnostic columns introduced after older baseline files were created may
+    # legitimately be absent from ``work``. Copy them when available and
+    # create any remaining final-schema column as NA before the strict slice.
+    # This keeps old baselines forward-compatible and prevents KeyError when
+    # BASELINE_FINAL_COLUMNS evolves.
+    for col in ["Título Referência", "Próxima Ação"]:
+        src = find_col(work, [col], required=False)
+        out[col] = work[src] if src else pd.NA
+
+    for col in BASELINE_FINAL_COLUMNS:
+        if col not in out.columns:
+            src = find_col(work, [col], required=False)
+            out[col] = work[src] if src else pd.NA
+
     out = out[BASELINE_FINAL_COLUMNS].reset_index(drop=True)
 
     _assert_bi_lock_snapshot(out, bi_lock_snapshot or {}, "Base Final gerada")

@@ -70,3 +70,19 @@ feat: add R9.5 collection quality gate and target isolation funnel
 - Adds cache-only R9.5 curation mode with zero Tavily credits.
 - Preserves Stage 1/Stage 1.5/LLM architecture and BI hard lock; HF1 only extends controlled rule coverage for proven title gaps.
 
+## 3.9.5-hf3.1p1 - Baseline Export Fix
+
+- Fixes Base Final export after HF3 added `Título Referência` and `Próxima Ação`.
+- Ensures both columns are created before applying `BASELINE_FINAL_COLUMNS`, preventing the KeyError that blocked baseline persistence.
+- Changes terminal messaging to `CONCLUÍDO COM ALERTA DE BASELINE` when classification succeeds but baseline persistence fails.
+- Keeps `PIPELINE_VERSION=3.9.5-hf3.1` intentionally so checkpoints from the previous HF3.1 run remain reusable and LLM calls are not repeated unnecessarily.
+- No changes to rules, taxonomy, Tavily collection policy, title rescue, consensus logic, or BI hard locks.
+
+## 3.9.5-hf3.1p2 - Schema-forward Baseline Export Fix
+
+- Fixes the remaining `KeyError: ['Título Referência', 'Próxima Ação'] not in index` inside `_export_base_final()` when reconciling an older baseline created before HF3.
+- Copies `Título Referência` and `Próxima Ação` from the master when they exist and creates them as `NA` when they do not.
+- Adds a generic schema-forward guard: every column listed in `BASELINE_FINAL_COLUMNS` is guaranteed to exist before the final strict column selection.
+- Strengthens regression coverage with a legacy-baseline test that intentionally omits the two HF3 columns, reproducing the exact production failure.
+- Preserves `PIPELINE_VERSION=3.9.5-hf3.1` so existing classification/LLM checkpoints remain compatible.
+- No changes to taxonomy, Tavily collection, identity rules, LLM policy, Title Rescue, Taxonomy Consensus, or BI hard locks.

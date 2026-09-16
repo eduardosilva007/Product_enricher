@@ -112,3 +112,31 @@ HF3 therefore exposes `Próxima Ação`, including `JSON_GAP_OU_LLM_GAP`, so the
 
 Pipeline version: `3.9.5-hf3`
 Rules version: `2026-09-15-v3.0.8-r9.5-hf3-recovery-ladder`
+
+## HF3.1p1 Baseline Export Regression
+
+- `python -m py_compile pipeline_produtos.py`: PASS
+- `test_baseline_export_hf3_1p1.py`: PASS
+- `test_recovery_hf3.py`: PASS
+- `test_taxonomy_hf2.py`: PASS
+- Synthetic quality gate: 70/70
+- Identity quality gate: 16/16
+- Explicit real cases: 22/22
+- Checkpoint compatibility preserved by keeping pipeline version `3.9.5-hf3.1`.
+
+## HF3.1p2 Schema-forward Baseline Export Regression
+
+The previous p1 regression test was insufficient because it supplied `Título Referência` and `Próxima Ação` in the input dataframe. HF3.1p2 now reproduces the actual production scenario: a legacy baseline dataframe without those columns is exported through `_export_base_final()`.
+
+Validated:
+
+- `python -m py_compile pipeline_produtos.py`: PASS
+- `test_baseline_export_hf3_1p2.py`: PASS with legacy dataframe missing HF3 diagnostic columns
+- `test_baseline_export_hf3_1p2.py`: PASS with current dataframe preserving HF3 diagnostic values
+- `test_recovery_hf3.py`: PASS
+- `test_taxonomy_hf2.py`: PASS
+- `test_collection_quality.py`: PASS
+- Synthetic quality gate: 70/70
+- Identity quality gate: 16/16
+- Explicit real cases: 22/22
+- Checkpoint compatibility preserved with `PIPELINE_VERSION=3.9.5-hf3.1`.
