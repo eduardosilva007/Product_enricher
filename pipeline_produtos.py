@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf2
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p4
 
 Arquitetura:
-    Stage 0A - Tavily Search aberto + Target Identity Gate
-    Stage 0B - Target Isolation Funnel + Tavily Extract
-    Stage 0C - Collection Quality Gate (somente evidencia curada segue)
+    Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
+    Stage 0B - Source Sieve: Query Integrity + Target Identity + Source Purpose
+    Stage 0C - Evidence Enrichment: Tavily raw_content na mesma Search ou fetch local
+    Stage 0D - Target Isolation + Collection Quality Gate
     Stage 1 - Regras determinísticas do JSON
     Stage 1.5 - Candidate Funnel determinístico
     Stage 2 - NVIDIA (model failover) -> Groq somente para ambiguidade real
@@ -14,7 +15,7 @@ Arquitetura:
     Stage 4 - Taxonomia determinística do JSON
 
 Princípios:
-- Tavily RAW é a única fonte factual web.
+- Search RAW do provider selecionado descobre fontes; somente fontes aprovadas no Source Sieve podem ser aprofundadas.
 - regras_negocio.json é a fonte única semântica: regras + quality gates.
 - Stage 1 usa o comportamento comprovado do R5: aliases JSON formam candidatos; resolução automática exige evidência explícita/repetida.
 - O LLM recebe contexto relevante extraído do JSON por produto.
@@ -26,7 +27,8 @@ Princípios:
 - Base Final preserva 100% das chaves; Revisão B.I é exclusivamente humana.
 - Novos/reprocessados mantêm Revisão B.I vazia até o double check.
 - Erro operacional de API nunca vira REVIEW nem falta de cache.
-- CLASSIFY não consulta Tavily.
+- CLASSIFY não consulta nenhum provider de busca.
+- Enriquecimento local de URL aprovada não consome Search API e nunca autoriza nova Search.
 """
 from __future__ import annotations
 
@@ -37,7 +39,6 @@ import json
 import logging
 import os
 import re
-import random
 import sqlite3
 import sys
 import time
@@ -48,12 +49,15 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlencode, urlparse
 
 PIPELINE_VERSION = "3.9.5-hf3.1"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3.1p2 Schema-forward Baseline Export Fix"
+BUILD_LABEL = "v3.9.5-HF3.1p4 R9.6 Source Sieve + Evidence Enrichment"
+COLLECTION_ENGINE_VERSION = "2026-09-25-r9.6p4-source-sieve-enrichment"
+MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
+ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -1582,131 +1586,656 @@ def _make_curated_result(search_res: Dict[str, Any], isolation: Dict[str, Any], 
     }
 
 
-def _tavily_post_with_retry(url: str, body: Dict[str, Any], cfg: Dict[str, Any], limiter: RateLimiter) -> Dict[str, Any]:
+class CollectionCostPolicyError(RuntimeError):
+    """Violação de custo/arquitetura da coleta. Nunca deve ser convertida em retry."""
+
+
+@dataclass
+class CollectionRequestBudget:
+    provider: str
+    max_requests: int = MAX_COLLECTION_REQUESTS_PER_PRODUCT
+    used: int = 0
+
+    def reserve(self) -> None:
+        if self.used >= self.max_requests:
+            raise CollectionCostPolicyError(
+                f"HARD LIMIT: provider={self.provider} tentou exceder "
+                f"{self.max_requests} request por produto"
+            )
+        self.used += 1
+
+
+def _collection_runtime_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return cfg.get("collection", {}) or {}
+
+
+def _resolve_search_provider(args: Optional[argparse.Namespace], cfg: Dict[str, Any]) -> str:
+    provider = safe(getattr(args, "search_provider", "")) if args is not None else ""
+    if not provider:
+        provider = safe((_collection_runtime_cfg(cfg)).get("provider")) or "tavily"
+    provider = provider.casefold().strip()
+    if provider not in ALLOWED_SEARCH_PROVIDERS:
+        raise ValueError(
+            f"Search provider inválido: {provider}. Permitidos={sorted(ALLOWED_SEARCH_PROVIDERS)}"
+        )
+    return provider
+
+
+def _provider_cfg(cfg: Dict[str, Any], provider: str) -> Dict[str, Any]:
+    providers = (_collection_runtime_cfg(cfg).get("providers", {}) or {})
+    out = dict(providers.get(provider, {}) or {})
+    # Compatibilidade segura com config R9.5 antiga: somente parâmetros semânticos
+    # inofensivos são herdados. FALLBACK/RESCUE/EXTRACT nunca são lidos aqui.
+    if provider == "tavily" and not out:
+        legacy = cfg.get("tavily", {}) or {}
+        legacy_search = legacy.get("search", {}) or {}
+        out = {
+            "base_url": "https://api.tavily.com/search",
+            "api_key_env": "TAVILY_API_KEY",
+            "requests_per_minute": legacy.get("requests_per_minute", 30),
+            "timeout_seconds": legacy.get("timeout_seconds", 60),
+            "max_results": legacy_search.get("max_results", 10),
+            "chunks_per_source": legacy_search.get("chunks_per_source", 2),
+            "search_depth": "basic",
+        }
+    return out
+
+
+def validate_collection_cost_policy(cfg: Dict[str, Any]) -> List[str]:
+    """Fail-closed: a coleta só inicia se a política 1 produto = 1 request estiver íntegra."""
+    errors: List[str] = []
+    ccfg = _collection_runtime_cfg(cfg)
+    hard = ccfg.get("hard_limits", {}) or {}
+    max_req = int(hard.get("max_requests_per_product", MAX_COLLECTION_REQUESTS_PER_PRODUCT) or 0)
+    if max_req != MAX_COLLECTION_REQUESTS_PER_PRODUCT:
+        errors.append(
+            f"COLLECTION_COST_POLICY: max_requests_per_product deve ser exatamente "
+            f"{MAX_COLLECTION_REQUESTS_PER_PRODUCT}; recebido={max_req}"
+        )
+    for key in ("allow_automatic_retry", "allow_secondary_search", "allow_provider_failover", "allow_extract"):
+        if bool(hard.get(key, False)):
+            errors.append(f"COLLECTION_COST_POLICY: {key} deve ser false")
+
+    tav = _provider_cfg(cfg, "tavily")
+    if tav:
+        depth = safe(tav.get("search_depth", "basic")).casefold() or "basic"
+        if depth != "basic":
+            errors.append(f"TAVILY_COST_POLICY: search_depth deve ser basic; recebido={depth}")
+        max_results = int(tav.get("max_results", 10) or 10)
+        if max_results < 1 or max_results > 20:
+            errors.append("TAVILY_CONFIG: max_results deve ficar entre 1 e 20")
+        raw_mode = safe(tav.get("include_raw_content", "text")).casefold() or "text"
+        if raw_mode not in {"text", "true"}:
+            errors.append("TAVILY_CONFIG: include_raw_content deve ser text/true para one-step evidence")
+
+    bright = _provider_cfg(cfg, "brightdata")
+    if bright:
+        fmt = safe(bright.get("data_format", "parsed_light")).casefold() or "parsed_light"
+        if fmt != "parsed_light":
+            errors.append(f"BRIGHTDATA_CONFIG: somente parsed_light permitido; recebido={fmt}")
+    return errors
+
+
+def _provider_credentials(provider: str, cfg: Dict[str, Any]) -> Dict[str, str]:
+    pcfg = _provider_cfg(cfg, provider)
+    if provider == "tavily":
+        key_env = safe(pcfg.get("api_key_env")) or "TAVILY_API_KEY"
+        api_key = os.getenv(key_env, "").strip()
+        if not api_key:
+            raise RuntimeError(f"{key_env} não configurada no .env")
+        return {"api_key": api_key, "key_env": key_env}
+    if provider == "serper":
+        key_env = safe(pcfg.get("api_key_env")) or "SERPER_API_KEY"
+        api_key = os.getenv(key_env, "").strip()
+        if not api_key:
+            raise RuntimeError(f"{key_env} não configurada no .env")
+        return {"api_key": api_key, "key_env": key_env}
+    if provider == "brightdata":
+        key_env = safe(pcfg.get("api_key_env")) or "BRIGHTDATA_API_KEY"
+        zone_env = safe(pcfg.get("zone_env")) or "BRIGHTDATA_ZONE"
+        api_key = os.getenv(key_env, "").strip()
+        zone = os.getenv(zone_env, "").strip() or safe(pcfg.get("zone"))
+        if not api_key:
+            raise RuntimeError(f"{key_env} não configurada no .env")
+        if not zone:
+            raise RuntimeError(f"{zone_env} não configurada no .env/config")
+        return {"api_key": api_key, "zone": zone, "key_env": key_env, "zone_env": zone_env}
+    raise ValueError(provider)
+
+
+def _provider_post_once(
+    provider: str,
+    url: str,
+    headers: Dict[str, str],
+    body: Dict[str, Any],
+    timeout: float,
+    limiter: RateLimiter,
+    budget: CollectionRequestBudget,
+) -> Dict[str, Any]:
+    """EXATAMENTE UM HTTP POST. Sem retry, redirect, fallback ou failover."""
     import requests
-    api_key = os.getenv("TAVILY_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("TAVILY_API_KEY não configurada no .env")
-    tc = cfg.get("tavily", {}) or {}
-    retries = max(1, int(tc.get("retries", 4)))
-    backoffs = tc.get("retry_backoff_seconds", [2, 5, 10, 20]) or [2, 5, 10, 20]
-    timeout = float(tc.get("timeout_seconds", 60))
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    last: Optional[Exception] = None
-    for attempt in range(retries):
-        limiter.wait()
+
+    budget.reserve()
+    limiter.wait()
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            json=body,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        # Não repetir automaticamente: em timeout/conexão incerta o provider pode
+        # ter recebido a request. O próximo passo deve ser decisão humana explícita.
+        raise RuntimeError(
+            f"{provider.upper()} REQUEST_OUTCOME_UNKNOWN: {type(exc).__name__}: {safe(exc)}"
+        ) from exc
+
+    status = int(response.status_code)
+    if 200 <= status < 300:
         try:
-            response = requests.post(url, headers=headers, json=body, timeout=timeout)
-            status = int(response.status_code)
-            if status == 200:
-                payload = response.json()
-                if not isinstance(payload, dict):
-                    raise RuntimeError("Tavily retornou JSON inválido")
-                return payload
-            if status in {401, 403}:
-                raise OperationalPause("TAVILY_AUTH", f"Tavily HTTP {status}: autenticação/permissão")
-            if status in {432, 433}:
-                raise OperationalPause("TAVILY_PLAN_LIMIT", f"Tavily HTTP {status}: limite de plano/uso atingido")
-            if status == 429 or 500 <= status <= 599:
-                last = RuntimeError(f"Tavily HTTP {status}: {response.text[:500]}")
-            else:
-                raise RuntimeError(f"Tavily HTTP {status}: {response.text[:800]}")
-        except OperationalPause:
-            raise
+            payload = response.json()
         except Exception as exc:
-            last = exc
-        if attempt + 1 < retries:
-            base_wait = float(backoffs[min(attempt, len(backoffs) - 1)])
-            wait = base_wait + random.uniform(0, min(1.5, base_wait * 0.2))
-            LOG.warning("Tavily retry %d/%d | endpoint=%s | em %.1fs | %s", attempt + 1, retries, url.rsplit('/', 1)[-1], wait, last)
-            time.sleep(wait)
-    if "429" in safe(last):
-        raise OperationalPause("TAVILY_RATE_LIMIT", f"Rate limit Tavily persistiu após retries: {last}")
-    raise RuntimeError(f"Tavily falhou após {retries} tentativas: {last}")
+            raise RuntimeError(f"{provider.upper()} retornou JSON inválido") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"{provider.upper()} retornou payload não-objeto")
+        return payload
+
+    msg = safe(response.text)[:1200]
+    if status in {401, 403}:
+        raise OperationalPause(f"{provider.upper()}_AUTH", f"{provider.upper()} HTTP {status}: autenticação/permissão")
+    if status in {429, 432, 433}:
+        raise OperationalPause(f"{provider.upper()}_LIMIT", f"{provider.upper()} HTTP {status}: limite/rate/quota")
+    if 300 <= status < 400:
+        raise RuntimeError(f"{provider.upper()} redirect bloqueado pela política de 1 request: HTTP {status}")
+    raise RuntimeError(f"{provider.upper()} HTTP {status}: {msg}")
 
 
-def _tavily_extract(urls: Sequence[str], query: str, depth: str, cfg: Dict[str, Any], limiter: RateLimiter) -> Dict[str, Any]:
-    tc = cfg.get("tavily", {}) or {}
-    ecfg = tc.get("extract", {}) or {}
-    body = {
-        "urls": list(urls),
-        "query": query,
-        "chunks_per_source": max(1, min(5, int(ecfg.get("chunks_per_source", 3) or 3))),
-        "extract_depth": depth,
-        "include_images": False,
-        "include_favicon": False,
-        "format": safe(ecfg.get("format", "markdown")) or "markdown",
-        "timeout": max(1, min(60, float(ecfg.get("timeout_seconds", 30) or 30))),
-        "include_usage": True,
+def _rank_score(position: Any) -> float:
+    try:
+        pos = max(1, int(position or 1))
+        return round(1.0 / pos, 6)
+    except Exception:
+        return 0.0
+
+
+def _normalize_tavily_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Normaliza a Search da Tavily preservando raw_content apenas em memória.
+
+    O raw_content vem da MESMA Search request. Ele só será usado depois do
+    Source Sieve; nunca prova identidade por si só.
+    """
+    out: List[Dict[str, Any]] = []
+    for idx, row in enumerate(payload.get("results", []) or [], 1):
+        if not isinstance(row, dict):
+            continue
+        out.append({
+            "title": safe(row.get("title")),
+            "url": safe(row.get("url")),
+            "content": safe(row.get("content")),
+            "score": row.get("score", _rank_score(idx)),
+            "raw_content": safe(row.get("raw_content")),
+            "_provider_position": idx,
+            "_provider_meta": {"tavily_id": safe(row.get("id"))},
+        })
+    return out
+
+
+def _normalize_serper_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Adapter inspirado no padrão Haystack/Qwen: organic -> documento normalizado."""
+    rows = payload.get("organic", []) or []
+    if not isinstance(rows, list):
+        raise RuntimeError("SERPER_SCHEMA_INVALID: organic deve ser lista")
+    out: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            continue
+        pos = row.get("position", idx)
+        out.append({
+            "title": safe(row.get("title")),
+            "url": safe(row.get("link") or row.get("url")),
+            "content": safe(row.get("snippet") or row.get("description")),
+            "score": _rank_score(pos),
+            "raw_content": "",
+            "_provider_position": pos,
+            "_provider_meta": {},
+        })
+    return out
+
+
+def _normalize_brightdata_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Bright Data: SOMENTE Google Light JSON / parsed_light.
+
+    Não existe fallback para Full JSON, Bing, Markdown, HTML ou outro schema.
+    A documentação do Light JSON garante organic[] em respostas válidas.
+    """
+    rows = payload.get("organic")
+    if not isinstance(rows, list):
+        raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: organic[] ausente")
+    out: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            continue
+        pos = row.get("global_rank", idx)
+        extensions = row.get("extensions", []) if isinstance(row.get("extensions"), list) else []
+        out.append({
+            "title": safe(row.get("title")),
+            "url": safe(row.get("link")),
+            "content": safe(row.get("description")),
+            "score": _rank_score(pos),
+            "raw_content": "",
+            "_provider_position": pos,
+            "_provider_meta": {"extensions": extensions},
+        })
+    return out
+
+
+def _brightdata_query_meta(payload: Dict[str, Any], submitted_query: str) -> Dict[str, Any]:
+    general = payload.get("general", {}) if isinstance(payload.get("general"), dict) else {}
+    spelling = payload.get("spelling", {}) if isinstance(payload.get("spelling"), dict) else {}
+    return {
+        "submitted_query": submitted_query,
+        "effective_query": safe(general.get("query")) or submitted_query,
+        "detected_query": safe(general.get("detected_query")),
+        "spelling_present": bool(spelling),
+        "spelling": spelling,
     }
-    return _tavily_post_with_retry("https://api.tavily.com/extract", body, cfg, limiter)
 
 
-def _curate_search_results(
+def _query_identity_gate(
+    provider: str,
     brand: str,
     search_model: str,
-    search_results: Sequence[Dict[str, Any]],
-    extract_payload: Optional[Dict[str, Any]],
-    extract_depth: str,
+    query_meta: Dict[str, Any],
     cfg: Dict[str, Any],
-    source_mode: str,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+) -> Tuple[bool, str, List[str]]:
+    """Valida se o buscador alterou a intenção Marca+Modelo antes do Source Sieve."""
+    flags: List[str] = []
+    if provider != "brightdata":
+        return True, "QUERY_INTEGRITY_NOT_APPLICABLE", flags
+
+    detected = safe(query_meta.get("detected_query"))
+    effective = safe(query_meta.get("effective_query")) or safe(query_meta.get("submitted_query"))
+    if not detected or norm_text(detected) == norm_text(effective):
+        return True, "QUERY_INTEGRITY_OK", flags
+
+    flags.append("SEARCH_ENGINE_QUERY_CHANGED")
+    suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
+    match, _ = _model_match_in_field(search_model, detected, suffixes)
+    brand_c = compact(brand)
+    brand_ok = bool(brand_c and brand_c in compact(detected))
+    target_retained = bool(match and brand_ok)
+
+    if bool(query_meta.get("spelling_present")) and target_retained:
+        flags.append("QUERY_SPELLING_CORRECTED_TARGET_RETAINED")
+        return True, "QUERY_SPELLING_CORRECTED_SAFE", flags
+
+    flags.append("QUERY_IDENTITY_DRIFT")
+    return False, "QUERY_IDENTITY_DRIFT", flags
+
+
+def _source_sieve(
+    brand: str,
+    search_model: str,
+    rows: Sequence[Dict[str, Any]],
+    cfg: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Peneira ANTES de qualquer aprofundamento.
+
+    Só STRONG/PROBABLE sem sinais de compatibilidade/related seguem para
+    raw_content/local fetch. Score/rank nunca substitui identidade.
+    """
     policy = _collection_policy(cfg)
-    extracted_by_url = {
-        _url_key(x.get("url", "")): x
-        for x in ((extract_payload or {}).get("results", []) or [])
-        if isinstance(x, dict)
-    }
-    failed_urls = {
-        _url_key(x.get("url", ""))
-        for x in ((extract_payload or {}).get("failed_results", []) or [])
-        if isinstance(x, dict)
-    }
-    curated: List[Dict[str, Any]] = []
-    audit: List[Dict[str, Any]] = []
-    advanced_retry_urls: List[str] = []
-    for res in search_results:
-        if not isinstance(res, dict):
+    compatibility = policy.get("compatibility_terms", []) or []
+    related = policy.get("related_section_terms", []) or []
+    generic = policy.get("generic_page_terms", []) or []
+    accepted: List[Dict[str, Any]] = []
+    audits: List[Dict[str, Any]] = []
+
+    for row in rows:
+        if not isinstance(row, dict):
             continue
-        url = safe(res.get("url"))
-        key = _url_key(url)
-        identity_before = _source_identity_for_result(brand, search_model, res, cfg)
-        ext = extracted_by_url.get(key)
-        extracted_text = safe((ext or {}).get("raw_content"))
-        if not extracted_text and key in failed_urls:
-            source_mode_local = "SEARCH_CHUNK_AFTER_EXTRACT_FAIL"
-        else:
-            source_mode_local = source_mode
+        identity = _source_identity_for_result(brand, search_model, row, cfg)
+        title = safe(row.get("title"))
+        snippet = safe(row.get("content"))
+        url = safe(row.get("url"))
+        search_text = f"{title}\n{snippet}".strip()
+        flags: List[str] = []
+
+        decision = "ACCEPT_SOURCE_SIEVE"
+        reason = "Identidade target STRONG/PROBABLE e sem propósito negativo detectado"
+        if identity["level"] not in {"STRONG", "PROBABLE"}:
+            decision = "REJECT_WEAK_IDENTITY"
+            reason = f"Identity={identity['level']} abaixo de PROBABLE"
+        elif _target_context_has_only_relation(search_text, search_model, cfg, compatibility, window=180):
+            decision = "REJECT_COMPATIBILITY_ONLY"
+            reason = "Marca/Modelo aparecem em contexto de compatibilidade/substituição"
+            flags.append("COMPATIBILITY_ONLY")
+        elif _target_context_has_only_relation(search_text, search_model, cfg, related, window=180):
+            decision = "REJECT_RELATED_ONLY"
+            reason = "Marca/Modelo aparecem em contexto de related/similar products"
+            flags.append("RELATED_ONLY")
+
+        if _term_present(f"{title}\n{url}\n{snippet}", generic):
+            flags.append("GENERIC_PAGE_SIGNAL")
+
+        audit = {
+            "url": url,
+            "title": title,
+            "tavily_score": row.get("score"),
+            "identity_before": identity["level"],
+            "model_match_field_before": identity["model_match_field"],
+            "sieve_decision": decision,
+            "sieve_reason": reason,
+            "decision": decision,
+            "reason": reason,
+            "quality_flags": flags,
+            "other_skus": [],
+            "isolated_chars": 0,
+            "extract_depth": "SOURCE_SIEVE",
+            "source_mode": "SEARCH_SNIPPET",
+            "identity_after": identity["level"] if decision.startswith("ACCEPT_") else "WEAK",
+            "enrichment_attempted": False,
+            "enrichment_mode": "NONE",
+            "enrichment_reason": "",
+        }
+        audits.append(audit)
+        if decision.startswith("ACCEPT_"):
+            row2 = dict(row)
+            row2["_collection_identity"] = identity["level"]
+            row2["_sieve_audit_index"] = len(audits) - 1
+            accepted.append(row2)
+
+    rank = {"STRONG": 4, "PROBABLE": 3, "CONTEXTUAL": 2, "WEAK": 1}
+    accepted.sort(key=lambda r: (
+        -rank.get(safe(r.get("_collection_identity")), 0),
+        -float(r.get("score", 0) or 0),
+        _url_key(r.get("url", "")),
+    ))
+    return accepted, audits
+
+
+class _SimpleHTMLTextExtractor:
+    """Fallback stdlib quando Trafilatura não estiver instalada."""
+    def __init__(self) -> None:
+        from html.parser import HTMLParser
+
+        class Parser(HTMLParser):
+            def __init__(self):
+                super().__init__(convert_charrefs=True)
+                self.parts: List[str] = []
+                self.skip = 0
+            def handle_starttag(self, tag, attrs):
+                if tag.casefold() in {"script", "style", "noscript", "svg"}:
+                    self.skip += 1
+            def handle_endtag(self, tag):
+                if tag.casefold() in {"script", "style", "noscript", "svg"} and self.skip:
+                    self.skip -= 1
+            def handle_data(self, data):
+                if not self.skip:
+                    text = safe(data)
+                    if text:
+                        self.parts.append(text)
+        self._parser_cls = Parser
+
+    def extract(self, html_text: str) -> str:
+        parser = self._parser_cls()
+        parser.feed(html_text)
+        return re.sub(r"\s+", " ", " ".join(parser.parts)).strip()
+
+
+def _extract_html_locally(html_text: str, url: str) -> Tuple[str, str]:
+    """Extrai texto localmente. Trafilatura é preferida; stdlib é fallback."""
+    try:
+        from trafilatura import extract as trafilatura_extract  # type: ignore
+        text = trafilatura_extract(
+            html_text,
+            url=url,
+            output_format="txt",
+            include_comments=False,
+            include_tables=True,
+            favor_precision=True,
+        )
+        if safe(text):
+            return safe(text), "LOCAL_TRAFILATURA"
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    text = _SimpleHTMLTextExtractor().extract(html_text)
+    return text, "LOCAL_HTML_FALLBACK"
+
+
+def _local_fetch_text(url: str, cfg: Dict[str, Any]) -> Tuple[str, str, str]:
+    """Uma tentativa local, sem Search API, sem retry e sem browser pesado."""
+    import requests
+
+    ecfg = (_collection_runtime_cfg(cfg).get("local_enrichment", {}) or {})
+    parsed = urlparse(safe(url))
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return "", "LOCAL_FETCH_SKIPPED", "URL não HTTP(S)"
+
+    timeout = float(ecfg.get("timeout_seconds", 12) or 12)
+    max_bytes = max(100_000, int(ecfg.get("max_bytes", 1_500_000) or 1_500_000))
+    headers = {
+        "User-Agent": safe(ecfg.get("user_agent")) or "Mozilla/5.0 ProductEnricher/1.0",
+        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+    except requests.RequestException as exc:
+        return "", "LOCAL_FETCH_FAILED", f"{type(exc).__name__}: {safe(exc)}"
+    if not (200 <= int(response.status_code) < 300):
+        return "", "LOCAL_FETCH_FAILED", f"HTTP {response.status_code}"
+
+    ctype = safe(response.headers.get("Content-Type", "")).casefold()
+    if ctype and not any(x in ctype for x in ["text/html", "application/xhtml", "text/plain"]):
+        return "", "LOCAL_FETCH_UNSUPPORTED", f"Content-Type={ctype}"
+
+    raw = response.content[:max_bytes]
+    encoding = response.encoding or "utf-8"
+    try:
+        html_text = raw.decode(encoding, errors="replace")
+    except Exception:
+        html_text = raw.decode("utf-8", errors="replace")
+    text, mode = _extract_html_locally(html_text, url)
+    if not text:
+        return "", mode, "Extração local não retornou texto"
+    return text, mode, "OK"
+
+
+def _cap_evidence_text(text: str, model: str, cfg: Dict[str, Any]) -> str:
+    ecfg = (_collection_runtime_cfg(cfg).get("local_enrichment", {}) or {})
+    limit = max(2000, int(ecfg.get("max_text_chars", 30000) or 30000))
+    text = safe(text)
+    if len(text) <= limit:
+        return text
+    spans = _target_spans(text, model, cfg)
+    if spans:
+        a, b = spans[0]
+        half = max(1000, limit // 2)
+        left = max(0, a - half)
+        right = min(len(text), left + limit)
+        left = max(0, right - limit)
+        return text[left:right]
+    return text[:limit]
+
+
+def _curate_after_source_sieve(
+    brand: str,
+    search_model: str,
+    provider: str,
+    search_results: Sequence[Dict[str, Any]],
+    cfg: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Source Sieve -> Evidence Enrichment -> Target Isolation.
+
+    Tavily usa raw_content retornado NA MESMA Search. Serper/Bright Data podem
+    aprofundar apenas URLs já aprovadas usando fetch local gratuito.
+    """
+    policy = _collection_policy(cfg)
+    accepted, audits = _source_sieve(brand, search_model, search_results, cfg)
+    ecfg = (_collection_runtime_cfg(cfg).get("local_enrichment", {}) or {})
+    local_enabled = bool(ecfg.get("enabled", True))
+    max_local = max(0, int(ecfg.get("max_urls_per_product", 2) or 2))
+    min_snippet = max(0, int(ecfg.get("snippet_sufficient_chars", 220) or 220))
+    local_used = 0
+    curated: List[Dict[str, Any]] = []
+
+    for res in accepted:
+        audit_idx = int(res.pop("_sieve_audit_index"))
+        audit = audits[audit_idx]
+        snippet = safe(res.get("content"))
+        raw_content = safe(res.get("raw_content"))
+        evidence_text = ""
+        evidence_mode = "SEARCH_SNIPPET"
+        enrichment_reason = "Snippet usado como evidência"
+
+        if provider == "tavily" and raw_content:
+            evidence_text = raw_content
+            evidence_mode = "TAVILY_SEARCH_RAW_CONTENT"
+            enrichment_reason = "raw_content veio na mesma Search request"
+            audit["enrichment_attempted"] = True
+            audit["enrichment_mode"] = evidence_mode
+            audit["enrichment_reason"] = enrichment_reason
+        elif local_enabled and local_used < max_local and len(snippet) < min_snippet:
+            audit["enrichment_attempted"] = True
+            local_used += 1
+            fetched, mode, reason = _local_fetch_text(safe(res.get("url")), cfg)
+            audit["enrichment_mode"] = mode
+            audit["enrichment_reason"] = reason
+            if fetched:
+                evidence_text = fetched
+                evidence_mode = mode
+                enrichment_reason = reason
+        if not evidence_text:
+            evidence_text = snippet
+
+        evidence_text = _cap_evidence_text(evidence_text, search_model, cfg)
         isolation = _isolate_target_block(
-            brand, search_model, safe(res.get("title")), url,
-            extracted_text, safe(res.get("content")), cfg, policy,
+            brand, search_model, safe(res.get("title")), safe(res.get("url")),
+            evidence_text if evidence_mode != "SEARCH_SNIPPET" else "",
+            snippet,
+            cfg, policy,
         )
         decision = safe(isolation.get("decision"))
+        audit["decision"] = decision
+        audit["reason"] = safe(isolation.get("reason"))
+        audit["quality_flags"] = list(dict.fromkeys(
+            list(audit.get("quality_flags", []) or []) + list(isolation.get("flags", []) or [])
+        ))
+        audit["other_skus"] = list(isolation.get("other_skus", []) or [])
+        audit["isolated_chars"] = len(safe(isolation.get("content")))
+        audit["extract_depth"] = evidence_mode
+        audit["source_mode"] = evidence_mode
+        audit["enrichment_mode"] = audit.get("enrichment_mode") or evidence_mode
+        audit["enrichment_reason"] = audit.get("enrichment_reason") or enrichment_reason
+
         if decision.startswith("ACCEPT_"):
-            row = _make_curated_result(res, isolation, extract_depth, source_mode_local)
-            identity_after = _source_identity_for_result(brand, search_model, row, cfg)
-            row["_collection_identity"] = identity_after["level"]
+            row = _make_curated_result(res, isolation, evidence_mode, evidence_mode)
+            row["_collection_identity"] = safe(res.get("_collection_identity"))
+            row["raw_content"] = None
             curated.append(row)
-        else:
-            identity_after = {"level": "WEAK", "score": 0, "model_match_field": "NONE"}
-            if decision in {"REJECT_NON_ISOLATABLE", "REJECT_GENERIC_NO_TARGET_BLOCK"}:
-                advanced_retry_urls.append(url)
-        audit.append({
-            "url": url,
-            "title": safe(res.get("title")),
-            "tavily_score": res.get("score"),
-            "identity_before": identity_before["level"],
-            "model_match_field_before": identity_before["model_match_field"],
-            "decision": decision,
-            "reason": safe(isolation.get("reason")),
-            "quality_flags": list(isolation.get("flags", []) or []),
-            "other_skus": list(isolation.get("other_skus", []) or []),
-            "isolated_chars": len(safe(isolation.get("content"))),
-            "extract_depth": extract_depth,
-            "source_mode": source_mode_local,
-            "identity_after": identity_after.get("level", "WEAK"),
-        })
-    return curated, audit, [x for x in advanced_retry_urls if x]
+
+    return _dedupe_curated(curated), audits
+
+
+def _provider_request_once(
+    provider: str,
+    query: str,
+    cfg: Dict[str, Any],
+    limiter: RateLimiter,
+    budget: CollectionRequestBudget,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    pcfg = _provider_cfg(cfg, provider)
+    creds = _provider_credentials(provider, cfg)
+    timeout = float(pcfg.get("timeout_seconds", 60) or 60)
+    max_results = max(1, int(pcfg.get("max_results", 10) or 10))
+
+    if provider == "tavily":
+        # HARD RULE: basic é fixo no executor. Config não pode elevar para advanced.
+        max_results = min(20, max_results)
+        chunks = max(1, min(3, int(pcfg.get("chunks_per_source", 3) or 3)))
+        url = safe(pcfg.get("base_url")) or "https://api.tavily.com/search"
+        headers = {"Authorization": f"Bearer {creds['api_key']}", "Content-Type": "application/json"}
+        body = {
+            "query": query,
+            "search_depth": "basic",
+            "chunks_per_source": chunks,
+            "max_results": max_results,
+            "topic": "general",
+            "include_answer": False,
+            "include_raw_content": "text",
+            "include_images": False,
+            "include_image_descriptions": False,
+            "include_favicon": False,
+            "auto_parameters": False,
+            "exact_match": False,
+            "include_usage": True,
+        }
+        payload = _provider_post_once(provider, url, headers, body, timeout, limiter, budget)
+        results = _normalize_tavily_results(payload)
+        reported_credits = _tavily_usage_credits(payload)
+        if reported_credits > 1.0:
+            raise CollectionCostPolicyError(
+                f"TAVILY COST POLICY VIOLATION: basic retornou usage.credits={reported_credits}; execução abortada"
+            )
+        return results, {
+            "requests": budget.used,
+            "provider_units": reported_credits or 1,
+            "reported_credits": reported_credits,
+            "max_results_requested": max_results,
+            "raw_result_count": len(results),
+            "raw_content_requested": True,
+            "query_meta": {"submitted_query": query},
+        }
+
+    if provider == "serper":
+        # Um único POST /search. Sem scrape endpoint, paginação, fallback ou segunda query.
+        url = safe(pcfg.get("base_url")) or "https://google.serper.dev/search"
+        headers = {"X-API-KEY": creds["api_key"], "Content-Type": "application/json"}
+        body: Dict[str, Any] = {"q": query, "num": max_results}
+        payload = _provider_post_once(provider, url, headers, body, timeout, limiter, budget)
+        results = _normalize_serper_results(payload)
+        return results, {
+            "requests": budget.used,
+            "provider_units": 1,
+            "reported_credits": None,
+            "max_results_requested": max_results,
+            "raw_result_count": len(results),
+            "raw_content_requested": False,
+            "query_meta": {
+                "submitted_query": query,
+                "effective_query": safe(((payload.get("searchParameters") or {}) if isinstance(payload.get("searchParameters"), dict) else {}).get("q")) or query,
+            },
+        }
+
+    if provider == "brightdata":
+        # parsed_light retorna top 10 orgânicos em uma única request SERP.
+        max_results = min(10, max_results)
+        url = safe(pcfg.get("base_url")) or "https://api.brightdata.com/request"
+        headers = {"Authorization": f"Bearer {creds['api_key']}", "Content-Type": "application/json"}
+        google_url = "https://www.google.com/search?" + urlencode({"q": query, "num": max_results})
+        body = {
+            "zone": creds["zone"],
+            "url": google_url,
+            "format": "raw",
+            "data_format": "parsed_light",
+        }
+        payload = _provider_post_once(provider, url, headers, body, timeout, limiter, budget)
+        results = _normalize_brightdata_results(payload)
+        return results, {
+            "requests": budget.used,
+            "provider_units": 1,
+            "reported_credits": None,
+            "max_results_requested": max_results,
+            "raw_result_count": len(results),
+            "raw_content_requested": False,
+            "query_meta": _brightdata_query_meta(payload, query),
+        }
+
+    raise ValueError(provider)
 
 
 def _dedupe_curated(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1725,177 +2254,208 @@ def _dedupe_curated(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return list(by_url.values())
 
 
-def tavily_search(brand: str, model: str, cfg: Dict[str, Any], limiter: RateLimiter) -> Dict[str, Any]:
-    """R9.5: Search aberto -> Identity Gate -> Extract -> Target Isolation Funnel.
+def search_product_once(
+    brand: str,
+    model: str,
+    cfg: Dict[str, Any],
+    limiter: RateLimiter,
+    provider: str,
+) -> Dict[str, Any]:
+    """R9.6p4: 1 Search -> Query Gate -> Source Sieve -> Evidence Enrichment -> Isolation.
 
-    Nenhum include_domains/country/language filter/exact_match e nenhum TYPE e
-    injetado na query. Tavily score e apenas criterio secundario de ordenacao.
+    Contratos absolutos:
+    - no máximo 1 HTTP request ao Search provider por produto;
+    - Tavily sempre basic, com raw_content na MESMA request e usage auditado;
+    - Bright Data somente Google Light JSON / parsed_light;
+    - sem Search retry, segunda query, Advanced, /extract ou provider failover;
+    - aprofundamento adicional só ocorre em URL já aprovada e via fetch LOCAL;
+    - fetch local não pode gerar nova Search API request.
     """
-    try:
-        import requests  # noqa: F401
-    except ImportError as exc:
-        raise RuntimeError("Pacote requests não instalado. Rode: pip install requests") from exc
-    if not os.getenv("TAVILY_API_KEY", "").strip():
-        raise RuntimeError("TAVILY_API_KEY não configurada no .env")
+    cost_errors = validate_collection_cost_policy(cfg)
+    if cost_errors:
+        raise CollectionCostPolicyError(" | ".join(cost_errors))
 
-    tc = cfg.get("tavily", {}) or {}
-    policy = _collection_policy(cfg)
+    provider = provider.casefold().strip()
     search_model = derive_search_model(brand, model, cfg)
-    scfg = tc.get("search", {}) or {}
-    ecfg = tc.get("extract", {}) or {}
-    primary = safe(scfg.get("primary_query_template")) or "{brand} {search_model} product specifications"
-    fallback = safe(scfg.get("fallback_query_template")) or "{brand} {search_model} product details manual technical data"
-    rescue = safe(scfg.get("rescue_query_template")) or "{brand} {search_model} manual datasheet specifications technical data"
-    plans = [
-        ("PRIMARY", primary, safe(scfg.get("primary_depth", "basic")) or "basic"),
-    ]
-    if bool(scfg.get("fallback_enabled", True)) and fallback:
-        plans.append(("FALLBACK", fallback, safe(scfg.get("fallback_depth", "basic")) or "basic"))
-    if bool(scfg.get("rescue_enabled", True)) and rescue:
-        plans.append(("RESCUE", rescue, safe(scfg.get("rescue_depth", "advanced")) or "advanced"))
+    ccfg = _collection_runtime_cfg(cfg)
+    template = safe(ccfg.get("query_template")) or "{brand} {search_model}"
+    query = template.format(brand=brand, model=model, search_model=search_model).strip()
+    if not query:
+        raise ValueError("Query de coleta vazia")
 
-    raw_results: List[Dict[str, Any]] = []
-    raw_seen = set()
-    curated_all: List[Dict[str, Any]] = []
-    source_audit: List[Dict[str, Any]] = []
-    query_audit: List[Dict[str, Any]] = []
-    raw_extract_results: List[Dict[str, Any]] = []
-    extracted_basic_urls = set()
-    extracted_advanced_urls = set()
-    search_credits = 0.0
-    extract_credits = 0.0
-    collection_state = "NO_TARGET_EVIDENCE"
-
-    id_rank = {"WEAK": 0, "CONTEXTUAL": 1, "PROBABLE": 2, "STRONG": 3}
-    allow_contextual = bool((policy.get("identity", {}) or {}).get("allow_contextual_extract_rescue", True))
-    max_urls = max(1, min(20, int(ecfg.get("max_urls_per_product", 5) or 5)))
-    query_for_extract = (safe(ecfg.get("query_template")) or "{brand} {search_model} product model specifications technical data").format(brand=brand, search_model=search_model, model=model)
-
-    for qidx, (qname, template, depth) in enumerate(plans, 1):
-        query = template.format(brand=brand, model=model, search_model=search_model).strip()
-        body = {
-            "query": query,
-            "search_depth": depth,
-            "chunks_per_source": max(1, min(3, int(scfg.get("chunks_per_source", 2) or 2))),
-            "max_results": max(1, min(20, int(scfg.get("max_results", 5) or 5))),
-            "topic": "general",
-            "include_answer": False,
-            "include_raw_content": False,
-            "include_images": False,
-            "include_image_descriptions": False,
-            "include_favicon": False,
-            "auto_parameters": False,
-            "exact_match": False,
-            "include_usage": True,
-        }
-        sp = _tavily_post_with_retry("https://api.tavily.com/search", body, cfg, limiter)
-        search_credits += _tavily_usage_credits(sp)
-        results = [x for x in (sp.get("results", []) or []) if isinstance(x, dict)]
-        for res in results:
-            annotated = dict(res)
-            annotated["_search_query"] = query
-            annotated["_search_stage"] = qname
-            annotated["_search_depth"] = depth
-            key = _url_key(annotated.get("url", ""))
-            if key and key in raw_seen:
-                continue
-            if key:
-                raw_seen.add(key)
-            raw_results.append(annotated)
-
-        candidates: List[Tuple[int, float, Dict[str, Any]]] = []
-        for res in results:
-            im = _source_identity_for_result(brand, search_model, res, cfg)
-            eligible = im["level"] in {"STRONG", "PROBABLE"}
-            if not eligible and allow_contextual:
-                eligible = im["level"] == "CONTEXTUAL" and im["model_match_field"] == "BODY"
-            if eligible:
-                try:
-                    tv_score = float(res.get("score", 0) or 0)
-                except Exception:
-                    tv_score = 0.0
-                candidates.append((id_rank.get(im["level"], 0), tv_score, res))
-        candidates.sort(key=lambda x: (-x[0], -x[1]))
-        selected = [x[2] for x in candidates[:max_urls]]
-        urls = [safe(x.get("url")) for x in selected if safe(x.get("url")) and _url_key(x.get("url", "")) not in extracted_basic_urls]
-        ep: Dict[str, Any] = {"results": [], "failed_results": [], "usage": {"credits": 0}}
-        if bool(ecfg.get("enabled", True)) and urls:
-            ep = _tavily_extract(urls, query_for_extract, safe(ecfg.get("depth", "basic")) or "basic", cfg, limiter)
-            extract_credits += _tavily_usage_credits(ep)
-            extracted_basic_urls.update(_url_key(x) for x in urls)
-            raw_extract_results.extend([dict(x, _extract_depth=safe(ecfg.get("depth", "basic")) or "basic") for x in (ep.get("results", []) or []) if isinstance(x, dict)])
-        curated, audits, retry_urls = _curate_search_results(
-            brand, search_model, selected, ep,
-            safe(ecfg.get("depth", "basic")) or "basic", cfg, "TAVILY_EXTRACT",
+    budget = CollectionRequestBudget(provider=provider)
+    raw_results, usage = _provider_request_once(provider, query, cfg, limiter, budget)
+    if budget.used != 1:
+        raise CollectionCostPolicyError(
+            f"HARD LIMIT BROKEN: provider={provider}; request_count={budget.used}; esperado=1"
         )
-        curated_all.extend(curated)
-        source_audit.extend([dict(x, search_stage=qname, search_query=query) for x in audits])
 
-        # Catalogos/tabelas que ainda nao ficaram isolaveis ganham UM retry Advanced.
-        iso = policy.get("isolation", {}) or {}
-        retry_urls = [u for u in retry_urls if _url_key(u) not in extracted_advanced_urls]
-        retry_urls = retry_urls[:max(0, int(iso.get("advanced_extract_retry_max_urls", 3) or 3))]
-        if bool(iso.get("advanced_extract_retry_on_non_isolatable", True)) and retry_urls:
-            ap = _tavily_extract(retry_urls, query_for_extract, "advanced", cfg, limiter)
-            extract_credits += _tavily_usage_credits(ap)
-            extracted_advanced_urls.update(_url_key(x) for x in retry_urls)
-            raw_extract_results.extend([dict(x, _extract_depth="advanced") for x in (ap.get("results", []) or []) if isinstance(x, dict)])
-            retry_search = [x for x in selected if _url_key(x.get("url", "")) in {_url_key(u) for u in retry_urls}]
-            curated2, audits2, _ = _curate_search_results(
-                brand, search_model, retry_search, ap, "advanced", cfg, "TAVILY_EXTRACT_ADVANCED_RETRY",
-            )
-            curated_all.extend(curated2)
-            source_audit.extend([dict(x, search_stage=qname, search_query=query, advanced_retry=True) for x in audits2])
+    normalized: List[Dict[str, Any]] = []
+    for row in raw_results:
+        if not isinstance(row, dict):
+            continue
+        annotated = dict(row)
+        annotated["_search_query"] = query
+        annotated["_search_stage"] = "SINGLE_REQUEST"
+        annotated["_search_depth"] = "basic" if provider == "tavily" else "provider_default"
+        annotated["_search_provider"] = provider
+        normalized.append(annotated)
 
-        curated_all = _dedupe_curated(curated_all)
-        collection_state = _collection_state(brand, search_model, curated_all, cfg, policy)
-        query_audit.append({
-            "stage": qname,
-            "query": query,
-            "search_depth": depth,
-            "results": len(results),
-            "extract_candidates": len(selected),
-            "accepted_total_after_stage": len(curated_all),
-            "collection_state_after_stage": collection_state,
-            "search_credits_total": search_credits,
-            "extract_credits_total": extract_credits,
-        })
-        if collection_state == "READY_FOR_CLASSIFICATION":
-            break
+    query_meta = usage.get("query_meta", {}) if isinstance(usage.get("query_meta"), dict) else {}
+    query_ok, query_decision, query_flags = _query_identity_gate(
+        provider, brand, search_model, query_meta, cfg
+    )
 
-    # Ordena apenas para consumo; identidade manda e Tavily score desempata.
-    curated_all.sort(key=lambda r: (
+    if query_ok:
+        curated, audits = _curate_after_source_sieve(
+            brand, search_model, provider, normalized, cfg
+        )
+    else:
+        curated = []
+        audits = []
+        for res in normalized:
+            audits.append({
+                "url": safe(res.get("url")),
+                "title": safe(res.get("title")),
+                "tavily_score": res.get("score"),
+                "identity_before": "BLOCKED_QUERY_GATE",
+                "model_match_field_before": "NONE",
+                "sieve_decision": "REJECT_QUERY_IDENTITY_DRIFT",
+                "sieve_reason": query_decision,
+                "decision": "REJECT_QUERY_IDENTITY_DRIFT",
+                "reason": query_decision,
+                "quality_flags": list(query_flags),
+                "other_skus": [],
+                "isolated_chars": 0,
+                "extract_depth": "QUERY_GATE",
+                "source_mode": "QUERY_GATE",
+                "identity_after": "WEAK",
+                "enrichment_attempted": False,
+                "enrichment_mode": "NONE",
+                "enrichment_reason": "Query bloqueada antes do Source Sieve",
+            })
+
+    curated = _dedupe_curated(curated)
+    id_rank = {"WEAK": 0, "CONTEXTUAL": 1, "PROBABLE": 2, "STRONG": 3}
+    curated.sort(key=lambda r: (
         -id_rank.get(safe(r.get("_collection_identity")), 0),
         -float(r.get("score", 0) or 0),
         _url_key(r.get("url", "")),
     ))
-    curated_all = curated_all[:max(1, int((cfg.get("evidence", {}) or {}).get("max_results", 5) or 5))]
-    collection_state = _collection_state(brand, search_model, curated_all, cfg, policy)
+    curated = curated[:max(1, int((cfg.get("evidence", {}) or {}).get("max_results", 5) or 5))]
+    policy = _collection_policy(cfg)
+    state = _collection_state(brand, search_model, curated, cfg, policy)
 
+    for row in audits:
+        row["search_stage"] = "SINGLE_REQUEST"
+        row["search_query"] = query
+        row["provider"] = provider
+        if query_flags:
+            row["quality_flags"] = list(dict.fromkeys(
+                list(row.get("quality_flags", []) or []) + list(query_flags)
+            ))
+
+    enrichment_attempted = sum(1 for a in audits if bool(a.get("enrichment_attempted")))
+    tavily_raw_used = sum(1 for a in audits if safe(a.get("enrichment_mode")) == "TAVILY_SEARCH_RAW_CONTENT")
+    local_fetch_attempted = sum(
+        1 for a in audits
+        if bool(a.get("enrichment_attempted")) and safe(a.get("enrichment_mode")).startswith("LOCAL_")
+    )
+    local_fetch_success = sum(
+        1 for a in audits
+        if safe(a.get("enrichment_mode")) in {"LOCAL_TRAFILATURA", "LOCAL_HTML_FALLBACK"}
+        and bool(a.get("enrichment_attempted"))
+    )
+    enrichment_success = tavily_raw_used + local_fetch_success
+    query_audit = [{
+        "provider": provider,
+        "stage": "SINGLE_REQUEST",
+        "query": query,
+        "search_depth": "basic" if provider == "tavily" else "provider_default",
+        "results": len(normalized),
+        "source_sieve_accepted": sum(1 for a in audits if safe(a.get("sieve_decision")).startswith("ACCEPT_")),
+        "enrichment_attempted": enrichment_attempted,
+        "enrichment_success": enrichment_success,
+        "accepted_total_after_stage": len(curated),
+        "collection_state_after_stage": state,
+        "query_integrity": query_decision,
+        "effective_query": safe(query_meta.get("effective_query")),
+        "detected_query": safe(query_meta.get("detected_query")),
+        "spelling_present": bool(query_meta.get("spelling_present")),
+        "provider_requests": budget.used,
+        "provider_units": usage.get("provider_units"),
+        "reported_credits": usage.get("reported_credits"),
+        "max_results_requested": usage.get("max_results_requested"),
+        "raw_content_requested": bool(usage.get("raw_content_requested")),
+    }]
+
+    # Não persistir raw_content integral da Tavily no RAW cache: ele pode ser muito
+    # grande. O trecho target-isolado já está em curated_results e é suficiente para
+    # classificação/auditoria. Mantemos apenas o indicador de disponibilidade.
+    persisted_results: List[Dict[str, Any]] = []
+    for row in normalized:
+        r = dict(row)
+        r["_raw_content_available"] = bool(safe(r.get("raw_content")))
+        r["raw_content"] = None
+        persisted_results.append(r)
+
+    tavily_credits = float(usage.get("reported_credits") or 0.0) if provider == "tavily" else 0.0
     return {
-        "results": raw_results,
+        "results": persisted_results,
         "_search_meta": {
+            "provider": provider,
+            "engine_version": COLLECTION_ENGINE_VERSION,
             "brand_original": brand,
             "model_original": model,
             "search_model": search_model,
+            "query": query,
+            "query_integrity": query_decision,
+            "query_flags": query_flags,
+            "effective_query": safe(query_meta.get("effective_query")),
+            "detected_query": safe(query_meta.get("detected_query")),
+            "spelling_present": bool(query_meta.get("spelling_present")),
+            "request_count": budget.used,
+            "max_requests_per_product": MAX_COLLECTION_REQUESTS_PER_PRODUCT,
             "exact_match": False,
             "include_domains": False,
             "country_filter": False,
             "language_filter": False,
             "auto_parameters": False,
+            "provider_extract_enabled": False,
+            "advanced_enabled": False,
+            "fallback_enabled": False,
+            "provider_failover_enabled": False,
+            "local_enrichment_enabled": bool((ccfg.get("local_enrichment", {}) or {}).get("enabled", True)),
         },
         "_collection": {
-            "version": safe(policy.get("VERSION")) or "R9.5",
-            "state": collection_state,
+            "version": safe(policy.get("VERSION")) or "R9.6",
+            "engine_version": COLLECTION_ENGINE_VERSION,
+            "provider": provider,
+            "state": state,
             "search_model": search_model,
-            "curated_results": curated_all,
-            "source_audit": source_audit,
+            "curated_results": curated,
+            "source_audit": audits,
             "query_audit": query_audit,
-            "raw_extract_results": raw_extract_results,
-            "credits": {
-                "search": round(search_credits, 4),
-                "extract": round(extract_credits, 4),
-                "total": round(search_credits + extract_credits, 4),
+            "raw_extract_results": [],
+            "usage": usage,
+            # Campo legado mantido para relatórios antigos. Não existe provider Extract.
+            "credits": {"search": tavily_credits, "extract": 0, "total": tavily_credits},
+            "hard_limits": {
+                "max_requests_per_product": MAX_COLLECTION_REQUESTS_PER_PRODUCT,
+                "automatic_retry": False,
+                "secondary_search": False,
+                "provider_extract": False,
+                "advanced": False,
+                "provider_failover": False,
+            },
+            "enrichment": {
+                "source_sieve": True,
+                "tavily_search_raw_content": provider == "tavily",
+                "local_fetch_enabled": bool((ccfg.get("local_enrichment", {}) or {}).get("enabled", True)),
+                "tavily_raw_content_used": tavily_raw_used,
+                "local_fetch_attempted": local_fetch_attempted,
+                "local_fetch_success": local_fetch_success,
+                "enrichment_success_total": enrichment_success,
             },
         },
     }
@@ -1955,21 +2515,49 @@ def _export_collection_quality_report(products: List[Dict[str, Any]], sources: L
     tmp = path.with_name(path.stem + f".tmp_{os.getpid()}" + path.suffix)
     state_counts = defaultdict(int)
     decision_counts = defaultdict(int)
-    credits = 0.0
+    provider_counts = defaultdict(int)
+    requests_total = 0
+    tavily_credits = 0.0
+    max_requests_observed = 0
+    query_integrity_counts = defaultdict(int)
+    local_enrichment_attempts = 0
     for row in products:
         state_counts[safe(row.get("Collection State"))] += 1
+        provider = safe(row.get("Provider"))
+        if provider:
+            provider_counts[provider] += 1
         try:
-            credits += float(row.get("Tavily Credits", 0) or 0)
+            req = int(row.get("Provider Requests", 0) or 0)
+        except Exception:
+            req = 0
+        requests_total += req
+        max_requests_observed = max(max_requests_observed, req)
+        qint = safe(row.get("Query Integrity"))
+        if qint:
+            query_integrity_counts[qint] += 1
+        try:
+            local_enrichment_attempts += int(row.get("Local Enrichment Attempts", 0) or 0)
         except Exception:
             pass
+        if provider.casefold() == "tavily":
+            try:
+                tavily_credits += float(row.get("Reported Credits", 0) or 0)
+            except Exception:
+                pass
     for row in sources:
         decision_counts[safe(row.get("Decision"))] += 1
     resumo = [
         {"Indicador": "Produtos processados", "Valor": len(products)},
+        {"Indicador": "Provider requests observadas", "Valor": requests_total},
+        {"Indicador": "Máximo requests observado por produto", "Valor": max_requests_observed},
+        {"Indicador": "HARD LIMIT requests por produto", "Valor": MAX_COLLECTION_REQUESTS_PER_PRODUCT},
         {"Indicador": "Fontes auditadas", "Valor": len(sources)},
         {"Indicador": "Queries executadas", "Valor": len(queries)},
-        {"Indicador": "Créditos Tavily observados", "Valor": round(credits, 4)},
+        {"Indicador": "Tavily credits reportados", "Valor": round(tavily_credits, 4)},
+        {"Indicador": "Local enrichment attempts", "Valor": local_enrichment_attempts},
     ]
+    resumo += [{"Indicador": f"PROVIDER::{k}", "Valor": v} for k, v in sorted(provider_counts.items()) if k]
+    resumo += [{"Indicador": f"QUERY::{k}", "Valor": v} for k, v in sorted(query_integrity_counts.items()) if k]
     resumo += [{"Indicador": f"STATE::{k}", "Valor": v} for k, v in sorted(state_counts.items()) if k]
     resumo += [{"Indicador": f"SOURCE::{k}", "Valor": v} for k, v in sorted(decision_counts.items()) if k]
     with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
@@ -1980,12 +2568,65 @@ def _export_collection_quality_report(products: List[Dict[str, Any]], sources: L
     os.replace(tmp, path)
 
 
+def _failed_collection_payload(
+    brand: str,
+    model: str,
+    provider: str,
+    cfg: Dict[str, Any],
+    state: str,
+    reason: str,
+) -> Dict[str, Any]:
+    """Tombstone auditável: uma request tentada nunca volta automaticamente para a fila."""
+    search_model = derive_search_model(brand, model, cfg)
+    return {
+        "results": [],
+        "_search_meta": {
+            "provider": provider,
+            "engine_version": COLLECTION_ENGINE_VERSION,
+            "brand_original": brand,
+            "model_original": model,
+            "search_model": search_model,
+            "request_count": 1,
+            "max_requests_per_product": MAX_COLLECTION_REQUESTS_PER_PRODUCT,
+            "error": reason,
+        },
+        "_collection": {
+            "version": safe((_collection_policy(cfg)).get("VERSION")) or "R9.5",
+            "engine_version": COLLECTION_ENGINE_VERSION,
+            "provider": provider,
+            "state": state,
+            "search_model": search_model,
+            "curated_results": [],
+            "source_audit": [],
+            "query_audit": [],
+            "raw_extract_results": [],
+            "usage": {"requests": 1, "provider_units": None, "reported_credits": None},
+            "credits": {"search": 0, "extract": 0, "total": 0},
+            "error": reason,
+            "hard_limits": {
+                "max_requests_per_product": MAX_COLLECTION_REQUESTS_PER_PRODUCT,
+                "automatic_retry": False,
+                "secondary_search": False,
+                "extract": False,
+                "advanced": False,
+                "provider_failover": False,
+            },
+        },
+    }
+
+
 def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> bool:
+    provider = _resolve_search_provider(args, cfg)
+    policy_errors = validate_collection_cost_policy(cfg)
+    if policy_errors:
+        raise CollectionCostPolicyError(" | ".join(policy_errors))
+    _provider_credentials(provider, cfg)  # preflight antes da primeira request
+
     input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
     cache_path = Path(args.cache or cfg["files"]["cache"])
     db_path = Path(args.db or cfg["files"]["classification_db"])
-    pre_report = Path(args.precollection_output or cfg.get("files", {}).get("precollection_report", "Pre_Coleta_R9_5.xlsx"))
-    report_path = Path(cfg.get("files", {}).get("collection_report", "Coleta_Tavily_R9_5.xlsx"))
+    pre_report = Path(args.precollection_output or cfg.get("files", {}).get("precollection_report", "Pre_Coleta_R9_6.xlsx"))
+    report_path = Path(cfg.get("files", {}).get("collection_report", "Coleta_Search_R9_6.xlsx"))
 
     plan = build_precollection_plan(
         input_path=input_path, cache_path=cache_path, report_path=pre_report,
@@ -1995,94 +2636,162 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
 
     print()
-    print("=" * 78)
-    print(" R9.5 PRÉ-COLETA — OPEN SEARCH + COLLECTION QUALITY GATE")
-    print("=" * 78)
+    print("=" * 86)
+    print(" R9.6p4 PRÉ-COLETA — 1 SEARCH / SOURCE SIEVE / EVIDENCE ENRICHMENT")
+    print("=" * 86)
     for label in [
         "Linhas recebidas", "Linhas válidas", "Linhas inválidas", "Produtos únicos por business_key",
         "Duplicidades internas removidas", "Já no cache", "RAW_EMPTY", "RAW_CORRUPT", "RAW_MISSING",
         "Fila real Tavily antes do limite", "Fila Tavily desta execução",
     ]:
-        print(f"{label:.<50} {plan.summary.get(label, 0)}")
-    print("-" * 78)
-    print("Search......................................... ABERTO / SEM DOMAIN-COUNTRY-LANGUAGE FILTER")
-    print("exact_match.................................... FALSE")
-    print("Stage 1 recebe................................. SOMENTE curated_results")
+        display = label.replace("Tavily", "Search")
+        print(f"{display:.<54} {plan.summary.get(label, 0)}")
+    print("-" * 86)
+    print(f"Provider........................................ {provider.upper()}")
+    print("HARD LIMIT...................................... 1 PRODUTO = MAX. 1 REQUEST")
+    print("Automatic retry................................. DESABILITADO")
+    print("Secondary/Fallback/Rescue search................ DESABILITADO")
+    print("Provider Extract (/extract etc.)............... DESABILITADO")
+    print("Tavily raw_content na mesma Search.............. HABILITADO / BASIC / 1 CRÉDITO AUDITADO")
+    print("Local URL enrichment pós-sieve.................. HABILITADO (Trafilatura; 0 Search requests)")
+    print("Advanced........................................ DESABILITADO")
+    print("Provider failover............................... DESABILITADO")
+    print("Search.......................................... ABERTO / SEM DOMAIN-COUNTRY-LANGUAGE FILTER")
+    print("Stage 1 recebe.................................. SOMENTE curated_results")
+    print(f"Requests máximas planejadas..................... {len(candidates)}")
     print(f"Relatório pré-coleta............................ {pre_report}")
-    print("=" * 78)
+    print("=" * 86)
 
     if not candidates:
-        LOG.info("Nenhuma nova consulta Tavily necessária.")
+        LOG.info("Nenhuma nova consulta Search necessária.")
         return True
     if not args.yes:
-        print(f"Fila real desta execução: {len(candidates)} produto(s).")
-        if input("Digite CONFIRMAR para iniciar Search/Extract: ").strip().upper() != "CONFIRMAR":
-            LOG.info("Coleta cancelada. Nenhuma chamada Tavily foi realizada.")
+        print(f"Fila real desta execução: {len(candidates)} produto(s) = no máximo {len(candidates)} request(s).")
+        if input("Digite CONFIRMAR para iniciar a coleta: ").strip().upper() != "CONFIRMAR":
+            LOG.info("Coleta cancelada. Nenhuma chamada ao provider foi realizada.")
             return False
 
-    limiter = RateLimiter(float((cfg.get("tavily", {}) or {}).get("requests_per_minute", 30)))
+    pcfg = _provider_cfg(cfg, provider)
+    limiter = RateLimiter(float(pcfg.get("requests_per_minute", 30) or 30))
     db = ClassificationDB(db_path)
-    run_id = db.start_run("collect", rules.hash, "TAVILY_R9_5_SEARCH_EXTRACT")
-    writer = TavilyWritableStore(cache_path)
+    run_id = db.start_run("collect", rules.hash, f"SEARCH_R9_6:{provider}")
+    writer = TavilyWritableStore(cache_path)  # nome legado; payload agora registra provider explicitamente
     product_rows: List[Dict[str, Any]] = []
     source_rows: List[Dict[str, Any]] = []
     query_rows: List[Dict[str, Any]] = []
     completed = True
+    total_requests = 0
     try:
         for idx, (brand, model, prior_state) in enumerate(candidates, 1):
             key = business_key(brand, model)
             try:
-                payload = tavily_search(brand, model, cfg, limiter)
+                payload = search_product_once(brand, model, cfg, limiter, provider)
                 coll = payload.get("_collection", {}) or {}
+                usage = coll.get("usage", {}) or {}
+                req_count = int(usage.get("requests", 0) or 0)
+                if req_count != 1:
+                    raise CollectionCostPolicyError(
+                        f"REQUEST COUNT INVALIDO: {brand} {model} retornou requests={req_count}"
+                    )
+                total_requests += req_count
                 state = safe(coll.get("state")) or "NO_TARGET_EVIDENCE"
                 writer.put(
                     brand, model, payload,
-                    archive_reason=("RECOLLECT_LOW_EVIDENCE_R9_5" if prior_state in {"RAW_OK", "RAW_OK_MERGED"} else "COLLECT_R9_5"),
+                    archive_reason=(
+                        f"RECOLLECT_{provider.upper()}_R9_6"
+                        if prior_state in {"RAW_OK", "RAW_OK_MERGED"}
+                        else f"COLLECT_{provider.upper()}_R9_6"
+                    ),
                 )
-                credits = coll.get("credits", {}) or {}
                 curated = coll.get("curated_results", []) or []
                 raw_n = len(payload.get("results", []) or [])
+                reported_credits = usage.get("reported_credits")
                 product_rows.append({
                     "Marca": brand, "Modelo": model, "Search Model": safe(coll.get("search_model")),
-                    "Estado Anterior": prior_state, "Collection State": state,
+                    "Provider": provider, "Estado Anterior": prior_state, "Collection State": state,
                     "RAW Results": raw_n, "Curated Sources": len(curated),
-                    "Search Credits": credits.get("search", 0), "Extract Credits": credits.get("extract", 0),
-                    "Tavily Credits": credits.get("total", 0), "Data": now_iso(),
+                    "Provider Requests": req_count, "Provider Units": usage.get("provider_units"),
+                    "Reported Credits": reported_credits,
+                    "Max Results Requested": usage.get("max_results_requested"),
+                    "Query Integrity": safe((payload.get("_search_meta", {}) or {}).get("query_integrity")),
+                    "Local Enrichment Attempts": int(((coll.get("enrichment", {}) or {}).get("local_fetch_attempted", 0)) or 0),
+                    "Data": now_iso(),
                 })
                 for s in coll.get("source_audit", []) or []:
                     source_rows.append({
                         "Marca": brand, "Modelo": model, "Search Model": safe(coll.get("search_model")),
-                        "URL": s.get("url"), "Title": s.get("title"), "Tavily Score": s.get("tavily_score"),
+                        "Provider": provider,
+                        "URL": s.get("url"), "Title": s.get("title"), "Provider Rank Score": s.get("tavily_score"),
                         "Identity Before": s.get("identity_before"), "Model Field": s.get("model_match_field_before"),
                         "Decision": s.get("decision"), "Reason": s.get("reason"),
                         "Quality Flags": " | ".join(s.get("quality_flags", []) or []),
                         "Other SKUs": " | ".join(s.get("other_skus", []) or []),
-                        "Isolated Chars": s.get("isolated_chars"), "Extract Depth": s.get("extract_depth"),
+                        "Isolated Chars": s.get("isolated_chars"), "Evidence Mode": s.get("extract_depth"),
                         "Source Mode": s.get("source_mode"), "Search Stage": s.get("search_stage"),
+                        "Sieve Decision": s.get("sieve_decision"), "Sieve Reason": s.get("sieve_reason"),
+                        "Enrichment Attempted": s.get("enrichment_attempted"), "Enrichment Mode": s.get("enrichment_mode"),
+                        "Enrichment Reason": s.get("enrichment_reason"),
                     })
                 for q in coll.get("query_audit", []) or []:
                     query_rows.append({"Marca": brand, "Modelo": model, **q})
-                db.event(run_id, key, "TAVILY_R9_5_SAVED", f"state={state}; raw={raw_n}; curated={len(curated)}; credits={credits.get('total', 0)}")
-                LOG.info("COLETA R9.5 %d/%d | %s %s | state=%s | raw=%d curated=%d | credits=%s", idx, len(candidates), brand, model, state, raw_n, len(curated), credits.get("total", 0))
+                db.event(
+                    run_id, key, "SEARCH_R9_6_SAVED",
+                    f"provider={provider}; state={state}; raw={raw_n}; curated={len(curated)}; requests={req_count}; credits={reported_credits}",
+                )
+                LOG.info(
+                    "COLETA R9.6 %d/%d | %s %s | provider=%s | state=%s | raw=%d curated=%d | requests=%d | credits=%s",
+                    idx, len(candidates), brand, model, provider, state, raw_n, len(curated), req_count,
+                    (reported_credits if reported_credits is not None else "N/A"),
+                )
+            except CollectionCostPolicyError as exc:
+                db.event(run_id, key, "COLLECTION_COST_POLICY_VIOLATION", safe(exc))
+                LOG.critical("%s", exc)
+                completed = False
+                break
             except OperationalPause as exc:
                 db.event(run_id, key, exc.code, safe(exc))
-                product_rows.append({"Marca": brand, "Modelo": model, "Estado Anterior": prior_state, "Collection State": exc.code, "Data": now_iso()})
-                LOG.error("%s. Coleta pausada com segurança; tudo salvo até aqui permanece persistido.", exc)
+                product_rows.append({
+                    "Marca": brand, "Modelo": model, "Provider": provider,
+                    "Estado Anterior": prior_state, "Collection State": exc.code,
+                    "Provider Requests": 1, "Data": now_iso(),
+                })
+                LOG.error("%s. Coleta pausada; tudo salvo até aqui permanece persistido.", exc)
                 completed = False
                 break
             except Exception as exc:
-                db.event(run_id, key, "TAVILY_R9_5_ERROR", safe(exc))
-                product_rows.append({"Marca": brand, "Modelo": model, "Estado Anterior": prior_state, "Collection State": "ERROR_RETRY_NEXT_RUN", "Reason": safe(exc), "Data": now_iso()})
-                LOG.error("Falha coleta R9.5 %s | %s: %s", brand, model, exc)
+                # Fail-closed e sem retry. Persiste tombstone para o mesmo item não voltar
+                # silenciosamente à fila em uma nova execução e potencialmente gastar de novo.
+                failure = _failed_collection_payload(
+                    brand, model, provider, cfg, "REQUEST_ATTEMPTED_NO_AUTO_RETRY", safe(exc)
+                )
+                writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_REQUEST_ERROR_R9_6")
+                total_requests += 1
+                db.event(run_id, key, "SEARCH_R9_6_ERROR_NO_RETRY", safe(exc))
+                product_rows.append({
+                    "Marca": brand, "Modelo": model, "Provider": provider,
+                    "Estado Anterior": prior_state, "Collection State": "REQUEST_ATTEMPTED_NO_AUTO_RETRY",
+                    "Provider Requests": 1, "Reason": safe(exc), "Data": now_iso(),
+                })
+                LOG.error("Falha coleta R9.6 SEM RETRY | %s %s | provider=%s | %s", brand, model, provider, exc)
             if idx % 25 == 0:
                 _export_collection_quality_report(product_rows, source_rows, query_rows, report_path)
         _export_collection_quality_report(product_rows, source_rows, query_rows, report_path)
-        db.finish_run(run_id, "COMPLETED" if completed else "PAUSED", f"executados={len(product_rows)} planejados={len(candidates)}")
-        LOG.info("Relatório Collection Quality: %s", report_path)
+        db.finish_run(
+            run_id,
+            "COMPLETED" if completed else "PAUSED",
+            f"executados={len(product_rows)} planejados={len(candidates)} requests={total_requests} provider={provider}",
+        )
+        LOG.info(
+            "COLLECTION R9.6 FINAL | provider=%s | produtos=%d | requests=%d | hard_cap=%d/produto | relatório=%s",
+            provider, len(product_rows), total_requests, MAX_COLLECTION_REQUESTS_PER_PRODUCT, report_path,
+        )
         return completed
     except KeyboardInterrupt:
         _export_collection_quality_report(product_rows, source_rows, query_rows, report_path)
-        db.finish_run(run_id, "INTERRUPTED", "RAW/Collection Quality commitado por produto")
+        db.finish_run(
+            run_id, "INTERRUPTED",
+            f"RAW/Collection Quality commitado por produto | requests={total_requests} | provider={provider}",
+        )
         LOG.warning("Coleta interrompida. Cache preservado até o último produto concluído.")
         raise
     finally:
@@ -4888,9 +5597,9 @@ def repair_llm_evidence_refs(data: Dict[str, Any], rules: Rules, s1: Stage1Resul
 
 def record_for_raw_state(raw: RawEvidence) -> Dict[str, Any]:
     status_map = {
-        "RAW_MISSING": ("PENDING_COLLECTION", "Produto ausente do cache Tavily"),
-        "RAW_EMPTY": ("PENDING_RECOLLECTION", "Consulta Tavily existe, mas não retornou resultados"),
-        "RAW_CORRUPT": ("CACHE_ERROR", "RAW Tavily corrompido"),
+        "RAW_MISSING": ("PENDING_COLLECTION", "Produto ausente do cache Search"),
+        "RAW_EMPTY": ("PENDING_RECOLLECTION", "Consulta Search existe, mas não retornou resultados"),
+        "RAW_CORRUPT": ("CACHE_ERROR", "RAW Search corrompido"),
         "RAW_COLLISION": ("CACHE_COLLISION", "Colisão de chave de negócio"),
     }
     status, msg = status_map.get(raw.state, ("CACHE_ERROR", raw.reason))
@@ -7422,11 +8131,11 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
     if cache.exists():
         store = TavilyReadOnlyStore(cache)
         try:
-            LOG.info("Cache Tavily OK: %d produtos | merged_variants=%d", len(store.catalog()), len(store.merged_variants))
+            LOG.info("Cache Search OK: %d produtos | merged_variants=%d", len(store.catalog()), len(store.merged_variants))
         finally:
             store.close()
     else:
-        LOG.warning("Cache Tavily não encontrado no caminho padrão: %s", cache)
+        LOG.warning("Cache Search não encontrado no caminho padrão: %s", cache)
     LOG.info("VALIDAÇÃO OK | rules=%s | types=%d | powers=%d", rules.version, len(rules.types), len(rules.allowed_powers))
 
 
@@ -7450,7 +8159,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-checkpoint", action="store_true")
     p.add_argument("--reprocess", action="store_true")
     p.add_argument("--max-items", type=int, default=0)
-    p.add_argument("--max-tavily-new", type=int, default=0)
+    p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
+    p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata"], default="")
     p.add_argument("--recollect-empty", action="store_true")
     p.add_argument("--recollect-low-evidence", action="store_true")
     p.add_argument("--yes", action="store_true")
@@ -7469,29 +8179,43 @@ def _menu_limit(prompt: str) -> int:
     return int(raw)
 
 
+def _menu_search_provider() -> str:
+    raw = input("Provider de busca [TAVILY / SERPER / BRIGHTDATA] (ENTER = TAVILY): ").strip().casefold()
+    if not raw:
+        return "tavily"
+    aliases = {"bright data": "brightdata", "bright_data": "brightdata", "bright-data": "brightdata"}
+    raw = aliases.get(raw, raw)
+    if raw not in ALLOWED_SEARCH_PROVIDERS:
+        print("Provider inválido. Será usado TAVILY.")
+        return "tavily"
+    return raw
+
+
 def interactive_menu(base: Path) -> argparse.Namespace:
     parser = build_parser()
-    print("=" * 78)
+    print("=" * 86)
     print(f" PIPELINE ENRIQUECEDOR DE PRODUTOS {PIPELINE_VERSION} | {BUILD_LABEL}")
-    print(" Open Search -> Identity -> Target Isolation -> Curated Evidence -> Stage 1 -> Funnel -> NVIDIA/Groq")
+    print(" Search Provider -> Identity -> Target Isolation -> Curated Evidence -> Stage 1 -> Funnel -> NVIDIA/Groq")
+    print(" COLLECTION HARD RULE: 1 produto = no máximo 1 request | sem retry/fallback/extract/advanced")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
-    print("=" * 78)
-    print("1 - COLETA / EXTRAÇÃO R9.5")
+    print("=" * 86)
+    print("1 - COLETA / EXTRAÇÃO R9.6 (1 REQUEST/PRODUTO)")
     print("2 - CLASSIFICAÇÃO")
     print("3 - PROCESSO COMPLETO")
-    print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM TAVILY)")
+    print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
     print("5 - AUDITORIA / REPARO BASE (SEM LLM)")
-    print("6 - CURAR CACHE LEGADO R9.5 (SEM TAVILY / 0 CRÉDITOS)")
+    print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
     print("7 - SAIR")
     op = input("Opção: ").strip()
     if op == "1":
-        limite = _menu_limit("Limite de produtos Tavily para piloto (ENTER = todos): ")
-        argv = ["--mode", "collect"]
+        provider = _menu_search_provider()
+        limite = _menu_limit("Limite de produtos para coleta (ENTER = todos): ")
+        argv = ["--mode", "collect", "--search-provider", provider]
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
             argv += ["--recollect-low-evidence"]
         if limite:
-            argv += ["--max-tavily-new", str(limite)]
+            argv += ["--max-search-new", str(limite)]
         return parser.parse_args(argv)
     if op == "2":
         limite = _menu_limit("Limite de produtos para piloto (ENTER = todos): ")
@@ -7500,14 +8224,15 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
     if op == "3":
-        limite_tavily = _menu_limit("Limite de produtos na coleta Tavily (ENTER = todos): ")
+        provider = _menu_search_provider()
+        limite_search = _menu_limit("Limite de produtos na coleta (ENTER = todos): ")
         limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
-        argv = ["--mode", "full"]
+        argv = ["--mode", "full", "--search-provider", provider]
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
             argv += ["--recollect-low-evidence"]
-        if limite_tavily:
-            argv += ["--max-tavily-new", str(limite_tavily)]
+        if limite_search:
+            argv += ["--max-search-new", str(limite_search)]
         if limite_class:
             argv += ["--max-items", str(limite_class)]
         return parser.parse_args(argv)
@@ -7583,16 +8308,24 @@ def main() -> int:
         return 2
     cfg["_collection_policy"] = collection_policy
     cfg["_collection_policy_path"] = str(collection_policy_path)
+    cost_policy_errors = validate_collection_cost_policy(cfg)
+    if cost_policy_errors:
+        for e in cost_policy_errors:
+            LOG.error(e)
+        return 2
     rules = Rules(rules_path)
 
     if env_info["exists"]:
         LOG.info(
-            ".env carregado: %s | GROQ_API_KEY=%s | NVIDIA_API_KEY=%s | OPENROUTER_API_KEY=%s | TAVILY_API_KEY=%s",
+            ".env carregado: %s | GROQ=%s | NVIDIA=%s | OPENROUTER=%s | TAVILY=%s | SERPER=%s | BRIGHTDATA=%s | BRIGHTDATA_ZONE=%s",
             env_info["path"],
             "CONFIGURADA" if bool(os.getenv("GROQ_API_KEY", "").strip()) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("NVIDIA_API_KEY", "").strip()) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("OPENROUTER_API_KEY", "").strip()) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("TAVILY_API_KEY", "").strip()) else "AUSENTE",
+            "CONFIGURADA" if bool(os.getenv("SERPER_API_KEY", "").strip()) else "AUSENTE",
+            "CONFIGURADA" if bool(os.getenv("BRIGHTDATA_API_KEY", "").strip()) else "AUSENTE",
+            "CONFIGURADA" if bool(os.getenv("BRIGHTDATA_ZONE", "").strip()) else "AUSENTE",
         )
     else:
         LOG.warning(".env não encontrado em: %s", env_info["path"])
@@ -7619,8 +8352,8 @@ def main() -> int:
         run_pipeline(args, cfg, rules)
         return 0
     if args.mode == "collect":
-        if not os.getenv("TAVILY_API_KEY", "").strip():
-            raise RuntimeError("TAVILY_API_KEY não configurada no .env")
+        provider = _resolve_search_provider(args, cfg)
+        _provider_credentials(provider, cfg)
         collect_products(args, cfg, rules)
         return 0
     if args.mode == "curate":
@@ -7633,8 +8366,8 @@ def main() -> int:
         run_cache_recovery(args, cfg, rules)
         return 0
     if args.mode == "full":
-        if not os.getenv("TAVILY_API_KEY", "").strip():
-            raise RuntimeError("TAVILY_API_KEY não configurada no .env")
+        provider = _resolve_search_provider(args, cfg)
+        _provider_credentials(provider, cfg)
         completed = collect_products(args, cfg, rules)
         if not completed:
             LOG.warning("PROCESSO COMPLETO interrompido após a coleta. Classificação não iniciada.")
