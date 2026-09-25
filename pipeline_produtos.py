@@ -54,8 +54,8 @@ from urllib.parse import quote, unquote, urlencode, urlparse
 PIPELINE_VERSION = "3.9.5-hf3.1"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3.1p4 R9.6 Source Sieve + Evidence Enrichment"
-COLLECTION_ENGINE_VERSION = "2026-09-25-r9.6p4-source-sieve-enrichment"
+BUILD_LABEL = "v3.9.5-HF3.1p5 R9.6 Bright Data JSON Contract Fix"
+COLLECTION_ENGINE_VERSION = "2026-09-25-r9.6p5-brightdata-json-contract"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
 
@@ -1670,6 +1670,9 @@ def validate_collection_cost_policy(cfg: Dict[str, Any]) -> List[str]:
 
     bright = _provider_cfg(cfg, "brightdata")
     if bright:
+        response_format = safe(bright.get("format", "json")).casefold() or "json"
+        if response_format != "json":
+            errors.append(f"BRIGHTDATA_CONFIG: format deve ser json; recebido={response_format}")
         fmt = safe(bright.get("data_format", "parsed_light")).casefold() or "parsed_light"
         if fmt != "parsed_light":
             errors.append(f"BRIGHTDATA_CONFIG: somente parsed_light permitido; recebido={fmt}")
@@ -2220,7 +2223,9 @@ def _provider_request_once(
         body = {
             "zone": creds["zone"],
             "url": google_url,
-            "format": "raw",
+            # Bright Data SERP API contract for parsed Light JSON.
+            # Hardcoded fail-closed: no Raw HTML / Full JSON / Bing / Markdown fallback.
+            "format": "json",
             "data_format": "parsed_light",
         }
         payload = _provider_post_once(provider, url, headers, body, timeout, limiter, budget)
@@ -2637,7 +2642,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
 
     print()
     print("=" * 86)
-    print(" R9.6p4 PRÉ-COLETA — 1 SEARCH / SOURCE SIEVE / EVIDENCE ENRICHMENT")
+    print(" R9.6p5 PRÉ-COLETA — 1 SEARCH / SOURCE SIEVE / EVIDENCE ENRICHMENT")
     print("=" * 86)
     for label in [
         "Linhas recebidas", "Linhas válidas", "Linhas inválidas", "Produtos únicos por business_key",
