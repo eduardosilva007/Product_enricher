@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-15-v3.0.8-r9.5-hf3-recovery-ladder",
+  "VERSION": "2026-09-29-v3.0.9-r9.6p6-classification-recovery",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -18,14 +18,16 @@
     "DISC MOWER é implemento agrícola montado e mapeia para OTHERS|HIGH PERFORMANCE FRONT MOWER; não é RIDER nem LAWN MOWER.",
     "Para GENERATOR/INVERTER GENERATOR/INVERTER WELDER, tensão isolada pode ser saída e não define BATTERY/CORDED sem sinal explícito de alimentação.",
     "Página de peça/reposto/compatibilidade é evidência secundária e não transforma automaticamente Brand+Model em ACCESSORY/PART.",
-    "Conflito de múltiplos tipos físicos explícitos no mesmo título não pode ser arbitrado livremente pela LLM; deve resultar em revisão.",
+    "Conflito de múltiplos tipos físicos explícitos não pode ser arbitrado livremente pela LLM; exceção: POWER TOOL COMBO KIT exige sinal explícito de combo + pelo menos dois tipos de ferramentas principais.",
     "Revisão B.I=OK é decisão humana externa ao motor e HARD LOCK absoluto, inclusive sob reprocessamento.",
     "QUALITY_GATES reúne regressões sintéticas, identidade e casos reais validados; eles protegem o motor mas não classificam produtos por Marca+Modelo em runtime.",
     "Nenhuma seção/campo de política sem executor correspondente pode permanecer no JSON operacional.",
     "Stage 0 valida identidade/qualidade da evidência antes da classificação.",
     "Stage 1.5 reduz candidatos para a LLM por score, suporte e identidade; a LLM nunca recebe a taxonomia inteira.",
     "LOW_TARGET_EVIDENCE e TAXONOMY_GAP são estados distintos.",
-    "Category General e FAMILY podem usar TAXONOMY_EVIDENCE_RULES somente após TYPE resolvido e com evidência target-anchored; WATERPUMP/LIFT PUMP sem subtipo taxonômico comprovado devem permanecer em REVIEW, nunca cair em família genérica automática."
+    "Category General e FAMILY podem usar TAXONOMY_EVIDENCE_RULES somente após TYPE resolvido e com evidência target-anchored; WATERPUMP/LIFT PUMP sem subtipo taxonômico comprovado devem permanecer em REVIEW, nunca cair em família genérica automática.",
+    "Título Real é preservado na saída mesmo quando a classificação não fecha; Base Final exibe um único título útil, sem duplicar metadados de Título Referência.",
+    "TAXONOMY_EVIDENCE_RULES podem gerar candidato de TYPE quando Brand/Model/alias já sustentam deterministicamente o mesmo tipo, evitando dead-end TAXONOMY_GAP_NO_ALIAS."
   ],
   "TAXONOMY_PAIRS": [
     {
@@ -679,6 +681,22 @@
     {
       "category_general": "OTHERS",
       "family": "BOOSTER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "POWER TOOL COMBO KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MULTISTAGE CENTRIFUGAL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "IMPACT DRILL"
     }
   ],
   "PRODUCT_TYPES": {
@@ -1434,11 +1452,23 @@
         "motor estacionário",
         "motor estacionario",
         "motor de reposição",
-        "motor de reposicao"
+        "motor de reposicao",
+        "gasoline engine",
+        "petrol engine",
+        "small engine",
+        "engine assembly"
       ],
       "fallback_pair": [
         "ENGINES",
         "ENGINE"
+      ],
+      "negative_aliases": [
+        "engine oil",
+        "engine filter",
+        "engine mount",
+        "engine gasket",
+        "engine parts",
+        "engine part"
       ]
     },
     "GENERATOR": {
@@ -2685,6 +2715,40 @@
         "OTHERS",
         "POWER TOOLS"
       ]
+    },
+    "POWER TOOL COMBO KIT": {
+      "aliases": [
+        "power tool combo kit",
+        "tool combo kit",
+        "cordless combo kit",
+        "power tools combo kit",
+        "kit combinado de ferramentas",
+        "kit de herramientas combinadas",
+        "kit de ferramentas combinadas"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "POWER TOOL COMBO KIT"
+      ]
+    },
+    "ROTARY TOOL": {
+      "aliases": [
+        "rotary tool",
+        "cordless rotary tool",
+        "variable speed rotary tool",
+        "ferramenta rotativa",
+        "herramienta rotativa",
+        "micro retífica rotativa",
+        "micro retifica rotativa"
+      ],
+      "negative_aliases": [
+        "rotary hammer",
+        "rotary sander"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ROTARY TOOL"
+      ]
     }
   },
   "POWER_RULES": {
@@ -3603,7 +3667,7 @@
       "primary_type": "HAMMER DRILL",
       "power": "*",
       "category_general": "OTHERS",
-      "family": "POWER TOOLS",
+      "family": "IMPACT DRILL",
       "priority": 150
     },
     {
@@ -3955,6 +4019,20 @@
       "category_general": "OTHERS",
       "family": "POWER TOOLS",
       "priority": 140
+    },
+    {
+      "primary_type": "POWER TOOL COMBO KIT",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "POWER TOOL COMBO KIT",
+      "priority": 230
+    },
+    {
+      "primary_type": "ROTARY TOOL",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "ROTARY TOOL",
+      "priority": 185
     }
   ],
   "COMPONENT_CONTEXT_RULES": {
@@ -4329,9 +4407,9 @@
       ]
     }
   ],
-  "SCHEMA_VERSION": "2.7",
+  "SCHEMA_VERSION": "2.8",
   "QUALITY_GATES": {
-    "VERSION": "2026-09-15-hf3-recovery-ladder",
+    "VERSION": "2026-09-29-p6-classification-recovery",
     "POLICY": {
       "fail_before_classification": true,
       "synthetic_cases": "STRICT_EXPECTATION",
@@ -4543,9 +4621,6 @@
           "must_include_type_candidates": [
             "HAMMER DRILL",
             "ANGLE GRINDER"
-          ],
-          "forbidden_type_candidates": [
-            "POWER TOOL KIT"
           ]
         }
       },
@@ -4840,7 +4915,7 @@
           "product_type": "HAMMER DRILL",
           "power": "BATTERY",
           "category_general": "OTHERS",
-          "family": "POWER TOOLS",
+          "family": "IMPACT DRILL",
           "forbidden_type_candidates": [
             "DRILL"
           ]
@@ -4921,8 +4996,8 @@
         "id": "multi_primary_title_conflict_no_llm_resolve",
         "brand": "TEST",
         "model": "KIT-X1",
-        "title": "TEST KIT-X1 Hammer Drill + Angle Grinder Combo",
-        "content": "kit contains a hammer drill and an angle grinder",
+        "title": "TEST KIT-X1 Hammer Drill and Angle Grinder comparison page",
+        "content": "target page mentions both a hammer drill and an angle grinder without selling them as one combo kit",
         "expect": {
           "state": "AMBIGUOUS",
           "must_include_type_candidates": [
@@ -4942,7 +5017,7 @@
           "product_type": "HAMMER DRILL",
           "power": "BATTERY",
           "category_general": "OTHERS",
-          "family": "POWER TOOLS"
+          "family": "IMPACT DRILL"
         }
       },
       {
@@ -6557,6 +6632,65 @@
         "water pressure"
       ],
       "priority": 370
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "MULTISTAGE CENTRIFUGAL PUMP",
+      "aliases": [
+        "multistage centrifugal pump",
+        "multi-stage centrifugal pump",
+        "vertical multistage centrifugal pump",
+        "horizontal multistage centrifugal pump"
+      ],
+      "priority": 330
     }
-  ]
+  ],
+  "COMBO_KIT_POLICY": {
+    "enabled": true,
+    "min_distinct_primary_types": 2,
+    "combo_terms": [
+      "power tool combo kit",
+      "tool combo kit",
+      "combo kit",
+      "combo set",
+      "tool combo",
+      "cordless combo",
+      "kit combinado",
+      "kit de herramientas",
+      "kit de ferramentas",
+      "combo taladro",
+      "combo furadeira"
+    ],
+    "eligible_primary_types": [
+      "DRILL",
+      "HAMMER DRILL",
+      "MAGNETIC DRILL",
+      "ANGLE GRINDER",
+      "BRAKING GRINDER",
+      "DIE GRINDER",
+      "STRAIGHT GRINDER",
+      "IMPACT WRENCH",
+      "CORDLESS IMPACT",
+      "SCREWDRIVER",
+      "CIRCULAR SAW",
+      "JIGSAW",
+      "RECIPROCATING SAW",
+      "MITER SAW",
+      "ORBITAL SANDER",
+      "BELT SANDER",
+      "ROTARY SANDER",
+      "POLISHER",
+      "ROTARY HAMMER",
+      "DEMOLITION HAMMER",
+      "PLANER",
+      "OSCILLATING MULTI-TOOL",
+      "MULTI-TOOL",
+      "HEAT GUN",
+      "GREASE GUN",
+      "NAIL GUN",
+      "STAPLER",
+      "RIVET TOOL"
+    ]
+  }
 }

@@ -1,18 +1,27 @@
 {
-  "VERSION": "2026-09-12-r9.5-collection-quality-v1",
+  "VERSION": "2026-09-29-r9.6p6-clean-identity-v1",
   "DESIGN_PRINCIPLES": [
-    "Busca primaria 100% aberta: sem include_domains, country, language filter ou exact_match.",
+    "Uma unica Search por produto: sem fallback, rescue, retry automatico, provider Extract ou provider failover.",
+    "Busca 100% aberta: sem include_domains, country, language filter ou exact_match.",
     "Marca e Modelo originais nunca sao alterados; Search Model existe apenas para busca e identidade.",
-    "Tavily score ordena fontes, mas nunca prova identidade do SKU.",
-    "Pagina multi-produto nao e descartada automaticamente: primeiro tenta isolar deterministicamente o bloco do SKU alvo.",
+    "Source Sieve acontece antes de qualquer aprofundamento de pagina.",
+    "Somente fontes STRONG/PROBABLE e sem sinais de compatibilidade/related podem ser aprofundadas.",
+    "Tavily pode usar raw_content retornado na MESMA Search basic; usage.credits acima de 1 aborta a coleta.",
+    "Serper/Bright Data podem aprofundar URL aprovada apenas por fetch local, sem nova Search API request.",
+    "Bright Data aceita somente Google Light JSON / parsed_light e audita general.query/detected_query/spelling.",
+    "Score/rank do provider ordena fontes, mas nunca prova identidade do SKU.",
+    "Target Isolation roda somente depois do Source Sieve e do enriquecimento permitido.",
     "TYPE e POWER so podem ser extraidos depois que a fonte/bloco passou pelo Collection Quality Gate.",
-    "RAW de Search/Extract permanece auditavel; Stage 1 recebe somente curated_results.",
+    "RAW de Search permanece auditavel; Stage 1 recebe somente curated_results.",
     "Compatibilidade, related products e outro produto dominante nao podem contaminar a evidencia do target.",
-    "Falha de isolamento nao vira classificacao: permanece pendencia/recoleta."
+    "Evidencia insuficiente termina em LOW/NO_TARGET_EVIDENCE; nunca dispara gasto adicional automatico."
   ],
   "identity": {
-    "direct_accept_levels": ["STRONG", "PROBABLE"],
-    "allow_contextual_extract_rescue": true,
+    "direct_accept_levels": [
+      "STRONG",
+      "PROBABLE"
+    ],
+    "allow_contextual_extract_rescue": false,
     "ready_if_strong_sources": 1,
     "ready_if_probable_sources": 2,
     "ready_if_exact_isolated_sources": 1
@@ -24,25 +33,71 @@
     "max_other_skus_after_isolation": 0,
     "require_target_in_block_for_multi_product": true,
     "allow_dedicated_page_chunks_without_repeated_sku": true,
-    "advanced_extract_retry_on_non_isolatable": true,
-    "advanced_extract_retry_max_urls": 3
+    "advanced_extract_retry_on_non_isolatable": false,
+    "advanced_extract_retry_max_urls": 0
   },
   "generic_page_terms": [
-    "catalog", "catalogue", "catalogo", "catálogo", "product catalog", "product catalogue",
-    "our products", "product range", "products range", "linha de produtos", "gama de productos",
-    "all products", "todos os produtos", "todos los productos", "search results", "resultados de busca",
-    "product list", "lista de produtos", "listado de productos"
+    "catalog",
+    "catalogue",
+    "catalogo",
+    "catálogo",
+    "product catalog",
+    "product catalogue",
+    "our products",
+    "product range",
+    "products range",
+    "linha de produtos",
+    "gama de productos",
+    "all products",
+    "todos os produtos",
+    "todos los productos",
+    "search results",
+    "resultados de busca",
+    "product list",
+    "lista de produtos",
+    "listado de productos"
   ],
   "related_section_terms": [
-    "related products", "related items", "similar products", "recommended products", "recommended items",
-    "you may also like", "customers also viewed", "other products", "outros produtos", "productos relacionados",
-    "produtos relacionados", "itens relacionados", "accesorios relacionados", "accessories related"
+    "related products",
+    "related items",
+    "similar products",
+    "recommended products",
+    "recommended items",
+    "you may also like",
+    "customers also viewed",
+    "other products",
+    "outros produtos",
+    "productos relacionados",
+    "produtos relacionados",
+    "itens relacionados",
+    "accesorios relacionados",
+    "accessories related"
   ],
   "compatibility_terms": [
-    "compatible with", "compatibility with", "fits model", "fits models", "fits the", "for model", "for models",
-    "replacement for", "replaces", "suitable for", "works with", "designed for", "use with",
-    "compatível com", "compativel com", "serve para", "para o modelo", "para os modelos", "substitui",
-    "compatible con", "para modelo", "para modelos", "reemplazo para", "apto para"
+    "compatible with",
+    "compatibility with",
+    "fits model",
+    "fits models",
+    "fits the",
+    "for model",
+    "for models",
+    "replacement for",
+    "replaces",
+    "suitable for",
+    "works with",
+    "designed for",
+    "use with",
+    "compatível com",
+    "compativel com",
+    "serve para",
+    "para o modelo",
+    "para os modelos",
+    "substitui",
+    "compatible con",
+    "para modelo",
+    "para modelos",
+    "reemplazo para",
+    "apto para"
   ],
   "model_token_ignore_regexes": [
     "^[0-9]+(?:V|W|KW|AH|MAH|HP|MM|CM|BAR|PSI|RPM|HZ|KG|G|ML|NM|A|VAC|VDC)$",
@@ -67,6 +122,8 @@
     "REJECT_GENERIC_NO_TARGET_BLOCK",
     "REJECT_NON_ISOLATABLE",
     "REJECT_WEAK_IDENTITY",
-    "REJECT_EXTRACT_FAILED"
+    "REJECT_EXTRACT_FAILED",
+    "ACCEPT_SOURCE_SIEVE",
+    "REJECT_QUERY_IDENTITY_DRIFT"
   ]
 }

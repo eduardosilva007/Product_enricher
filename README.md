@@ -1,4 +1,4 @@
-# Product Enricher — Collection R9.6p4
+# Product Enricher — Collection R9.6p5
 
 ## Core invariant
 
@@ -58,8 +58,8 @@ Classification
 
 ### Bright Data
 
-- **Only Google Light JSON / `parsed_light` is supported.**
-- Full JSON, Parsed Bing, Markdown, Raw HTML, and Screenshot are intentionally not supported in this pipeline.
+- **Only Google Light JSON is supported: `format=json` + `data_format=parsed_light`.**
+- Raw HTML (`format=raw`), Full JSON, Parsed Bing, Markdown, and Screenshot are intentionally not supported in this pipeline.
 - Only `organic[]` feeds source candidates.
 - `general.query`, `general.detected_query`, and `spelling` are audited before Source Sieve.
 - Unsafe query drift blocks the SERP before any URL enrichment.
@@ -138,3 +138,7 @@ pip install -r requirements.txt
 ```
 
 For current operations, collection and classification should still be evaluated independently when changing providers or collection logic.
+
+## R9.6p6 classification recovery
+
+R9.6p6 separates model representations by purpose: the original model is never changed, identity keeps structural SKU syntax, and the Search query receives a punctuation-clean model with separators converted to spaces. It also adds deterministic TYPE recovery from existing taxonomy-evidence rules, explicit `POWER TOOL COMBO KIT` handling, and title preservation for unresolved items. The Base Final shows only `Título Real`; detailed title-reference metadata remains available in the consolidated/audit output.

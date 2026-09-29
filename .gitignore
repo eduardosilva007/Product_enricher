@@ -99,7 +99,9 @@ backup/
 backups/
 temp/
 tmp/
-
+__pycache__/
+docs/
+outputs/
 Market Assessment/
 _BACKUP - SCRIPT ATUAL - PIPELINE ENRIQUECEDOR DE PRODUTOS/
 

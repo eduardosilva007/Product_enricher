@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-15-r9.5-hf2-evidence-taxonomy",
+  "VERSION": "2026-09-29-r9.6p6-classification-recovery",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -8,14 +8,14 @@
     "output": "Classificacao_v3.xlsx",
     "inventory_output": "Inventario_v3.xlsx",
     "input": "Base de Produtos.xlsx",
-    "collection_report": "Coleta_Tavily_R9_5.xlsx",
-    "precollection_report": "Pre_Coleta_R9_5.xlsx",
+    "collection_report": "Coleta_Search_R9_6.xlsx",
+    "precollection_report": "Pre_Coleta_R9_6.xlsx",
     "pending_with_cache": "Pendentes_Com_Cache.xlsx",
     "pending_without_cache": "Pendentes_Sem_Cache.xlsx",
     "baseline_backup_dir": "Backups_Baseline",
     "baseline_audit": "Auditoria_Baseline_R9_5.csv",
     "collection_policy": "collection_quality_policy.json",
-    "collection_report_cache_rebuild": "Curadoria_Cache_R9_5.xlsx"
+    "collection_report_cache_rebuild": "Curadoria_Cache_R9_6.xlsx"
   },
   "evidence": {
     "max_results": 5,
@@ -71,45 +71,11 @@
       "^\\d+(?:[.,]\\d+)?VDC$",
       "^\\d+(?:[.,]\\d+)?HZ$"
     ],
-    "max_trailing_spec_suffixes": 2
-  },
-  "tavily": {
-    "requests_per_minute": 30,
-    "retries": 4,
-    "retry_backoff_seconds": [
-      2,
-      5,
-      10,
-      20
-    ],
-    "timeout_seconds": 60,
-    "search": {
-      "primary_query_template": "{brand} {search_model} product specifications",
-      "fallback_query_template": "{brand} {search_model} product details manual technical data",
-      "rescue_query_template": "{brand} {search_model} manual datasheet specifications technical data",
-      "primary_depth": "basic",
-      "fallback_depth": "basic",
-      "rescue_depth": "advanced",
-      "fallback_enabled": true,
-      "rescue_enabled": true,
-      "chunks_per_source": 2,
-      "max_results": 5,
-      "include_raw_content": false,
-      "include_usage": true,
-      "auto_parameters": false,
-      "exact_match": false,
-      "open_web_no_domain_country_language_filters": true
-    },
-    "extract": {
-      "enabled": true,
-      "query_template": "{brand} {search_model} product model specifications technical data",
-      "depth": "basic",
-      "chunks_per_source": 3,
-      "max_urls_per_product": 5,
-      "format": "markdown",
-      "timeout_seconds": 30,
-      "include_usage": true
-    }
+    "max_trailing_spec_suffixes": 2,
+    "normalize_search_model_separators": true,
+    "trailing_operational_phrase_regexes": [
+      "\\s+TYPE\\s+[A-Z0-9]{1,4}$"
+    ]
   },
   "llm": {
     "route": [
@@ -207,5 +173,57 @@
   },
   "collection_quality": {
     "require_curated_evidence_for_classification": true
+  },
+  "collection": {
+    "provider": "tavily",
+    "query_template": "{brand} {search_model}",
+    "hard_limits": {
+      "max_requests_per_product": 1,
+      "allow_automatic_retry": false,
+      "allow_secondary_search": false,
+      "allow_provider_failover": false,
+      "allow_extract": false
+    },
+    "providers": {
+      "tavily": {
+        "base_url": "https://api.tavily.com/search",
+        "api_key_env": "TAVILY_API_KEY",
+        "requests_per_minute": 30,
+        "timeout_seconds": 60,
+        "search_depth": "basic",
+        "max_results": 10,
+        "chunks_per_source": 3,
+        "include_raw_content": "text"
+      },
+      "serper": {
+        "base_url": "https://google.serper.dev/search",
+        "api_key_env": "SERPER_API_KEY",
+        "requests_per_minute": 50,
+        "timeout_seconds": 60,
+        "max_results": 10
+      },
+      "brightdata": {
+        "base_url": "https://api.brightdata.com/request",
+        "api_key_env": "BRIGHTDATA_API_KEY",
+        "zone_env": "BRIGHTDATA_ZONE",
+        "zone": "",
+        "requests_per_minute": 30,
+        "timeout_seconds": 60,
+        "max_results": 10,
+        "data_format": "parsed_light",
+        "format": "json"
+      }
+    },
+    "local_enrichment": {
+      "enabled": true,
+      "max_urls_per_product": 2,
+      "snippet_sufficient_chars": 220,
+      "timeout_seconds": 12,
+      "max_bytes": 1500000,
+      "max_text_chars": 30000,
+      "user_agent": "Mozilla/5.0 ProductEnricher/1.0",
+      "engine": "trafilatura",
+      "dynamic_browser_fallback": false
+    }
   }
 }

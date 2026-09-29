@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p4
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p6
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -54,8 +54,8 @@ from urllib.parse import quote, unquote, urlencode, urlparse
 PIPELINE_VERSION = "3.9.5-hf3.1"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3.1p5 R9.6 Bright Data JSON Contract Fix"
-COLLECTION_ENGINE_VERSION = "2026-09-25-r9.6p5-brightdata-json-contract"
+BUILD_LABEL = "v3.9.5-HF3.1p6 R9.6 Classification Recovery + Clean Identity"
+COLLECTION_ENGINE_VERSION = "2026-09-29-r9.6p6-classification-recovery"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
 
@@ -238,7 +238,36 @@ def derive_search_model(brand: str, model: str, cfg: Dict[str, Any]) -> str:
                 candidates.sort(key=lambda x: (len(compact(x)), len(x)), reverse=True)
                 work = candidates[0]
 
+    # Search Model: pontuação estrutural vira espaço, sem concatenar tokens.
+    # O Modelo original e a business_key permanecem intactos. A chave de identidade
+    # continua usando compact(), que remove separadores por completo.
+    phrase_patterns = [
+        safe(x) for x in (icfg.get("trailing_operational_phrase_regexes", []) or []) if safe(x)
+    ]
+    for expr in phrase_patterns:
+        try:
+            m = re.search(expr, work, flags=re.I)
+        except re.error:
+            continue
+        if m and m.end() == len(work):
+            core = work[:m.start()].rstrip(" -_./")
+            core_c = compact(core)
+            if len(core_c) >= 5 and re.search(r"[a-z]", core_c) and re.search(r"\d", core_c):
+                work = core
+                break
+
     return re.sub(r"\s+", " ", work).strip() or original
+
+
+def derive_query_model(brand: str, model: str, cfg: Dict[str, Any]) -> str:
+    """Versão limpa somente para a consulta ao Search provider."""
+    work = derive_search_model(brand, model, cfg)
+    icfg = cfg.get("identity", {}) or {}
+    if not bool(icfg.get("normalize_search_model_separators", True)):
+        return work
+    work = strip_accents(work).replace("_", " ")
+    work = re.sub(r"[^\w]+", " ", work, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", work).strip() or derive_search_model(brand, model, cfg)
 
 
 def canonical_display(text: str) -> str:
@@ -405,7 +434,7 @@ class Rules:
             "PRODUCT_TYPES", "POWER_RULES", "TAXONOMY_PAIRS", "TAXONOMY_RULES",
             "TYPE_POLICY", "RESOLUTION_POLICY", "CLASSIFICATION_POLICY",
             "SOURCE_RULES", "COMPONENT_CONTEXT_RULES",
-            "COMPOSITE_TYPE_RULES", "TAXONOMY_EVIDENCE_RULES",
+            "COMPOSITE_TYPE_RULES", "TAXONOMY_EVIDENCE_RULES", "COMBO_KIT_POLICY",
         )
         semantic_payload = {k: self.raw.get(k) for k in semantic_keys}
         self.hash = stable_json_hash(semantic_payload)
@@ -632,7 +661,7 @@ class Rules:
             "TAXONOMY_PAIRS", "PRODUCT_TYPES", "POWER_RULES",
             "SOURCE_RULES", "TAXONOMY_RULES", "COMPONENT_CONTEXT_RULES",
             "TYPE_POLICY", "RESOLUTION_POLICY", "CLASSIFICATION_POLICY",
-            "COMPOSITE_TYPE_RULES", "TAXONOMY_EVIDENCE_RULES", "QUALITY_GATES",
+            "COMPOSITE_TYPE_RULES", "TAXONOMY_EVIDENCE_RULES", "COMBO_KIT_POLICY", "QUALITY_GATES",
         }
         for key in self.raw:
             if key not in allowed_root:
@@ -2266,7 +2295,7 @@ def search_product_once(
     limiter: RateLimiter,
     provider: str,
 ) -> Dict[str, Any]:
-    """R9.6p4: 1 Search -> Query Gate -> Source Sieve -> Evidence Enrichment -> Isolation.
+    """R9.6p6: 1 Search -> Query Gate -> Source Sieve -> Evidence Enrichment -> Isolation.
 
     Contratos absolutos:
     - no máximo 1 HTTP request ao Search provider por produto;
@@ -2282,9 +2311,10 @@ def search_product_once(
 
     provider = provider.casefold().strip()
     search_model = derive_search_model(brand, model, cfg)
+    query_model = derive_query_model(brand, model, cfg)
     ccfg = _collection_runtime_cfg(cfg)
     template = safe(ccfg.get("query_template")) or "{brand} {search_model}"
-    query = template.format(brand=brand, model=model, search_model=search_model).strip()
+    query = template.format(brand=brand, model=model, search_model=query_model).strip()
     if not query:
         raise ValueError("Query de coleta vazia")
 
@@ -2642,7 +2672,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
 
     print()
     print("=" * 86)
-    print(" R9.6p5 PRÉ-COLETA — 1 SEARCH / SOURCE SIEVE / EVIDENCE ENRICHMENT")
+    print(" R9.6p6 PRÉ-COLETA — 1 SEARCH / SOURCE SIEVE / EVIDENCE ENRICHMENT")
     print("=" * 86)
     for label in [
         "Linhas recebidas", "Linhas válidas", "Linhas inválidas", "Produtos únicos por business_key",
@@ -3276,7 +3306,7 @@ class DeterministicEngine:
                 found.append(target)
         return found
 
-    def _type_hits_for_source(self, src: Source) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+    def _type_hits_for_source(self, src: Source, brand: str = "", model: str = "") -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
         title_fold = strip_accents(src.title).casefold()
         body_fold = strip_accents(src.content).casefold()
         combined = f"{title_fold}\n{body_fold}"
@@ -3300,6 +3330,49 @@ class DeterministicEngine:
                 fields[typ].append("TITLE")
             if any(p.search(body_fold) for a, p in patterns if a in chosen):
                 fields[typ].append("BODY")
+
+        # Recovery Ladder p6: TAXONOMY_EVIDENCE_RULES também podem GERAR o
+        # candidato de TYPE quando a própria regra já ancora Brand/Model/alias.
+        # Antes elas só eram usadas depois que TYPE já existia, criando o dead-end
+        # TAXONOMY_GAP_NO_ALIAS mesmo com evidência suficiente.
+        brand_key = canonical_display(brand)
+        model_for_rule = derive_search_model(brand, model, self.cfg) if model else safe(model)
+        for rule in self.rules.taxonomy_evidence_rules:
+            typ = safe(rule.get("primary_type"))
+            if typ not in self.rules.types:
+                continue
+            rule_brand = canonical_display(rule.get("brand"))
+            if rule_brand and rule_brand != brand_key:
+                continue
+            model_regex = safe(rule.get("model_regex"))
+            model_match_rule = False
+            if model_regex:
+                try:
+                    model_match_rule = bool(re.search(model_regex, model_for_rule, flags=re.I))
+                except re.error:
+                    model_match_rule = False
+                if not model_match_rule:
+                    continue
+            neg = [safe(x) for x in (rule.get("negative_aliases", []) or []) if safe(x)]
+            if neg and any(contains_alias_prepared(combined, x) for x in neg):
+                continue
+            aliases = [safe(x) for x in (rule.get("aliases", []) or []) if safe(x)]
+            matched_aliases = [x for x in aliases if contains_alias_prepared(combined, x)]
+            if aliases and not matched_aliases:
+                continue
+            if not aliases and not model_match_rule:
+                continue
+            hits.setdefault(typ, [])
+            marker = "[TAXONOMY_MODEL_RULE]" if model_match_rule and not matched_aliases else "[TAXONOMY_EVIDENCE_RULE]"
+            if marker not in hits[typ]:
+                hits[typ].append(marker)
+            if matched_aliases:
+                if any(contains_alias_prepared(title_fold, x) for x in matched_aliases):
+                    fields[typ].append("TITLE")
+                if any(contains_alias_prepared(body_fold, x) for x in matched_aliases):
+                    fields[typ].append("BODY")
+            elif model_match_rule:
+                fields[typ].append("MODEL_RULE")
 
         for typ in self._composite_candidates(combined):
             hits.setdefault(typ, []).append("[COMPOSITE_RULE]")
@@ -3394,7 +3467,7 @@ class DeterministicEngine:
         # páginas sem o SKU alvo. TYPE/POWER precisam estar ancorados ao modelo.
         explicit_levels = {"STRONG", "PROBABLE"}
         for src in sources:
-            src.type_hits, src.type_evidence_fields = self._type_hits_for_source(src)
+            src.type_hits, src.type_evidence_fields = self._type_hits_for_source(src, brand, model)
             src.power_hits, src.power_evidence_fields = self._power_hits_for_source(src)
 
             anchored_types = {
@@ -3534,15 +3607,44 @@ class DeterministicEngine:
         )
 
 
+def _combo_kit_components(rules: Rules, s1: Stage1Result) -> List[str]:
+    """Retorna componentes de um POWER TOOL COMBO KIT explicitamente comprovado.
+
+    Não usa apenas a palavra 'kit': exige sinal de combo no texto target e pelo
+    menos DOIS tipos físicos elegíveis explicitamente sustentados no mesmo alvo.
+    Assim drill+bateria+carregador continua sendo DRILL, não combo kit.
+    """
+    policy = rules.raw.get("COMBO_KIT_POLICY", {}) or {}
+    if not bool(policy.get("enabled", True)):
+        return []
+    eligible = {safe(x) for x in (policy.get("eligible_primary_types", []) or []) if safe(x)}
+    combo_terms = [safe(x) for x in (policy.get("combo_terms", []) or []) if safe(x)]
+    rank = DeterministicEngine.IDENTITY_RANK
+    target_sources = [s for s in s1.sources if rank.get(s.relevance, 0) >= rank.get("PROBABLE", 3)]
+    for src in target_sources:
+        folded = norm_text(f"{src.title}\n{src.content[:1200]}")
+        if not any(contains_alias_prepared(folded, term) for term in combo_terms):
+            continue
+        explicit = {
+            t for t in s1.type_candidates
+            if t in eligible
+            and float(src.type_scores.get(t, 0.0) or 0.0) > 0.0
+            and ("TITLE" in (src.type_evidence_fields.get(t, []) or []) or "BODY" in (src.type_evidence_fields.get(t, []) or []))
+        }
+        if len(explicit) >= int(policy.get("min_distinct_primary_types", 2) or 2):
+            return sorted(explicit)
+    return []
+
+
 def multi_product_target_detected(rules: Rules, s1: Stage1Result) -> bool:
-    """Detecta kit/combo/múltiplos produtos antes de escolher um constituinte."""
+    """Detecta múltiplos produtos, exceto combo kit explicitamente modelado."""
+    if _combo_kit_components(rules, s1):
+        return False
     rank = DeterministicEngine.IDENTITY_RANK
     target_sources = [s for s in s1.sources if rank.get(s.relevance, 0) >= rank.get("PROBABLE", 3)]
     if not target_sources:
         return False
-    physical = {t for t in s1.type_candidates if t not in rules.component_types}
-
-    # Duas classes físicas explícitas no mesmo título target => multi-produto.
+    physical = {t for t in s1.type_candidates if t not in rules.component_types and t != "POWER TOOL COMBO KIT"}
     for src in target_sources:
         explicit = {
             t for t in physical
@@ -3551,17 +3653,6 @@ def multi_product_target_detected(rules: Rules, s1: Stage1Result) -> bool:
         }
         if len(explicit) >= 2:
             return True
-
-    combined = "\n".join(f"{s.title}\n{s.content[:1200]}" for s in target_sources)
-    folded = norm_text(combined)
-    combo_signal = any(term in folded for term in [
-        "combo kit", "combo set", "tool combo", "cordless combo", "industrial combo kit",
-        "kit combinado", "kit de herramientas", "kit de ferramentas", "set de herramientas",
-        "set din", "set scule", "multi tool kit",
-    ])
-    piece_signal = bool(re.search(r"\b(?:2|3|4|5|6|7|8|9|10)\s*(?:pcs?|pieces?|piezas?|pecas|peças|scule)\b", folded))
-    if combo_signal and (len(physical) >= 2 or piece_signal):
-        return True
     return False
 
 
@@ -5697,6 +5788,7 @@ def finalize_product(
     run_id: str,
 ) -> Dict[str, Any]:
     key = business_key(brand, model)
+    combo_components = _combo_kit_components(rules, s1)
     funnel = candidate_funnel(rules, s1) if s1.type_candidates else CandidateFunnelResult([], {}, "NO_STAGE1_CANDIDATE", blocked=True)
 
     ref_title, ref_url, ref_identity, ref_decision = choose_reference_title(raw, brand, model, cfg)
@@ -5741,12 +5833,44 @@ def finalize_product(
         "Processed At": now_iso(),
     }
 
+    def _output_title(primary_title: str = "", primary_url: str = "") -> Tuple[str, str]:
+        # Base Final exibe somente o título que sustentou a classificação.
+        # Se não houve classificação, preserva o melhor título Search para revisão humana.
+        return (safe(primary_title) or ref_title, safe(primary_url) or ref_url)
+
+    if combo_components:
+        typ = "POWER TOOL COMBO KIT"
+        power = s1.power or "UNKNOWN"
+        tax_evidence = "\n".join(f"{x.title} {x.content[:1200]}" for x in s1.sources)
+        cg, fam, tax_reason = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
+        title, url = _output_title(*choose_title(s1.sources, []))
+        return {
+            **common,
+            "Resolution State": "RESOLVED",
+            "Stage": "COMBO_RULE",
+            "O que é (Tipo)": typ,
+            "Alimentação": power,
+            "Category General": cg,
+            "FAMILY": fam,
+            "Título Real": title,
+            "Fonte URL": url,
+            "Review Required": "NÃO",
+            "Reason Code": "POWER_TOOL_COMBO_KIT",
+            "Motivo": f"Combo kit explícito com múltiplas ferramentas principais: {', '.join(combo_components)} | {tax_reason}",
+            "LLM Provider": "",
+            "LLM Model": "",
+            "LLM Cache": "",
+            "LLM Prompt Tokens": 0,
+            "LLM Completion Tokens": 0,
+            "LLM Total Tokens": 0,
+        }
+
     if s1.state == "RESOLVED_RULE":
         typ = s1.product_type or "REVISAR"
         power = s1.power or "UNKNOWN"
         tax_evidence = taxonomy_evidence_text(s1.sources, typ)
         cg, fam, tax_reason = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
-        title, url = choose_title_for_type(s1.sources, typ)
+        title, url = _output_title(*choose_title_for_type(s1.sources, typ))
         return {
             **common,
             "Resolution State": "RESOLVED",
@@ -5776,7 +5900,7 @@ def finalize_product(
             power = s1.power or "UNKNOWN"
             tax_evidence = taxonomy_evidence_text(s1.sources, typ)
             cg, fam, tax_reason = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
-            title, url = choose_title_for_type(s1.sources, typ)
+            title, url = _output_title(*choose_title_for_type(s1.sources, typ))
             return {
                 **common,
                 "Resolution State": "RESOLVED",
@@ -5801,7 +5925,7 @@ def finalize_product(
     preflight_reason = llm_preflight_rejection_reason(rules, s1)
     if preflight_reason:
         # Mantém título apenas de fonte target; para taxonomy gap não inventa tipo.
-        title, url = choose_title(s1.sources, [])
+        title, url = _output_title(*choose_title(s1.sources, []))
         reason_text = {
             "LOW_TARGET_EVIDENCE":
                 "Stage 0 não encontrou fonte PROBABLE/STRONG do SKU alvo; candidato a recoleta seletiva.",
@@ -5836,7 +5960,7 @@ def finalize_product(
         }
 
     if llm is None:
-        title, url = choose_title(s1.sources, [])
+        title, url = _output_title(*choose_title(s1.sources, []))
         return {
             **common,
             "Resolution State": "REVIEW",
@@ -5977,7 +6101,6 @@ BASELINE_FINAL_COLUMNS = [
     "Category General",
     "FAMILY",
     "Título Real",
-    "Título Referência",
     "Próxima Ação",
     "Status",
     "Revisão",
