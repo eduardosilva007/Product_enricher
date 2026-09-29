@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-29-r9.6p6-classification-recovery",
+  "VERSION": "2026-09-29-r9.6p7-import-noise-taxonomy",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -75,7 +75,9 @@
     "normalize_search_model_separators": true,
     "trailing_operational_phrase_regexes": [
       "\\s+TYPE\\s+[A-Z0-9]{1,4}$"
-    ]
+    ],
+    "auto_approval_requires_strong_identity": true,
+    "strong_identity_requires_brand_in_primary_field": true
   },
   "llm": {
     "route": [

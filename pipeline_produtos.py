@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p6
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p7
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -54,8 +54,8 @@ from urllib.parse import quote, unquote, urlencode, urlparse
 PIPELINE_VERSION = "3.9.5-hf3.1"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3.1p6 R9.6 Classification Recovery + Clean Identity"
-COLLECTION_ENGINE_VERSION = "2026-09-29-r9.6p6-classification-recovery"
+BUILD_LABEL = "v3.9.5-HF3.1p7 R9.6 Import Noise Taxonomy + Strong Identity"
+COLLECTION_ENGINE_VERSION = "2026-09-29-r9.6p7-import-noise-taxonomy"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
 
@@ -3086,6 +3086,35 @@ def _model_match_in_field(
     return "", ""
 
 
+def _brand_identity_variants(brand: str) -> List[str]:
+    """Variações determinísticas de marca para identidade.
+
+    Remove apenas sufixos jurídicos empresariais no FINAL do nome (SA, LTD,
+    LLC, INC etc.). Não usa fuzzy e não reduz marcas compostas reais como
+    AIR KING ou NEW HOLLAND a um token genérico.
+    """
+    raw = strip_accents(safe(brand)).upper().replace("&", " ")
+    tokens = re.findall(r"[A-Z0-9]+", raw)
+    if not tokens:
+        return []
+    variants: List[str] = []
+    def add(parts: Sequence[str]) -> None:
+        value = compact(" ".join(parts))
+        if value and value not in variants:
+            variants.append(value)
+    add(tokens)
+    legal = {
+        "SA", "SAS", "LTDA", "LTD", "LLC", "INC", "CORP", "CORPORATION",
+        "CO", "COMPANY", "GMBH", "SRL", "PLC", "BV", "NV", "SPA", "SL",
+        "PTE", "PVT", "LIMITED"
+    }
+    core = list(tokens)
+    while len(core) > 1 and core[-1] in legal:
+        core.pop()
+    add(core)
+    return variants
+
+
 def _source_identity_baseline(
     brand: str,
     model: str,
@@ -3118,12 +3147,16 @@ def _source_identity_baseline(
     else:
         model_match, model_field = "NONE", "NONE"
 
-    brand_c = compact(brand)
+    brand_variants = _brand_identity_variants(brand)
     title_c = compact(title)
     url_c = compact(url)
     body_c = compact(content)
-    brand_primary = bool(brand_c and len(brand_c) >= 3 and (brand_c in title_c or brand_c in url_c))
-    brand_body = bool(brand_c and len(brand_c) >= 3 and brand_c in body_c)
+    def _brand_variant_ok(value: str) -> bool:
+        short_alnum = bool(re.search(r"[a-z]", value) and re.search(r"\d", value))
+        return len(value) >= (2 if short_alnum else 3)
+    usable_brand_variants = [v for v in brand_variants if _brand_variant_ok(v)]
+    brand_primary = any(v in title_c or v in url_c for v in usable_brand_variants)
+    brand_body = any(v in body_c for v in usable_brand_variants)
     brand_any = brand_primary or brand_body
 
     primary_model = model_field in {"TITLE", "URL"}
@@ -3132,8 +3165,10 @@ def _source_identity_baseline(
     numeric_short = bool(core_model.isdigit() and len(core_model) <= 5)
     short_ambiguous = bool(core_model and len(core_model) <= max(1, int(short_model_requires_brand_length or 5)))
 
-    if primary_model and brand_any:
+    if primary_model and brand_primary:
         level, score, weight = "STRONG", 100, 1.0
+    elif primary_model and brand_body and not numeric_short and not short_ambiguous:
+        level, score, weight = "PROBABLE", 88, 0.82
     elif primary_model and not numeric_short and not short_ambiguous:
         level, score, weight = "PROBABLE", 85, 0.80
     elif body_model and brand_primary:
@@ -3307,8 +3342,10 @@ class DeterministicEngine:
         return found
 
     def _type_hits_for_source(self, src: Source, brand: str = "", model: str = "") -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
-        title_fold = strip_accents(src.title).casefold()
-        body_fold = strip_accents(src.content).casefold()
+        # Classificação lexical usa a mesma normalização estrutural da busca:
+        # pontuação vira separador, sem fuzzy nem reordenação semântica.
+        title_fold = norm_text(src.title)
+        body_fold = norm_text(src.content)
         combined = f"{title_fold}\n{body_fold}"
         hits: Dict[str, List[str]] = {}
         fields: Dict[str, List[str]] = defaultdict(list)
@@ -3394,8 +3431,8 @@ class DeterministicEngine:
         return hits, {k: list(dict.fromkeys(v)) for k, v in fields.items()}
 
     def _power_hits_for_source(self, src: Source) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
-        title_fold = strip_accents(src.title).casefold()
-        body_fold = strip_accents(src.content).casefold()
+        title_fold = norm_text(src.title)
+        body_fold = norm_text(src.content)
         combined = f"{title_fold}\n{body_fold}"
         hits: Dict[str, List[str]] = {}
         fields: Dict[str, List[str]] = defaultdict(list)
@@ -3465,7 +3502,7 @@ class DeterministicEngine:
 
         # R9.3: candidato não nasce mais de ruído de busca ou de repetição entre
         # páginas sem o SKU alvo. TYPE/POWER precisam estar ancorados ao modelo.
-        explicit_levels = {"STRONG", "PROBABLE"}
+        explicit_levels = {"STRONG"}
         for src in sources:
             src.type_hits, src.type_evidence_fields = self._type_hits_for_source(src, brand, model)
             src.power_hits, src.power_evidence_fields = self._power_hits_for_source(src)
@@ -3526,11 +3563,11 @@ class DeterministicEngine:
             support_ids = set(all_type_hits.get(typ, []))
             explicit = any(s.source_id in support_ids and s.relevance in explicit_levels for s in sources)
             repeated = len(support_ids) >= 2
-            if explicit or repeated:
+            if explicit:
                 product_type = typ
-                reasons.append(f"TYPE_UNIQUE:{typ}; support={sorted(support_ids)}; explicit={explicit}; repeated={repeated}")
+                reasons.append(f"TYPE_UNIQUE_STRONG:{typ}; support={sorted(support_ids)}; strong={explicit}; repeated={repeated}")
             else:
-                reasons.append(f"TYPE_SINGLE_CONTEXT:{typ}; support={sorted(support_ids)}")
+                reasons.append(f"TYPE_CANDIDATE_WITHOUT_STRONG_IDENTITY:{typ}; support={sorted(support_ids)}; repeated={repeated}")
         elif len(type_candidates) > 1:
             reasons.append(f"TYPE_AMBIGUOUS:{type_candidates}")
         else:
@@ -3545,11 +3582,11 @@ class DeterministicEngine:
             support_ids = set(all_power_hits.get(candidate, []))
             explicit = any(s.source_id in support_ids and s.relevance in explicit_levels for s in sources)
             repeated = len(support_ids) >= 2
-            if explicit or repeated:
+            if explicit:
                 power = candidate
-                reasons.append(f"POWER_UNIQUE:{candidate}; support={sorted(support_ids)}; explicit={explicit}; repeated={repeated}")
+                reasons.append(f"POWER_UNIQUE_STRONG:{candidate}; support={sorted(support_ids)}; strong={explicit}; repeated={repeated}")
             else:
-                reasons.append(f"POWER_SINGLE_CONTEXT:{candidate}; support={sorted(support_ids)}")
+                reasons.append(f"POWER_CANDIDATE_WITHOUT_STRONG_IDENTITY:{candidate}; support={sorted(support_ids)}; repeated={repeated}")
         elif len(power_candidates) > 1:
             reasons.append(f"POWER_AMBIGUOUS:{power_candidates}")
         else:
@@ -3620,7 +3657,7 @@ def _combo_kit_components(rules: Rules, s1: Stage1Result) -> List[str]:
     eligible = {safe(x) for x in (policy.get("eligible_primary_types", []) or []) if safe(x)}
     combo_terms = [safe(x) for x in (policy.get("combo_terms", []) or []) if safe(x)]
     rank = DeterministicEngine.IDENTITY_RANK
-    target_sources = [s for s in s1.sources if rank.get(s.relevance, 0) >= rank.get("PROBABLE", 3)]
+    target_sources = [s for s in s1.sources if rank.get(s.relevance, 0) >= rank.get("STRONG", 4)]
     for src in target_sources:
         folded = norm_text(f"{src.title}\n{src.content[:1200]}")
         if not any(contains_alias_prepared(folded, term) for term in combo_terms):
@@ -3634,6 +3671,38 @@ def _combo_kit_components(rules: Rules, s1: Stage1Result) -> List[str]:
         if len(explicit) >= int(policy.get("min_distinct_primary_types", 2) or 2):
             return sorted(explicit)
     return []
+
+
+def choose_combo_title(rules: Rules, s1: Stage1Result) -> Tuple[str, str]:
+    """Título da própria fonte STRONG que comprovou o combo multi-tool."""
+    policy = rules.raw.get("COMBO_KIT_POLICY", {}) or {}
+    eligible = {safe(x) for x in (policy.get("eligible_primary_types", []) or []) if safe(x)}
+    combo_terms = [safe(x) for x in (policy.get("combo_terms", []) or []) if safe(x)]
+    min_types = int(policy.get("min_distinct_primary_types", 2) or 2)
+    candidates: List[Source] = []
+    for src in s1.sources:
+        if src.relevance != "STRONG":
+            continue
+        folded = norm_text(f"{src.title}\n{src.content[:1200]}")
+        if not any(contains_alias_prepared(folded, term) for term in combo_terms):
+            continue
+        explicit = {
+            t for t in s1.type_candidates
+            if t in eligible and float(src.type_scores.get(t, 0.0) or 0.0) > 0.0
+        }
+        if len(explicit) >= min_types:
+            candidates.append(src)
+    if not candidates:
+        return "", ""
+    candidates.sort(
+        key=lambda src: (
+            src.identity_score,
+            sum(float(src.type_scores.get(t, 0.0) or 0.0) for t in s1.type_candidates),
+            0 if src.quality_flags else 1,
+        ),
+        reverse=True,
+    )
+    return candidates[0].title, candidates[0].url
 
 
 def multi_product_target_detected(rules: Rules, s1: Stage1Result) -> bool:
@@ -3733,7 +3802,7 @@ def _type_requires_specific_power_rules(rules: Rules, typ: str) -> bool:
     return "*" not in powers and "UNKNOWN" not in powers
 
 
-def _single_funnel_candidate_can_resolve(rules: Rules, s1: Stage1Result, typ: str) -> bool:
+def _single_funnel_candidate_can_resolve(rules: Rules, s1: Stage1Result, typ: str, brand: str = "", model: str = "") -> bool:
     gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
     policy = gate.get("candidate_funnel", {}) or {}
     if not bool(policy.get("single_candidate_can_resolve_without_llm", True)):
@@ -3755,7 +3824,7 @@ def _single_funnel_candidate_can_resolve(rules: Rules, s1: Stage1Result, typ: st
         return False
     power = s1.power or "UNKNOWN"
     tax_evidence = taxonomy_evidence_text(s1.sources, typ)
-    cg, fam, _ = rules.map_taxonomy(typ, power, tax_evidence)
+    cg, fam, _ = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
     return (cg, fam) in rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS")
 
 
@@ -5561,17 +5630,29 @@ def choose_title(sources: List[Source], refs: Sequence[int]) -> Tuple[str, str]:
 
 
 
-def choose_title_for_type(sources: List[Source], typ: str, refs: Sequence[int] = ()) -> Tuple[str, str]:
-    """Escolhe Título Real da melhor fonte target-aware que sustenta o TYPE."""
+def choose_title_for_type(
+    sources: List[Source], typ: str, refs: Sequence[int] = (), min_identity: str = ""
+) -> Tuple[str, str]:
+    """Escolhe o título da fonte que realmente sustenta o TYPE.
+
+    Quando ``min_identity`` é informado (RESOLVED/AUTO_APROVADO), não há
+    fallback para um título genérico: o título precisa vir da própria fonte
+    classificadora e cumprir o gate de identidade.
+    """
     rank = {"STRONG": 4, "PROBABLE": 3, "CONTEXTUAL": 2, "WEAK": 1, "CONFLICT": 0}
     refset = {int(x) for x in refs if isinstance(x, int) and not isinstance(x, bool)}
     candidates = [s for s in sources if float(s.type_scores.get(typ, 0.0) or 0.0) > 0.0]
+    if min_identity:
+        floor = rank.get(safe(min_identity).upper(), 99)
+        candidates = [s for s in candidates if rank.get(s.relevance, 0) >= floor]
     if refset:
         cited_support = [s for s in candidates if s.source_id in refset]
         if cited_support:
             candidates = cited_support
+        elif min_identity:
+            return "", ""
     if not candidates:
-        return choose_title(sources, refs)
+        return ("", "") if min_identity else choose_title(sources, refs)
     candidates.sort(
         key=lambda src: (
             rank.get(src.relevance, 0),
@@ -5828,6 +5909,7 @@ def finalize_product(
         "Stage1.5 Type Candidates": " | ".join(funnel.candidates),
         "Stage1 Type Scores": json.dumps(s1.type_scores, ensure_ascii=False, sort_keys=True),
         "Stage1 Power Candidates": " | ".join(s1.power_candidates),
+        "Classification Identity": s1.identity_best,
         "Rules Hash": rules.hash,
         "Pipeline Version": PIPELINE_VERSION,
         "Processed At": now_iso(),
@@ -5843,9 +5925,10 @@ def finalize_product(
         power = s1.power or "UNKNOWN"
         tax_evidence = "\n".join(f"{x.title} {x.content[:1200]}" for x in s1.sources)
         cg, fam, tax_reason = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
-        title, url = _output_title(*choose_title(s1.sources, []))
+        title, url = choose_combo_title(rules, s1)
         return {
             **common,
+            "Próxima Ação": "CONCLUIDO",
             "Resolution State": "RESOLVED",
             "Stage": "COMBO_RULE",
             "O que é (Tipo)": typ,
@@ -5870,9 +5953,10 @@ def finalize_product(
         power = s1.power or "UNKNOWN"
         tax_evidence = taxonomy_evidence_text(s1.sources, typ)
         cg, fam, tax_reason = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
-        title, url = _output_title(*choose_title_for_type(s1.sources, typ))
+        title, url = choose_title_for_type(s1.sources, typ, min_identity="STRONG")
         return {
             **common,
+            "Próxima Ação": "CONCLUIDO",
             "Resolution State": "RESOLVED",
             "Stage": "RULE",
             "O que é (Tipo)": typ,
@@ -5896,13 +5980,14 @@ def finalize_product(
     # bem sustentado e a alimentação necessária já está resolvida/dispensável.
     if len(funnel.candidates) == 1 and not multi_product_target_detected(rules, s1):
         typ = funnel.candidates[0]
-        if _single_funnel_candidate_can_resolve(rules, s1, typ):
+        if _single_funnel_candidate_can_resolve(rules, s1, typ, brand, model):
             power = s1.power or "UNKNOWN"
             tax_evidence = taxonomy_evidence_text(s1.sources, typ)
             cg, fam, tax_reason = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
-            title, url = _output_title(*choose_title_for_type(s1.sources, typ))
+            title, url = choose_title_for_type(s1.sources, typ, min_identity="STRONG")
             return {
                 **common,
+                "Próxima Ação": "CONCLUIDO",
                 "Resolution State": "RESOLVED",
                 "Stage": "FUNNEL_RULE",
                 "O que é (Tipo)": typ,
@@ -6067,6 +6152,7 @@ def finalize_product(
         }
 
     power = safe(data.get("power"))
+    title, url = choose_title_for_type(s1.sources, typ, refs, min_identity="STRONG")
     tax_evidence = taxonomy_evidence_text(s1.sources, typ, refs)
     cg, fam, tax_reason = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
     review = (cg, fam) not in rules.valid_pairs or (cg, fam) == ("OTHERS", "OTHERS")
@@ -6075,6 +6161,7 @@ def finalize_product(
     return {
         **base_llm,
         "Raw State": "RAW_OK",
+        "Próxima Ação": "CONCLUIDO" if not review else common.get("Próxima Ação", "LLM_COM_CANDIDATOS_OU_REVISAO"),
         "Resolution State": "REVIEW" if review else "RESOLVED",
         "Stage": "LLM",
         "O que é (Tipo)": typ,
@@ -6810,6 +6897,9 @@ def _record_is_accepted(rec: Dict[str, Any]) -> bool:
     if not typ or typ in {"REVISAR", "UNKNOWN"}:
         return False
     if not cg or not fam or (cg, fam) == ("OTHERS", "OTHERS"):
+        return False
+    identity = safe(rec.get("Classification Identity")).upper()
+    if identity and identity != "STRONG":
         return False
     return True
 
@@ -7898,6 +7988,7 @@ def run_pipeline(
                             "Marca": brand, "Modelo": model_, "Raw State": raw.state,
                             "Stage1 Type Candidates": " | ".join(s1.type_candidates),
                             "Stage1 Power Candidates": " | ".join(s1.power_candidates),
+        "Classification Identity": s1.identity_best,
                             "Rules Hash": rules.hash, "Pipeline Version": PIPELINE_VERSION,
                             "Processed At": now_iso(), "Resolution State": "REVIEW",
                             "Stage": "LLM_FORMAT_REVIEW", "O que é (Tipo)": s1.product_type or "REVISAR",

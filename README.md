@@ -1,4 +1,4 @@
-# Product Enricher — Collection R9.6p5
+# Product Enricher — R9.6p7 Import Noise Taxonomy + Strong Identity
 
 ## Core invariant
 
@@ -142,3 +142,14 @@ For current operations, collection and classification should still be evaluated 
 ## R9.6p6 classification recovery
 
 R9.6p6 separates model representations by purpose: the original model is never changed, identity keeps structural SKU syntax, and the Search query receives a punctuation-clean model with separators converted to spaces. It also adds deterministic TYPE recovery from existing taxonomy-evidence rules, explicit `POWER TOOL COMBO KIT` handling, and title preservation for unresolved items. The Base Final shows only `Título Real`; detailed title-reference metadata remains available in the consolidated/audit output.
+
+
+## R9.6p7 import-noise taxonomy and approval gate
+
+R9.6p7 hardens the classification stage for noisy import datasets. A classification can only become `AUTO_APROVADO` when the supporting source has `STRONG` identity: target Brand + structural Model must be anchored in the source TITLE/URL. Exact model matches without the target brand may still be retained for review, but cannot auto-approve.
+
+Fan/cooler/industrial-blower noise is explicitly routed away from garden-equipment categories and into `OTHERS` with a physical family such as `AXIAL FAN`, `COOLING FAN`, `FAN BLADE`, `FAN MODULE`, `FAN MOTOR`, `SUCTION FAN`, `INDUSTRIAL BLOWER`, `VENTURI BLOWER`, or `COOLER`. Generic `BLOWER` is now garden/power-tool specific.
+
+Non-water pump phrases such as windscreen/windshield washer pump, ink pump, fuel pump, oil pump, vacuum pump, and condensate pump are blocked from `WATERPUMP` and use dedicated `OTHERS` families when target identity is strong.
+
+Resolved rows always export `Próxima Ação = CONCLUIDO`. `Título Real` is the title of the STRONG source that actually supported the resolved TYPE; unresolved rows retain the best reference title only for manual review.

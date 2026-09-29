@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## R9.6p7 — Import Noise Taxonomy + Strong Identity (2026-09-29)
+- Requires STRONG Brand+Model identity for deterministic, funnel, combo-kit, and LLM final approval.
+- Keeps PROBABLE sources available for evidence/review but blocks them from `AUTO_APROVADO`.
+- Normalizes legal company suffixes such as SA/LTD/LLC for brand identity without fuzzy matching.
+- Normalizes punctuation before TYPE/POWER lexical matching, improving matches such as `Pneumatic Blower, Venturi`.
+- Restricts garden `BLOWER` to explicit leaf/garden/handheld/backpack/power-tool wording.
+- Adds import-noise taxonomy under `OTHERS`: INDUSTRIAL BLOWER, VENTURI BLOWER, AXIAL FAN, COOLING FAN, FAN BLADE, FAN MODULE, FAN MOTOR, SUCTION FAN, and COOLER.
+- Adds non-water pump guards and dedicated OTHERS families for WINDSCREEN WASHER PUMP, INK PUMP, FUEL PUMP, OIL PUMP, VACUUM PUMP, and CONDENSATE PUMP.
+- Adds `TILLERS | TILLERS` fallback for TILLER when fuel is not explicitly proven.
+- Adds multilingual `POLISHER` coverage for dual-action polishers, plus PRESS TOOL and generic MIXER fallbacks.
+- Makes specific fan/pump physical families outrank generic PART when both are explicitly present.
+- Ensures every truly RESOLVED row has `Próxima Ação = CONCLUIDO`.
+- Ensures resolved `Título Real` comes from the STRONG source that supported the TYPE; unresolved rows still preserve a useful reference title.
+- Preserves the one-product/one-Search-request invariant and all Revisão B.I hard locks.
+
 ## 3.9.5-hf3.1p5 — Bright Data JSON Contract Fix
 
 ### Critical collection fix

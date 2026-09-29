@@ -1,11 +1,11 @@
 {
-  "VERSION": "2026-09-29-v3.0.9-r9.6p6-classification-recovery",
+  "VERSION": "2026-09-29-v3.0.10-r9.6p7-import-noise-taxonomy",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
     "LLM é somente desempate restrito quando existe candidato determinístico de TYPE; sem candidato de TYPE o item vai para REVISAR sem chamada LLM.",
     "LLM nunca cria candidato: PRODUCT_TYPE deve pertencer aos candidatos do Stage 1; POWER deve pertencer aos candidatos de power do Stage 1 ou ser UNKNOWN.",
-    "RESOLVED via LLM exige evidência citada que sustente o TYPE e fonte com identidade mínima PROBABLE; source_id sozinho não é prova.",
+    "RESOLVED via LLM exige evidência citada que sustente o TYPE e fonte com identidade STRONG (Marca+Modelo no campo primário); source_id sozinho não é prova.",
     "Category General e FAMILY são sempre determinísticos por TAXONOMY_RULES/fallback_pair; nenhum provider decide taxonomia.",
     "O que é (Tipo) final só pode ser um PRODUCT_TYPE canônico deste JSON ou REVISAR.",
     "O que é (Tipo) representa o PRIMARY PRODUCT TYPE curto, específico, em inglês e UPPERCASE; não traduzir nem generalizar o tipo identificado.",
@@ -14,7 +14,7 @@
     "EARTH AUGER é PRODUCT_TYPE próprio e sua taxonomia comercial é DRILLERS|DRILLERS.",
     "MISTER e DUSTER são tipos próprios, ambos mapeados para MISTER/DUSTER|MISTER/DUSTER; merchant como Mister Worker não é evidência de MISTER.",
     "BATTERY/CHARGER/ACCESSORY/PART só podem vencer como produto principal quando houver evidência explícita do componente; menções genéricas de kit/acessório não roubam o equipamento físico.",
-    "BLOWER FAN e BLOWER MOTOR são componentes automotivos/HVAC distintos de BLOWER de jardinagem.",
+    "BLOWER de jardinagem exige contexto explícito de leaf/garden/handheld/backpack/power-tool; blower industrial, Venturi, fan/cooler e componentes sempre ficam fora das famílias de jardinagem.",
     "DISC MOWER é implemento agrícola montado e mapeia para OTHERS|HIGH PERFORMANCE FRONT MOWER; não é RIDER nem LAWN MOWER.",
     "Para GENERATOR/INVERTER GENERATOR/INVERTER WELDER, tensão isolada pode ser saída e não define BATTERY/CORDED sem sinal explícito de alimentação.",
     "Página de peça/reposto/compatibilidade é evidência secundária e não transforma automaticamente Brand+Model em ACCESSORY/PART.",
@@ -27,7 +27,11 @@
     "LOW_TARGET_EVIDENCE e TAXONOMY_GAP são estados distintos.",
     "Category General e FAMILY podem usar TAXONOMY_EVIDENCE_RULES somente após TYPE resolvido e com evidência target-anchored; WATERPUMP/LIFT PUMP sem subtipo taxonômico comprovado devem permanecer em REVIEW, nunca cair em família genérica automática.",
     "Título Real é preservado na saída mesmo quando a classificação não fecha; Base Final exibe um único título útil, sem duplicar metadados de Título Referência.",
-    "TAXONOMY_EVIDENCE_RULES podem gerar candidato de TYPE quando Brand/Model/alias já sustentam deterministicamente o mesmo tipo, evitando dead-end TAXONOMY_GAP_NO_ALIAS."
+    "TAXONOMY_EVIDENCE_RULES podem gerar candidato de TYPE quando Brand/Model/alias já sustentam deterministicamente o mesmo tipo, evitando dead-end TAXONOMY_GAP_NO_ALIAS.",
+    "AUTO_APROVADO exige identidade STRONG: Marca e Modelo devem estar ancorados no TITLE/URL da fonte que sustenta o TYPE; modelo isolado sem a marca pode gerar candidato/revisão, nunca aprovação automática.",
+    "Ruído de importação de FAN/COOLER/BLOWER industrial é classificado como OTHERS na FAMILY física específica, evitando inflar PETROL/CORDED/BATTERY garden equipment.",
+    "WATERPUMP não pode nascer de usos não-hídricos de pump (windscreen/windshield washer, ink, fuel, oil, vacuum, condensate); quando explícitos, esses produtos usam TYPE/FAMILY próprios em OTHERS.",
+    "Próxima Ação deve ser CONCLUIDO em todo registro realmente RESOLVED; AUTO_APROVADO nunca pode coexistir com ação de LLM/revisão."
   ],
   "TAXONOMY_PAIRS": [
     {
@@ -697,6 +701,78 @@
     {
       "category_general": "OTHERS",
       "family": "IMPACT DRILL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VENTURI BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AXIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COOLING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN BLADE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN MODULE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SUCTION FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WINDSCREEN WASHER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INK PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FUEL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "OIL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VACUUM PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONDENSATE PUMP"
+    },
+    {
+      "category_general": "TILLERS",
+      "family": "TILLERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRESS TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MIXER"
     }
   ],
   "PRODUCT_TYPES": {
@@ -984,21 +1060,40 @@
     },
     "BLOWER": {
       "aliases": [
-        "blower",
-        "soprador",
-        "soplador"
+        "leaf blower",
+        "garden blower",
+        "handheld blower",
+        "hand-held blower",
+        "backpack blower",
+        "cordless blower",
+        "battery blower",
+        "petrol blower",
+        "gas blower",
+        "gasoline blower",
+        "blower vacuum",
+        "blower vac",
+        "leaf blower vacuum",
+        "soprador de folhas",
+        "soplador de hojas",
+        "soprador a bateria",
+        "soprador à bateria",
+        "soplador a bateria",
+        "soplador a batería",
+        "soprador costal",
+        "soplador de mochila"
       ],
       "negative_aliases": [
         "blower fan",
-        "ac blower fan",
-        "a/c blower fan",
-        "hvac blower fan",
-        "cab blower fan",
-        "cabin blower fan",
-        "tractor blower fan",
         "blower motor",
-        "heater blower motor",
-        "hvac blower motor",
+        "fan motor",
+        "axial blower",
+        "industrial blower",
+        "venturi blower",
+        "pneumatic blower",
+        "explosion-proof blower",
+        "explosion proof blower",
+        "ventilation blower",
+        "centrifugal blower",
         "mist blower",
         "backpack mist blower",
         "mist sprayer"
@@ -1601,6 +1696,27 @@
         "end suction pump",
         "single impeller pump",
         "single-impeller pump"
+      ],
+      "negative_aliases": [
+        "windscreen washer pump",
+        "windshield washer pump",
+        "washer fluid pump",
+        "windshield fluid pump",
+        "windscreen fluid pump",
+        "ink pump",
+        "printing ink pump",
+        "ink circulation pump",
+        "fuel pump",
+        "gasoline fuel pump",
+        "diesel fuel pump",
+        "oil pump",
+        "lubrication oil pump",
+        "lube oil pump",
+        "vacuum pump",
+        "vacuum pumping unit",
+        "condensate pump",
+        "condensation pump",
+        "air conditioner condensate pump"
       ]
     },
     "ROBOTIC LAWN MOWER": {
@@ -1667,7 +1783,11 @@
         "cultivator",
         "rototiller",
         "motocultivador",
-        "tratorito"
+        "tratorito",
+        "rotavator",
+        "rotovator",
+        "rotary tiller",
+        "rotary cultivator"
       ]
     },
     "POLISHER": {
@@ -1676,7 +1796,14 @@
         "variable speed polisher",
         "variable-speed polisher",
         "rotary polisher",
-        "politriz"
+        "politriz",
+        "dual action polisher",
+        "dual-action polisher",
+        "da polisher",
+        "pulidora dual action",
+        "pulidora de doble acción",
+        "pulidora de doble accion",
+        "politriz dual action"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -2041,13 +2168,15 @@
         "heater blower motor",
         "hvac blower motor",
         "motor do soprador",
-        "motor soprador",
-        "motor de ventilador"
+        "motor soprador"
       ],
       "negative_aliases": [
         "leaf blower",
         "cordless blower",
-        "petrol blower"
+        "petrol blower",
+        "fan motor",
+        "cooling fan motor",
+        "radiator fan motor"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -2169,7 +2298,26 @@
         "pressure booster pump"
       ],
       "negative_aliases": [
-        "centrifugal pump"
+        "centrifugal pump",
+        "windscreen washer pump",
+        "windshield washer pump",
+        "washer fluid pump",
+        "windshield fluid pump",
+        "windscreen fluid pump",
+        "ink pump",
+        "printing ink pump",
+        "ink circulation pump",
+        "fuel pump",
+        "gasoline fuel pump",
+        "diesel fuel pump",
+        "oil pump",
+        "lubrication oil pump",
+        "lube oil pump",
+        "vacuum pump",
+        "vacuum pumping unit",
+        "condensate pump",
+        "condensation pump",
+        "air conditioner condensate pump"
       ]
     },
     "DELTA SANDER": {
@@ -2379,20 +2527,35 @@
     },
     "FAN": {
       "aliases": [
-        "cordless fan",
-        "battery fan",
-        "jobsite fan",
-        "worksite fan",
-        "portable jobsite fan",
-        "ventilador a bateria",
-        "ventilador portátil a bateria",
-        "ventilador portatil a bateria"
+        "fan",
+        "electric fan",
+        "ventilator",
+        "ventilador",
+        "fans"
       ],
       "negative_aliases": [
         "blower fan",
-        "hvac fan",
+        "blower motor",
+        "fan motor",
+        "fan blade",
+        "fan module",
+        "axial fan",
+        "cooling fan",
         "radiator fan",
-        "cooling fan"
+        "cabinet fan",
+        "case fan",
+        "computer fan",
+        "cpu fan",
+        "server fan",
+        "chassis fan",
+        "suction fan",
+        "exhaust fan",
+        "extractor fan",
+        "charge fan",
+        "cooler fan",
+        "mist blower",
+        "leaf blower",
+        "garden blower"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -2748,6 +2911,300 @@
       "fallback_pair": [
         "OTHERS",
         "ROTARY TOOL"
+      ]
+    },
+    "INDUSTRIAL BLOWER": {
+      "aliases": [
+        "industrial blower",
+        "industrial air blower",
+        "explosion-proof blower",
+        "explosion proof blower",
+        "explosion-proof axial blower",
+        "explosion proof axial blower",
+        "axial blower",
+        "centrifugal blower",
+        "ventilation blower",
+        "confined space blower",
+        "industrial ventilator blower",
+        "com-pax-ial blower",
+        "compaxial blower"
+      ],
+      "negative_aliases": [
+        "leaf blower",
+        "garden blower",
+        "backpack blower",
+        "cordless blower",
+        "battery blower",
+        "petrol blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL BLOWER"
+      ]
+    },
+    "VENTURI BLOWER": {
+      "aliases": [
+        "venturi blower",
+        "pneumatic venturi blower",
+        "air driven venturi blower",
+        "air-driven venturi blower",
+        "pneumatic air blower",
+        "venturi air blower",
+        "blower venturi",
+        "pneumatic blower venturi"
+      ],
+      "negative_aliases": [
+        "leaf blower",
+        "garden blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "VENTURI BLOWER"
+      ]
+    },
+    "AXIAL FAN": {
+      "aliases": [
+        "axial fan",
+        "ac axial fan",
+        "dc axial fan",
+        "axial flow fan",
+        "axial-flow fan",
+        "axial cooling fan"
+      ],
+      "negative_aliases": [
+        "axial blower",
+        "blower fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AXIAL FAN"
+      ]
+    },
+    "COOLING FAN": {
+      "aliases": [
+        "cooling fan",
+        "radiator fan",
+        "cabinet fan",
+        "case fan",
+        "computer fan",
+        "cpu fan",
+        "server fan",
+        "chassis fan",
+        "electronics cooling fan",
+        "charge fan",
+        "cooler fan"
+      ],
+      "negative_aliases": [
+        "blower fan",
+        "fan blade",
+        "fan motor",
+        "fan module"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "COOLING FAN"
+      ]
+    },
+    "FAN BLADE": {
+      "aliases": [
+        "fan blade",
+        "cooling fan blade",
+        "radiator fan blade",
+        "ventilator blade",
+        "ventilador blade",
+        "fan impeller blade"
+      ],
+      "negative_aliases": [
+        "blower fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN BLADE"
+      ]
+    },
+    "FAN MODULE": {
+      "aliases": [
+        "fan module",
+        "cooling fan module",
+        "fan assembly module",
+        "cooling module fan"
+      ],
+      "negative_aliases": [
+        "blower motor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN MODULE"
+      ]
+    },
+    "FAN MOTOR": {
+      "aliases": [
+        "fan motor",
+        "cooling fan motor",
+        "radiator fan motor",
+        "ventilator motor",
+        "motor de ventilador",
+        "motor do ventilador"
+      ],
+      "negative_aliases": [
+        "blower motor",
+        "heater blower motor",
+        "hvac blower motor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN MOTOR"
+      ]
+    },
+    "SUCTION FAN": {
+      "aliases": [
+        "suction fan",
+        "exhaust fan",
+        "extractor fan",
+        "extraction fan",
+        "induced draft fan",
+        "draught fan",
+        "ventilation exhaust fan"
+      ],
+      "negative_aliases": [
+        "blower fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SUCTION FAN"
+      ]
+    },
+    "COOLER": {
+      "aliases": [
+        "cpu cooler",
+        "processor cooler",
+        "cpu air cooler",
+        "computer cooler",
+        "processor cooling unit",
+        "air-cooled heat sink",
+        "air cooled heat sink",
+        "cpu heatsink",
+        "cpu heat sink"
+      ],
+      "negative_aliases": [
+        "cooling fan",
+        "cooler fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "COOLER"
+      ]
+    },
+    "WINDSCREEN WASHER PUMP": {
+      "aliases": [
+        "windscreen washer pump",
+        "windshield washer pump",
+        "washer fluid pump",
+        "windshield fluid pump",
+        "windscreen fluid pump"
+      ],
+      "negative_aliases": [],
+      "fallback_pair": [
+        "OTHERS",
+        "WINDSCREEN WASHER PUMP"
+      ]
+    },
+    "INK PUMP": {
+      "aliases": [
+        "ink pump",
+        "printing ink pump",
+        "ink circulation pump"
+      ],
+      "negative_aliases": [],
+      "fallback_pair": [
+        "OTHERS",
+        "INK PUMP"
+      ]
+    },
+    "FUEL PUMP": {
+      "aliases": [
+        "fuel pump",
+        "gasoline fuel pump",
+        "diesel fuel pump"
+      ],
+      "negative_aliases": [],
+      "fallback_pair": [
+        "OTHERS",
+        "FUEL PUMP"
+      ]
+    },
+    "OIL PUMP": {
+      "aliases": [
+        "oil pump",
+        "lubrication oil pump",
+        "lube oil pump"
+      ],
+      "negative_aliases": [],
+      "fallback_pair": [
+        "OTHERS",
+        "OIL PUMP"
+      ]
+    },
+    "VACUUM PUMP": {
+      "aliases": [
+        "vacuum pump",
+        "vacuum pumping unit"
+      ],
+      "negative_aliases": [],
+      "fallback_pair": [
+        "OTHERS",
+        "VACUUM PUMP"
+      ]
+    },
+    "CONDENSATE PUMP": {
+      "aliases": [
+        "condensate pump",
+        "condensation pump",
+        "air conditioner condensate pump"
+      ],
+      "negative_aliases": [],
+      "fallback_pair": [
+        "OTHERS",
+        "CONDENSATE PUMP"
+      ]
+    },
+    "PRESS TOOL": {
+      "aliases": [
+        "mechanical press tool",
+        "mechanical pressing tool",
+        "press tool",
+        "battery press tool",
+        "cordless press tool"
+      ],
+      "negative_aliases": [
+        "press jaw",
+        "crimping jaw"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PRESS TOOL"
+      ]
+    },
+    "MIXER": {
+      "aliases": [
+        "mixer",
+        "mixing machine",
+        "industrial mixer"
+      ],
+      "negative_aliases": [
+        "concrete mixer",
+        "cement mixer",
+        "paint mixer",
+        "paddle mixer",
+        "power mixer",
+        "electric mixer",
+        "cordless mixer",
+        "battery mixer",
+        "drip coffee maker"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MIXER"
       ]
     }
   },
@@ -3892,7 +4349,7 @@
       "power": "*",
       "category_general": "OTHERS",
       "family": "FAN",
-      "priority": 210
+      "priority": 200
     },
     {
       "primary_type": "MINI BLOWER",
@@ -4033,6 +4490,132 @@
       "category_general": "OTHERS",
       "family": "ROTARY TOOL",
       "priority": 185
+    },
+    {
+      "primary_type": "INDUSTRIAL BLOWER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL BLOWER",
+      "priority": 235
+    },
+    {
+      "primary_type": "VENTURI BLOWER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "VENTURI BLOWER",
+      "priority": 245
+    },
+    {
+      "primary_type": "AXIAL FAN",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "AXIAL FAN",
+      "priority": 250
+    },
+    {
+      "primary_type": "COOLING FAN",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "COOLING FAN",
+      "priority": 250
+    },
+    {
+      "primary_type": "FAN BLADE",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "FAN BLADE",
+      "priority": 260
+    },
+    {
+      "primary_type": "FAN MODULE",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "FAN MODULE",
+      "priority": 260
+    },
+    {
+      "primary_type": "FAN MOTOR",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "FAN MOTOR",
+      "priority": 260
+    },
+    {
+      "primary_type": "SUCTION FAN",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "SUCTION FAN",
+      "priority": 250
+    },
+    {
+      "primary_type": "COOLER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "COOLER",
+      "priority": 245
+    },
+    {
+      "primary_type": "WINDSCREEN WASHER PUMP",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "WINDSCREEN WASHER PUMP",
+      "priority": 250
+    },
+    {
+      "primary_type": "INK PUMP",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "INK PUMP",
+      "priority": 250
+    },
+    {
+      "primary_type": "FUEL PUMP",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "FUEL PUMP",
+      "priority": 250
+    },
+    {
+      "primary_type": "OIL PUMP",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "OIL PUMP",
+      "priority": 250
+    },
+    {
+      "primary_type": "VACUUM PUMP",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "VACUUM PUMP",
+      "priority": 250
+    },
+    {
+      "primary_type": "CONDENSATE PUMP",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "CONDENSATE PUMP",
+      "priority": 250
+    },
+    {
+      "primary_type": "TILLER",
+      "power": "*",
+      "category_general": "TILLERS",
+      "family": "TILLERS",
+      "priority": 140
+    },
+    {
+      "primary_type": "PRESS TOOL",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "PRESS TOOL",
+      "priority": 220
+    },
+    {
+      "primary_type": "MIXER",
+      "power": "*",
+      "category_general": "OTHERS",
+      "family": "MIXER",
+      "priority": 120
     }
   ],
   "COMPONENT_CONTEXT_RULES": {
@@ -4195,6 +4778,111 @@
       [
         "OSCILLATING MULTI-TOOL",
         "MULTI-TOOL"
+      ],
+      [
+        "FAN BLADE",
+        "FAN MODULE",
+        "FAN MOTOR",
+        "AXIAL FAN",
+        "COOLING FAN",
+        "SUCTION FAN",
+        "BLOWER FAN",
+        "FAN"
+      ],
+      [
+        "VENTURI BLOWER",
+        "INDUSTRIAL BLOWER",
+        "BLOWER"
+      ],
+      [
+        "WINDSCREEN WASHER PUMP",
+        "WATERPUMP"
+      ],
+      [
+        "INK PUMP",
+        "WATERPUMP"
+      ],
+      [
+        "FUEL PUMP",
+        "WATERPUMP"
+      ],
+      [
+        "OIL PUMP",
+        "WATERPUMP"
+      ],
+      [
+        "VACUUM PUMP",
+        "WATERPUMP"
+      ],
+      [
+        "CONDENSATE PUMP",
+        "WATERPUMP"
+      ],
+      [
+        "PAINT MIXER",
+        "ELECTRIC MIXER",
+        "CONCRETE MIXER",
+        "MIXER"
+      ],
+      [
+        "FAN BLADE",
+        "PART"
+      ],
+      [
+        "FAN MODULE",
+        "PART"
+      ],
+      [
+        "FAN MOTOR",
+        "PART"
+      ],
+      [
+        "BLOWER FAN",
+        "PART"
+      ],
+      [
+        "BLOWER MOTOR",
+        "PART"
+      ],
+      [
+        "AXIAL FAN",
+        "PART"
+      ],
+      [
+        "COOLING FAN",
+        "PART"
+      ],
+      [
+        "SUCTION FAN",
+        "PART"
+      ],
+      [
+        "COOLER",
+        "PART"
+      ],
+      [
+        "WINDSCREEN WASHER PUMP",
+        "PART"
+      ],
+      [
+        "INK PUMP",
+        "PART"
+      ],
+      [
+        "FUEL PUMP",
+        "PART"
+      ],
+      [
+        "OIL PUMP",
+        "PART"
+      ],
+      [
+        "VACUUM PUMP",
+        "PART"
+      ],
+      [
+        "CONDENSATE PUMP",
+        "PART"
       ]
     ],
     "output_voltage_not_input_power_types": [
@@ -4256,7 +4944,32 @@
       "sliding mitre saw": "MITER SAW",
       "centrifugal pump": "WATERPUMP",
       "bomba centrífuga": "WATERPUMP",
-      "bomba centrifuga": "WATERPUMP"
+      "bomba centrifuga": "WATERPUMP",
+      "fan blade": "FAN BLADE",
+      "fan module": "FAN MODULE",
+      "fan motor": "FAN MOTOR",
+      "axial fan": "AXIAL FAN",
+      "cooling fan": "COOLING FAN",
+      "radiator fan": "COOLING FAN",
+      "cabinet fan": "COOLING FAN",
+      "suction fan": "SUCTION FAN",
+      "exhaust fan": "SUCTION FAN",
+      "industrial blower": "INDUSTRIAL BLOWER",
+      "axial blower": "INDUSTRIAL BLOWER",
+      "venturi blower": "VENTURI BLOWER",
+      "pneumatic venturi blower": "VENTURI BLOWER",
+      "windscreen washer pump": "WINDSCREEN WASHER PUMP",
+      "windshield washer pump": "WINDSCREEN WASHER PUMP",
+      "ink pump": "INK PUMP",
+      "fuel pump": "FUEL PUMP",
+      "oil pump": "OIL PUMP",
+      "vacuum pump": "VACUUM PUMP",
+      "condensate pump": "CONDENSATE PUMP",
+      "condensation pump": "CONDENSATE PUMP",
+      "dual action polisher": "POLISHER",
+      "pulidora dual action": "POLISHER",
+      "rotavator": "TILLER",
+      "rotovator": "TILLER"
     }
   },
   "CLASSIFICATION_POLICY": {
@@ -4266,14 +4979,14 @@
       "require_cited_source_support": true,
       "require_title_support_or_min_sources": 2,
       "min_candidate_share_without_title": 0.45,
-      "require_identity_at_least": "PROBABLE",
+      "require_identity_at_least": "STRONG",
       "no_candidate_means_no_llm": true,
       "block_multi_primary_title_conflict": true,
       "candidate_funnel": {
         "max_candidates": 4,
         "relative_score_floor": 0.45,
         "minimum_score": 0.7,
-        "require_identity_at_least": "PROBABLE",
+        "require_identity_at_least": "STRONG",
         "require_title_support_or_min_sources": 2,
         "block_when_candidates_exceed_max": true,
         "single_candidate_can_resolve_without_llm": true
@@ -4403,13 +5116,32 @@
         "pressure washer",
         "hidrolavadora",
         "lavadora de alta presión",
-        "lavadora de alta pressao"
+        "lavadora de alta pressao",
+        "windscreen washer pump",
+        "windshield washer pump",
+        "washer fluid pump",
+        "windshield fluid pump",
+        "windscreen fluid pump",
+        "ink pump",
+        "printing ink pump",
+        "ink circulation pump",
+        "fuel pump",
+        "gasoline fuel pump",
+        "diesel fuel pump",
+        "oil pump",
+        "lubrication oil pump",
+        "lube oil pump",
+        "vacuum pump",
+        "vacuum pumping unit",
+        "condensate pump",
+        "condensation pump",
+        "air conditioner condensate pump"
       ]
     }
   ],
-  "SCHEMA_VERSION": "2.8",
+  "SCHEMA_VERSION": "2.9",
   "QUALITY_GATES": {
-    "VERSION": "2026-09-29-p6-classification-recovery",
+    "VERSION": "2026-09-29-r9.6p7-import-noise-taxonomy",
     "POLICY": {
       "fail_before_classification": true,
       "synthetic_cases": "STRICT_EXPECTATION",
@@ -4586,8 +5318,8 @@
         "id": "corded_blower_voltage_restored",
         "brand": "BLACK & DECKER",
         "model": "BV25 AR",
-        "title": "BLACK & DECKER BV25 AR Blower 220V",
-        "content": "BV25 AR electric blower 220V",
+        "title": "BLACK & DECKER BV25 AR Electric Leaf Blower 220V",
+        "content": "BV25 AR corded electric leaf blower 220V",
         "expect": {
           "state": "RESOLVED_RULE",
           "product_type": "BLOWER",
@@ -5461,6 +6193,158 @@
             "SCREWDRIVER"
           ]
         }
+      },
+      {
+        "id": "r96p7_industrial_axial_blower_not_garden",
+        "brand": "ALLEGRO",
+        "model": "9548 25E",
+        "title": "Allegro 9548-25E Lightweight Explosion-Proof Axial Blower",
+        "content": "industrial explosion-proof axial blower for ventilation 115V",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "INDUSTRIAL BLOWER",
+          "power": "CORDED",
+          "category_general": "OTHERS",
+          "family": "INDUSTRIAL BLOWER",
+          "forbidden_type_candidates": [
+            "BLOWER"
+          ]
+        }
+      },
+      {
+        "id": "r96p7_venturi_blower",
+        "brand": "ALLEGRO",
+        "model": "9518 13",
+        "title": "Allegro 9518-13 Pneumatic Venturi Blower",
+        "content": "air driven pneumatic venturi blower",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "VENTURI BLOWER",
+          "power": "PNEUMATIC",
+          "category_general": "OTHERS",
+          "family": "VENTURI BLOWER",
+          "forbidden_type_candidates": [
+            "BLOWER"
+          ]
+        }
+      },
+      {
+        "id": "r96p7_axial_fan",
+        "brand": "ADDA",
+        "model": "AK1862HB AT",
+        "title": "ADDA AK1862HB-AT AXIAL Fan 180MM 230V",
+        "content": "AC axial fan for equipment cooling",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "AXIAL FAN",
+          "power": "CORDED",
+          "category_general": "OTHERS",
+          "family": "AXIAL FAN"
+        }
+      },
+      {
+        "id": "r96p7_cabinet_cooling_fan",
+        "brand": "AEROCOOL",
+        "model": "FROST 12 FRGB",
+        "title": "Aerocool FROST 12 FRGB Cabinet Fan",
+        "content": "computer cabinet cooling fan",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "COOLING FAN",
+          "power": "UNKNOWN",
+          "category_general": "OTHERS",
+          "family": "COOLING FAN"
+        }
+      },
+      {
+        "id": "r96p7_fan_blade",
+        "brand": "AGCO",
+        "model": "4390648M1",
+        "title": "AGCO Fan Blade 11 Blades 4390648M1",
+        "content": "replacement fan blade",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "FAN BLADE",
+          "power": "UNKNOWN",
+          "category_general": "OTHERS",
+          "family": "FAN BLADE"
+        }
+      },
+      {
+        "id": "r96p7_fan_motor",
+        "brand": "AGCO",
+        "model": "M222PF151002A",
+        "title": "AGCO FAN MOTOR M222PF151002A",
+        "content": "electric fan motor",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "FAN MOTOR",
+          "power": "UNKNOWN",
+          "category_general": "OTHERS",
+          "family": "FAN MOTOR"
+        }
+      },
+      {
+        "id": "r96p7_windscreen_pump_not_waterpump",
+        "brand": "AKWEL",
+        "model": "643475",
+        "title": "AKWEL 643475 Windscreen Washer Pump",
+        "content": "windscreen washer fluid pump for vehicle",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "WINDSCREEN WASHER PUMP",
+          "power": "UNKNOWN",
+          "category_general": "OTHERS",
+          "family": "WINDSCREEN WASHER PUMP",
+          "forbidden_type_candidates": [
+            "WATERPUMP"
+          ]
+        }
+      },
+      {
+        "id": "r96p7_ink_pump_not_waterpump",
+        "brand": "AGP",
+        "model": "INK PUMP",
+        "title": "AGP INK PUMP Industrial Ink Pump",
+        "content": "printing ink circulation pump",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "INK PUMP",
+          "power": "UNKNOWN",
+          "category_general": "OTHERS",
+          "family": "INK PUMP",
+          "forbidden_type_candidates": [
+            "WATERPUMP"
+          ]
+        }
+      },
+      {
+        "id": "r96p7_dual_action_polisher",
+        "brand": "3D",
+        "model": "L37 PRO",
+        "title": "3D L37 PRO Pulidora Dual Action",
+        "content": "dual action polisher for automotive detailing",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "POLISHER",
+          "power": "UNKNOWN",
+          "category_general": "OTHERS",
+          "family": "POLISHER"
+        }
+      },
+      {
+        "id": "r96p7_tiller_unknown_power_taxonomy",
+        "brand": "AIMERY",
+        "model": "ROTOVATOR 5",
+        "title": "AIMERY ROTOVATOR 5 Rotary Tiller",
+        "content": "rotavator rotary tiller for farming",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "TILLER",
+          "power": "UNKNOWN",
+          "category_general": "TILLERS",
+          "family": "TILLERS"
+        }
       }
     ],
     "REAL_VALIDATED_CASES": [
@@ -6176,6 +7060,15 @@
           "min_level": "STRONG",
           "model_match": "EXACT"
         }
+      },
+      {
+        "id": "r96p7_brand_only_body_not_strong",
+        "brand": "AIR KING",
+        "model": "U12104",
+        "title": "Lasko U12104 Blower Fan Pivoting 12 inch",
+        "content": "compatible information mentions Air King",
+        "url": "https://example.com/lasko-u12104",
+        "expected_level": "PROBABLE"
       }
     ]
   },
