@@ -1,3 +1,13 @@
+# R9.6p8.4 — Provider Resilience + Explicit NVIDIA Schema (2026-09-30)
+
+- Adds authenticated Groq preflight via `GET /models`; HTTP 401/403 disables Groq before inference.
+- Injects the exact Product Definition JSON Schema into NVIDIA prompts because NVIDIA uses JSON Object Mode rather than Groq-style strict JSON Schema mode.
+- Bumps the semantic prompt/cache namespace to v4.
+- Allows semantic-pilot-specific provider/model configuration without changing the regular classification route.
+- Stops the pilot safely on exhausted provider routes and writes a partial workbook instead of emitting an uncaught traceback.
+- Preserves eligible-cohort selection, Base Final/Consolidado read-only behavior, and zero Search-provider requests in option 7.
+- Adds provider-resilience regression tests for Groq 401 preflight and NVIDIA explicit-schema injection.
+
 # R9.6p8.3 — Eligible Semantic Cohort + LLM Contract Validation (2026-09-30)
 
 - Changes semantic-pilot sampling from the first N input rows to the first N **eligible** semantic-recovery rows.

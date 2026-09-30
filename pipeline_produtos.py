@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p8.3 Product Definition Pilot
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p8.4 Product Definition Pilot
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -55,11 +55,11 @@ from urllib.parse import quote, unquote, urlencode, urlparse
 
 PIPELINE_VERSION = "3.9.5-hf3.1"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
-SEMANTIC_PROMPT_VERSION = "2026-09-30-v3-product-definition-schema-validated"
+SEMANTIC_PROMPT_VERSION = "2026-09-30-v4-product-definition-explicit-schema"
 SEMANTIC_MAP_PROMPT_VERSION = "2026-09-29-v1-semantic-taxonomy-mapper"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3.1p8.3 R9.6 Product Definition Pilot"
-COLLECTION_ENGINE_VERSION = "2026-09-30-r9.6p8.3-product-definition-pilot-eligible-cohort"
+BUILD_LABEL = "v3.9.5-HF3.1p8.4 R9.6 Product Definition Pilot"
+COLLECTION_ENGINE_VERSION = "2026-09-30-r9.6p8.4-product-definition-provider-resilience"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
 
@@ -4646,6 +4646,75 @@ class OpenAICompatibleClassifier:
             return "nvidia:[" + ",".join(candidates) + "]"
         return f"{self.provider}:{self.model}"
 
+    def _discover_groq_model(self) -> Dict[str, Any]:
+        """Valida credencial e modelo Groq antes de entrar na rota do piloto.
+
+        p8.4: possuir GROQ_API_KEY no .env não é suficiente; a chave precisa
+        autenticar de fato. Um 401/403 aqui desabilita o fallback antes da
+        primeira inferência, evitando derrubar o lote depois de uma falha NVIDIA.
+        """
+        import requests
+
+        headers = {
+            "Authorization": f"Bearer {os.environ[self.api_key_env].strip()}",
+            "Accept": "application/json",
+        }
+        models_url = self.base_url + "/models"
+        try:
+            resp = requests.get(
+                models_url,
+                headers=headers,
+                timeout=min(self.timeout_seconds, 30),
+            )
+        except requests.RequestException as exc:
+            raise OperationalPause(
+                "GROQ_PREFLIGHT_NETWORK",
+                f"Falha de rede ao validar Groq em GET /models: {type(exc).__name__}: {safe(exc)}",
+            ) from exc
+
+        detail = safe(resp.text)[:1500]
+        if resp.status_code in {401, 403}:
+            raise OperationalPause(
+                "GROQ_AUTH",
+                f"Groq rejeitou a credencial no preflight (HTTP {resp.status_code}). Atualize GROQ_API_KEY ou remova Groq da rota do piloto.",
+            )
+        if resp.status_code == 429:
+            raise OperationalPause(
+                "GROQ_RATE_LIMIT",
+                f"Groq indisponível no preflight por rate/quota limit: {detail}",
+            )
+        if resp.status_code != 200:
+            raise OperationalPause(
+                f"GROQ_PREFLIGHT_HTTP_{resp.status_code}",
+                f"Groq GET /models falhou no preflight: {detail}",
+            )
+
+        try:
+            payload = resp.json() or {}
+            available = {
+                safe(row.get("id"))
+                for row in (payload.get("data", []) or [])
+                if safe(row.get("id"))
+            }
+        except Exception as exc:
+            raise OperationalPause(
+                "GROQ_PREFLIGHT_PARSE",
+                f"Groq GET /models retornou JSON inválido: {type(exc).__name__}: {safe(exc)}",
+            ) from exc
+
+        if self.model not in available:
+            raise OperationalPause(
+                "GROQ_MODEL_UNAVAILABLE",
+                f"Modelo Groq configurado não está disponível: {self.model}",
+            )
+
+        return {
+            "requested_model": self.model,
+            "selected_model": self.model,
+            "available_count": len(available),
+            "auth_validated": True,
+        }
+
     def _discover_openrouter_model(self) -> Dict[str, Any]:
         """Valida chave/modelo diretamente no catálogo vivo do OpenRouter.
 
@@ -4791,6 +4860,8 @@ class OpenAICompatibleClassifier:
         discovery = None
         if self.provider == "nvidia":
             discovery = self._discover_nvidia_model()
+        elif self.provider == "groq":
+            discovery = self._discover_groq_model()
         elif self.provider == "openrouter":
             discovery = self._discover_openrouter_model()
 
@@ -5452,9 +5523,24 @@ class OpenAICompatibleClassifier:
             else:
                 payload["max_tokens"] = self.max_output_tokens
         else:
+            # NVIDIA aceita JSON Object Mode, mas não recebe o JSON Schema pelo
+            # response_format como Groq/OpenRouter. p8.3 validava um contrato que
+            # o modelo nunca tinha visto explicitamente, o que podia gerar JSON
+            # válido porém com campos ausentes. p8.4 injeta o schema completo no
+            # último turno do prompt e continua validando em Python.
+            nvidia_messages = [dict(m) for m in messages]
+            schema_instruction = (
+                "\n\nOUTPUT CONTRACT - return ONLY one JSON object that matches this JSON Schema exactly. "
+                "Every required field must be present; use only the declared enum values; do not add fields.\n"
+                + json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+            )
+            if nvidia_messages and safe(nvidia_messages[-1].get("role")).casefold() == "user":
+                nvidia_messages[-1]["content"] = safe(nvidia_messages[-1].get("content")) + schema_instruction
+            else:
+                nvidia_messages.append({"role": "user", "content": schema_instruction.strip()})
             payload = {
                 "model": self.model,
-                "messages": messages,
+                "messages": nvidia_messages,
                 "response_format": {"type": "json_object"},
                 "temperature": 0,
                 "max_tokens": self.max_output_tokens,
@@ -8835,10 +8921,14 @@ def _semantic_build_llm_cascade(
     cfg: Dict[str, Any],
     db: ClassificationDB,
 ) -> ProviderCascade:
-    groq_model = os.getenv("GROQ_MODEL", "").strip() or safe(cfg.get("groq", {}).get("model")) or DEFAULT_MODEL
-    nvidia_model = os.getenv("NVIDIA_MODEL", "").strip() or safe(cfg.get("nvidia", {}).get("model")) or "openai/gpt-oss-20b"
-    openrouter_model = os.getenv("OPENROUTER_MODEL", "").strip() or safe(cfg.get("openrouter", {}).get("model")) or "openai/gpt-oss-120b:free"
-    route_names = [safe(x).casefold() for x in (cfg.get("llm", {}).get("route", []) or []) if safe(x)] or ["nvidia", "groq"]
+    pilot_cfg = cfg.get("semantic_pilot", {}) or {}
+    # p8.4: o piloto pode usar um modelo/rota próprios sem alterar a classificação
+    # normal. O preflight valida credencial/modelo antes da primeira inferência.
+    groq_model = safe(pilot_cfg.get("groq_model")) or os.getenv("GROQ_MODEL", "").strip() or safe(cfg.get("groq", {}).get("model")) or DEFAULT_MODEL
+    nvidia_model = safe(pilot_cfg.get("nvidia_model")) or os.getenv("NVIDIA_MODEL", "").strip() or safe(cfg.get("nvidia", {}).get("model")) or "openai/gpt-oss-20b"
+    openrouter_model = safe(pilot_cfg.get("openrouter_model")) or os.getenv("OPENROUTER_MODEL", "").strip() or safe(cfg.get("openrouter", {}).get("model")) or "openai/gpt-oss-120b:free"
+    route_source = pilot_cfg.get("llm_route", cfg.get("llm", {}).get("route", [])) or []
+    route_names = [safe(x).casefold() for x in route_source if safe(x)] or ["nvidia", "groq"]
     provider_map = {
         "groq": OpenAICompatibleClassifier(rules, cfg, db, "groq", groq_model),
         "nvidia": OpenAICompatibleClassifier(rules, cfg, db, "nvidia", nvidia_model),
@@ -8852,15 +8942,24 @@ def _semantic_build_llm_cascade(
         switch_only_on_quota_exhaustion=bool(cfg.get("llm", {}).get("switch_only_on_quota_exhaustion", False)),
     )
     preflights = cascade.preflight_all()
-    enabled = [x.get("provider", "").upper() for x in preflights if x.get("enabled")]
+    enabled = [
+        f"{safe(x.get('provider')).upper()}[{safe(x.get('model'))}]"
+        for x in preflights if x.get("enabled")
+    ]
+    disabled = [
+        f"{safe(x.get('provider')).upper()}={safe(x.get('error_code'))}"
+        for x in preflights if not x.get("enabled")
+    ]
     LOG.info("PRODUCT DEFINITION PILOT LLM ROUTE: %s", " -> ".join(enabled))
+    if disabled:
+        LOG.warning("PRODUCT DEFINITION PILOT PROVIDERS DESABILITADOS NO PREFLIGHT: %s", " | ".join(disabled))
     return cascade
 
 
 def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
     """Piloto de definição de produto via LLM sem alterar Base Final/Consolidado/checkpoint de classificação.
 
-    R9.6p8.3: seleciona somente casos elegíveis ao piloto, valida o contrato JSON da LLM e mantém telemetria/checkpoints.
+    R9.6p8.4: mantém coorte elegível, valida credenciais/modelos dos providers antes do piloto e encerra de forma segura em falhas de LLM.
     """
     pilot_cfg = cfg.get("semantic_pilot", {}) or {}
     if not bool(pilot_cfg.get("enabled", True)):
@@ -8871,7 +8970,7 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
     cache_path = Path(args.cache or cfg["files"]["cache"])
     db_path = Path(args.db or cfg["files"]["classification_db"])
-    output_path = Path(args.output or cfg.get("files", {}).get("semantic_pilot_output", "Piloto_Definicao_LLM_R9_6p8_3.xlsx"))
+    output_path = Path(args.output or cfg.get("files", {}).get("semantic_pilot_output", "Piloto_Definicao_LLM_R9_6p8_4.xlsx"))
     source_rows = read_input_rows(input_path)
     default_limit = int(pilot_cfg.get("default_max_items", 10) or 10)
     limit = int(args.max_items or default_limit)
@@ -8886,7 +8985,7 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     rank = DeterministicEngine.IDENTITY_RANK
     min_identity = safe(rules.semantic_policy.get("min_identity", "PROBABLE")).upper() or "PROBABLE"
 
-    # p8.3: o limite do piloto passa a significar N CASOS ELEGÍVEIS, não as N
+    # p8.4 preserva: o limite do piloto significa N CASOS ELEGÍVEIS, não as N
     # primeiras linhas da base. Assim SEM_CACHE_UTIL/COLLECTION_GAP não consomem
     # a amostra destinada a validar a LLM Product Definition.
     seen = set()
@@ -9061,7 +9160,60 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                 "PILOTO %03d/%03d | LLM DEFINE START | provider=%s | model=%s | target_sources=%d",
                 idx, len(cohort), llm.provider.upper(), llm.model, len(target_sources),
             )
-            data, identify_cache, usage = llm.semantic_identify(key, raw.raw_hash, brand, model, s1)
+            try:
+                data, identify_cache, usage = llm.semantic_identify(key, raw.raw_hash, brand, model, s1)
+            except OperationalPause as exc:
+                LOG.error(
+                    "PILOTO %03d/%03d | LLM DEFINE STOP | code=%s | %s",
+                    idx, len(cohort), exc.code, safe(exc),
+                )
+                rows.append({
+                    **base,
+                    "Produto Definido LLM": "",
+                    "O que é (Tipo)": "REVISAR",
+                    "Alimentação": "UNKNOWN",
+                    "Category General": "",
+                    "FAMILY": "",
+                    "Título Real": ref_title,
+                    "Fonte URL": ref_url,
+                    "Pilot Decision": "LLM_PROVIDER_ERROR",
+                    "Review Required": "SIM",
+                    "Reason Code": exc.code,
+                    "Motivo": safe(exc),
+                    "LLM Provider": llm.provider.upper() if llm.enabled_route() else "",
+                    "LLM Model": llm.model if llm.enabled_route() else "",
+                })
+                stats["llm_provider_error"] += 1
+                _finish_item(idx, item_started, calls_before)
+                _snapshot("PARTIAL_PROVIDER_ERROR")
+                LOG.error(
+                    "PILOTO INTERROMPIDO COM SEGURANÇA APÓS FALHA DE PROVIDER. "
+                    "O Excel parcial foi salvo; Base Final/Consolidado permanecem intactos."
+                )
+                break
+            except Exception as exc:
+                LOG.exception(
+                    "PILOTO %03d/%03d | LLM DEFINE RUNTIME ERROR | %s",
+                    idx, len(cohort), safe(exc),
+                )
+                rows.append({
+                    **base,
+                    "Produto Definido LLM": "",
+                    "O que é (Tipo)": "REVISAR",
+                    "Alimentação": "UNKNOWN",
+                    "Category General": "",
+                    "FAMILY": "",
+                    "Título Real": ref_title,
+                    "Fonte URL": ref_url,
+                    "Pilot Decision": "LLM_RUNTIME_ERROR",
+                    "Review Required": "SIM",
+                    "Reason Code": type(exc).__name__,
+                    "Motivo": safe(exc),
+                })
+                stats["llm_runtime_error"] += 1
+                _finish_item(idx, item_started, calls_before)
+                _snapshot("PARTIAL_RUNTIME_ERROR")
+                break
             LOG.info(
                 "PILOTO %03d/%03d | LLM DEFINE END | provider=%s | model=%s | cache=%s | decision=%s | raw=%s | %.1fs",
                 idx, len(cohort), safe(usage.get("provider")).upper() or llm.provider.upper(),
@@ -9137,9 +9289,39 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                     "PILOTO %03d/%03d | LLM MAP START | provider=%s | model=%s | raw=%s | candidates=%d",
                     idx, len(cohort), llm.provider.upper(), llm.model, raw_type or "-", len(candidates),
                 )
-                map_data, map_cache, map_usage = llm.semantic_map(
-                    key, raw.raw_hash, raw_type, role, domain, candidates
-                )
+                try:
+                    map_data, map_cache, map_usage = llm.semantic_map(
+                        key, raw.raw_hash, raw_type, role, domain, candidates
+                    )
+                except OperationalPause as exc:
+                    LOG.error(
+                        "PILOTO %03d/%03d | LLM MAP STOP | code=%s | %s",
+                        idx, len(cohort), exc.code, safe(exc),
+                    )
+                    rows.append({
+                        **base,
+                        "Produto Definido LLM": raw_type,
+                        "Papel do Produto": role,
+                        "Contexto": domain,
+                        "O que é (Tipo)": "REVISAR",
+                        "Alimentação": power,
+                        "Category General": "",
+                        "FAMILY": "",
+                        "Título Real": title or ref_title,
+                        "Fonte URL": url or ref_url,
+                        "Pilot Decision": "LLM_MAP_PROVIDER_ERROR",
+                        "Review Required": "SIM",
+                        "Reason Code": exc.code,
+                        "Motivo": safe(exc),
+                    })
+                    stats["llm_map_provider_error"] += 1
+                    _finish_item(idx, item_started, calls_before)
+                    _snapshot("PARTIAL_PROVIDER_ERROR")
+                    LOG.error(
+                        "PILOTO INTERROMPIDO COM SEGURANÇA DURANTE TAXONOMY MAP. "
+                        "O Excel parcial foi salvo; Base Final/Consolidado permanecem intactos."
+                    )
+                    break
                 LOG.info(
                     "PILOTO %03d/%03d | LLM MAP END | provider=%s | model=%s | cache=%s | decision=%s | canonical=%s | %.1fs",
                     idx, len(cohort), safe(map_usage.get("provider")).upper() or llm.provider.upper(),

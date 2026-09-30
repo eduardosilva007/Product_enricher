@@ -1,4 +1,20 @@
-# Product Enricher — R9.6p8.3 Product Definition Pilot
+# Product Enricher — R9.6p8.4 Product Definition Pilot
+
+
+## R9.6p8.4 — provider resilience + explicit NVIDIA schema
+
+This patch addresses the failure observed in the semantic pilot where NVIDIA returned an output that could not be accepted and the fallback Groq key then failed with HTTP 401.
+
+Changes:
+
+- Groq preflight now performs a real authenticated `GET /models`; an invalid key is disabled before the first inference.
+- NVIDIA JSON Object Mode now receives the full Product Definition JSON Schema inside the prompt, matching the Python validator contract.
+- Semantic prompt/cache namespace is bumped to `v4-product-definition-explicit-schema`.
+- The semantic pilot can have its own provider/model route without changing normal classification settings.
+- If every usable provider fails during DEFINE or MAP, the pilot writes a partial Excel and stops cleanly instead of raising an uncaught traceback.
+- Search collection remains untouched: option 7 still performs zero Search-provider requests and never writes Base Final/Consolidado.
+
+The p8.3 eligible-cohort behavior remains unchanged: a requested pilot size of 10 means 10 rows with usable cache + target identity >= PROBABLE + Stage1 UNRESOLVED/AMBIGUOUS.
 
 
 ## R9.6p8.3 — eligible semantic cohort + validated LLM JSON contract
@@ -38,7 +54,7 @@ JSON maps Category General + FAMILY
 
 The Product Definition pilot asks the LLM to **define the primary product**, not to pre-classify it: it must return the most specific technical/commercial product name supported by the supplied evidence, without seeing or forcing Category General/FAMILY.
 
-The Product Definition pilot **does not update Base Final or Consolidado**. It writes `Piloto_Definicao_LLM_R9_6p8_3.xlsx` so the behavior can be audited before production adoption.
+The Product Definition pilot **does not update Base Final or Consolidado**. It writes `Piloto_Definicao_LLM_R9_6p8_4.xlsx` so the behavior can be audited before production adoption.
 
 R9.6p8.2 adds operational telemetry for the pilot: every item logs START/END, every LLM definition/mapping call logs START/END with provider/model/cache/duration, provider pacing waits are visible, and a partial Excel snapshot is persisted every 5 items and on Ctrl+C/failure. The interactive pilot default is now 10 items instead of 100.
 

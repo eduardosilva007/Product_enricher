@@ -1,4 +1,4 @@
-# R9.6p8.3 Product Definition Pilot — Validation Report
+# R9.6p8.4 Product Definition Pilot — Validation Report
 
 Validation executed locally on 2026-09-30.
 
@@ -19,28 +19,22 @@ Baseline export ........................... PASS
 R9.6p6 classification recovery ............ PASS
 R9.6p8 import-noise taxonomy .............. PASS
 R9.6p8.1 Product Definition contract ...... PASS
-R9.6p8.2 pilot telemetry code ............. PASS
-R9.6p8.3 eligible cohort/JSON contract ..... PASS
+R9.6p8.4 eligible cohort/contract .......... PASS
+R9.6p8.4 Groq auth preflight ............... PASS
+R9.6p8.4 NVIDIA explicit-schema prompt ..... PASS
 ```
 
-## R9.6p8.2 operational changes
+## Failure reproduced from user log
 
-- Per-item START/END telemetry is emitted for every pilot branch.
-- LLM DEFINE and LLM MAP calls emit START/END with provider/model/cache/duration.
-- Provider pacing waits are visible in the log.
-- Partial pilot workbooks are checkpointed every 5 rows and on interruption/failure.
-- Interactive default pilot size is 10 items.
-- No Search-provider call is introduced by the semantic pilot.
-- Base Final and Consolidado remain read-only in semantic mode.
+The observed path was:
 
-The Product Definition prompt and taxonomy rules are unchanged from R9.6p8.1; this is an operational/telemetry patch.
+```text
+NVIDIA_OUTPUT_PARSE
+    -> automatic fallback
+GROQ 401 AUTH Invalid API Key
+    -> uncaught OperationalPause / traceback
+```
 
-## R9.6p8.3 validation additions
+R9.6p8.4 prevents the second failure by validating Groq authentication before the pilot starts. It also gives NVIDIA the exact output schema it is later validated against. If the active provider route still cannot complete safely, the pilot writes a partial workbook and terminates cleanly without modifying Base Final or Consolidado.
 
-- Confirms semantic JSON missing `decision` is rejected by the contract validator.
-- Confirms valid semantic JSON passes the contract validator.
-- Confirms Product Definition cache namespace is bumped to v3.
-- Confirms semantic pilot target states are UNRESOLVED/AMBIGUOUS.
-- Confirms Product Definition prompt receives only PROBABLE/STRONG sources.
-- Full prior regression suite remains green.
-
+No live provider call was executed in the validation environment; provider behavior is covered with mocked regression tests plus the existing offline suite.
