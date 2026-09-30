@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.7 Cache-First Free-Tier
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1p7.1 / Collection R9.6p7.1
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -10,9 +10,8 @@ Arquitetura:
     Stage 0D - Target Isolation + Collection Quality Gate
     Stage 1 - Regras determinísticas do JSON
     Stage 1.5 - Candidate Funnel determinístico
-    Stage 2A - Product Definition Pilot: LLM define o produto principal a partir da evidência
-    Stage 2B - Funil taxonômico reconcilia a definição da LLM com PRODUCT_TYPE canônico
-    Stage 3 - NVIDIA (model failover) -> Groq
+    Stage 2 - NVIDIA (model failover) -> Groq somente para ambiguidade real
+    Stage 3 - Validação estrita e simétrica da saída LLM
     Stage 4 - Taxonomia determinística do JSON
 
 Princípios:
@@ -38,7 +37,6 @@ import csv
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 import sqlite3
@@ -49,32 +47,17 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
 
-PIPELINE_VERSION = "3.9.5-hf3.1"
+PIPELINE_VERSION = "3.9.5-hf3.1p7.1a"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
-SEMANTIC_PROMPT_VERSION = "2026-09-30-v4-product-definition-explicit-schema"
-SEMANTIC_MAP_PROMPT_VERSION = "2026-09-29-v1-semantic-taxonomy-mapper"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3.1p9 R9.7 Cache-First Free-Tier"
-COLLECTION_ENGINE_VERSION = "2026-09-30-r9.7-cache-first-free-tier-v1"
+BUILD_LABEL = "v3.9.5-HF3.1p7.1a R9.6 Evidence Retention + Safe Semantic Hints"
+COLLECTION_ENGINE_VERSION = "2026-09-30-r9.6p7.1a-evidence-retention-safe-hints"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
-
-SEMANTIC_DEFINITION_SYSTEM_PROMPT = (
-    "Define the primary product represented by the supplied evidence, using the most specific technical/commercial product name that the evidence supports. "
-    "Use ONLY the supplied evidence. Do not classify Category General or FAMILY and do not consult outside knowledge. "
-    "Do not force the product into the internal taxonomy and do not generalize when the evidence explicitly supports a more specific product name. "
-    "Return a short, specific, uppercase English product_type_raw. Preserve meaningful subtype words such as AXIAL, ROTARY, EXPLOSION-PROOF, MODULE, ASSEMBLY, PRESS TOOL, etc. "
-    "Do not answer with only an industry, use case, function, material, or generic class when the evidence names the actual product. "
-    "The Brand field can be an importer/trading/company name and may differ from the commercial product brand. An exact model/part number in the evidence can still identify the target, but NEVER accept a different or near model. "
-    "product_role=COMPONENT_PART when the item itself is a component/spare/module/blade/fixed part; ACCESSORY only when it is sold as an accessory; ASSEMBLY when the evidence explicitly describes an assembly; otherwise WHOLE_PRODUCT. "
-    "evidence_phrase MUST be a short verbatim phrase copied from one cited source and must directly support product_type_raw. "
-    "If the supplied evidence does not tie the requested model to a definable product, return INSUFFICIENT_EVIDENCE."
-)
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -95,67 +78,6 @@ def safe(v: Any) -> str:
     except Exception:
         pass
     return str(v).strip()
-
-
-def _json_schema_contract_errors(data: Any, schema: Dict[str, Any]) -> List[str]:
-    """Validação mínima do contrato JSON usado pelas chamadas semânticas.
-
-    Não pretende implementar JSON Schema completo; cobre exatamente o contrato
-    utilizado pelo piloto (object/required/additionalProperties/type/enum/array).
-    Isso é necessário porque alguns providers aceitam apenas json_object e podem
-    devolver JSON sintaticamente válido, porém fora do schema solicitado.
-    """
-    errors: List[str] = []
-    if not isinstance(data, dict):
-        return ["ROOT_NOT_OBJECT"]
-
-    properties = schema.get("properties", {}) or {}
-    required = schema.get("required", []) or []
-    for key in required:
-        if key not in data:
-            errors.append(f"MISSING_REQUIRED:{key}")
-
-    if schema.get("additionalProperties") is False:
-        for key in data:
-            if key not in properties:
-                errors.append(f"UNEXPECTED_PROPERTY:{key}")
-
-    def _type_ok(value: Any, expected: str) -> bool:
-        if expected == "string":
-            return isinstance(value, str)
-        if expected == "integer":
-            return isinstance(value, int) and not isinstance(value, bool)
-        if expected == "number":
-            return isinstance(value, (int, float)) and not isinstance(value, bool)
-        if expected == "array":
-            return isinstance(value, list)
-        if expected == "object":
-            return isinstance(value, dict)
-        if expected == "boolean":
-            return isinstance(value, bool)
-        return True
-
-    for key, spec in properties.items():
-        if key not in data:
-            continue
-        value = data[key]
-        expected = safe(spec.get("type"))
-        if expected and not _type_ok(value, expected):
-            errors.append(f"TYPE:{key}:{expected}")
-            continue
-        enum = spec.get("enum")
-        if isinstance(enum, list) and value not in enum:
-            errors.append(f"ENUM:{key}:{value}")
-        if expected == "array" and isinstance(value, list):
-            item_spec = spec.get("items", {}) or {}
-            item_type = safe(item_spec.get("type"))
-            item_enum = item_spec.get("enum")
-            for idx, item in enumerate(value):
-                if item_type and not _type_ok(item, item_type):
-                    errors.append(f"ITEM_TYPE:{key}[{idx}]:{item_type}")
-                if isinstance(item_enum, list) and item not in item_enum:
-                    errors.append(f"ITEM_ENUM:{key}[{idx}]:{item}")
-    return errors
 
 
 def read_json(path: Path) -> Dict[str, Any]:
@@ -458,14 +380,12 @@ class RateLimiter:
         self.interval = (60.0 / rpm) if rpm > 0 else 0.0
         self._last = 0.0
 
-    def wait(self, label: str = "") -> float:
+    def wait(self) -> float:
         if self.interval <= 0:
             return 0.0
         now = time.monotonic()
         remaining = (self._last + self.interval) - now
         if self._last and remaining > 0:
-            if label:
-                LOG.info("%s PACING | aguardando %.1fs para respeitar %.2f RPM", label, remaining, 60.0 / self.interval)
             time.sleep(remaining)
         self._last = time.monotonic()
         return max(0.0, remaining)
@@ -531,7 +451,6 @@ class Rules:
         self.type_policy = self.raw.get("TYPE_POLICY", {}) or {}
         self.resolution_policy = self.raw.get("RESOLUTION_POLICY", {}) or {}
         self.classification_policy = self.raw.get("CLASSIFICATION_POLICY", {}) or {}
-        self.semantic_policy = self.classification_policy.get("semantic_recovery", {}) or {}
         self.composite_rules = self.raw.get("COMPOSITE_TYPE_RULES", []) or []
         self.component_context = self.raw.get("COMPONENT_CONTEXT_RULES", {}) or {}
         self.source_rules = self.raw.get("SOURCE_RULES", {}) or {}
@@ -607,10 +526,6 @@ class Rules:
             pair = (safe(r.get("category_general")), safe(r.get("family")))
             if pair not in self.valid_pairs:
                 errors.append(f"TAXONOMY_EVIDENCE_RULE par inválido: {pair}")
-            if pair == ("OTHERS", "OTHERS"):
-                allowed_oo = set(self.type_policy.get("allow_explicit_others_others_types", []) or [])
-                if t not in allowed_oo:
-                    errors.append(f"TAXONOMY_EVIDENCE_RULE OTHERS|OTHERS não autorizado para type={t}")
             aliases = r.get("aliases", []) or []
             if not isinstance(aliases, list):
                 errors.append(f"TAXONOMY_EVIDENCE_RULES[{i}].aliases deve ser lista")
@@ -640,9 +555,7 @@ class Rules:
                 errors.append(f"TYPE_WITHOUT_EXECUTABLE_TAXONOMY: {t}")
 
         if ("OTHERS", "OTHERS") in self.valid_pairs:
-            allowed_oo = set(self.type_policy.get("allow_explicit_others_others_types", []) or [])
-            if not allowed_oo:
-                errors.append("FORBIDDEN_TAXONOMY_DEAD_END: OTHERS|OTHERS exige TYPE_POLICY.allow_explicit_others_others_types")
+            errors.append("FORBIDDEN_TAXONOMY_DEAD_END: OTHERS|OTHERS não pode existir em TAXONOMY_PAIRS")
 
         for t in sorted(self.output_voltage_not_input_power_types):
             if t not in self.types:
@@ -705,19 +618,6 @@ class Rules:
                 errors.append(f"LLM_SAFETY_GATE_DISABLED: {key} deve ser true")
         if safe(llm_gate.get("require_identity_at_least")) not in {"PROBABLE", "STRONG"}:
             errors.append("LLM_SAFETY_GATE_WEAK: require_identity_at_least deve ser PROBABLE ou STRONG")
-        semantic_policy = self.classification_policy.get("semantic_recovery", {}) or {}
-        if semantic_policy:
-            if safe(semantic_policy.get("min_identity", "PROBABLE")) not in {"PROBABLE", "STRONG"}:
-                errors.append("CLASSIFICATION_POLICY.semantic_recovery.min_identity deve ser PROBABLE ou STRONG")
-            role_overrides = semantic_policy.get("role_overrides", {}) or {}
-            for role, typ in role_overrides.items():
-                if safe(typ) not in self.types:
-                    errors.append(f"SEMANTIC_ROLE_OVERRIDE_UNKNOWN_TYPE: {role}->{typ}")
-            bridges = semantic_policy.get("raw_type_alias_to_canonical", {}) or {}
-            for raw_alias, typ in bridges.items():
-                if not safe(raw_alias) or safe(typ) not in self.types:
-                    errors.append(f"SEMANTIC_RAW_BRIDGE_INVALID: {raw_alias!r}->{typ!r}")
-
         funnel_policy = llm_gate.get("candidate_funnel", {}) or {}
         if not funnel_policy:
             errors.append("CLASSIFICATION_POLICY.llm_resolution_gate.candidate_funnel ausente")
@@ -772,7 +672,7 @@ class Rules:
             if key not in allowed_resolution:
                 errors.append(f"UNKNOWN_RESOLUTION_POLICY_FIELD: {key}")
 
-        allowed_classification = {"llm_resolution_gate", "semantic_recovery"}
+        allowed_classification = {"llm_resolution_gate"}
         for key in self.classification_policy:
             if key not in allowed_classification:
                 errors.append(f"UNKNOWN_CLASSIFICATION_POLICY_FIELD: {key}")
@@ -781,7 +681,7 @@ class Rules:
             "component_primary_types", "passive_power_types", "specificity_groups",
             "output_voltage_not_input_power_types", "output_voltage_rule",
             "replacement_compatibility_rule", "source_conflict_rule",
-            "agricultural_mower_rule", "allow_explicit_others_others_types",
+            "agricultural_mower_rule",
         }
         for key in self.type_policy:
             if key not in allowed_type_policy:
@@ -803,7 +703,7 @@ class Rules:
 
         allowed_taxonomy_evidence_fields = {
             "primary_type", "category_general", "family", "aliases",
-            "negative_aliases", "priority", "brand", "model_regex", "semantic_only",
+            "negative_aliases", "priority", "brand", "model_regex",
         }
         for i, row in enumerate(self.taxonomy_evidence_rules):
             for key in row:
@@ -855,8 +755,6 @@ class Rules:
         evidence_candidates = []
         for r in self.taxonomy_evidence_rules:
             if safe(r.get("primary_type")) != product_type:
-                continue
-            if bool(r.get("semantic_only", False)) and "semantic_type_raw" not in evidence_fold:
                 continue
             rule_brand = safe(r.get("brand"))
             if rule_brand and canonical_display(rule_brand) != canonical_display(brand):
@@ -1495,6 +1393,100 @@ def _target_spans(text: str, model: str, cfg: Dict[str, Any]) -> List[Tuple[int,
     return dedup
 
 
+def _usable_brand_identity_variants(brand: str) -> List[str]:
+    variants: List[str] = []
+    for value in _brand_identity_variants(brand):
+        short_alnum = bool(re.search(r"[a-z]", value) and re.search(r"\d", value))
+        if len(value) >= (2 if short_alnum else 3):
+            variants.append(value)
+    return list(dict.fromkeys(variants))
+
+
+def _brand_near_model_in_text(
+    text: str, brand: str, model: str, suffixes: Sequence[str], radius: int = 420
+) -> bool:
+    """Exige co-localização Marca+Modelo no BODY; evita catálogo multi-marca virar identidade."""
+    hay = strip_accents(unquote(safe(text))).casefold()
+    if not hay:
+        return False
+    brand_variants = _usable_brand_identity_variants(brand)
+    if not brand_variants:
+        return False
+    for compact_variant, _ in _model_identity_variants(model, suffixes):
+        if not compact_variant:
+            continue
+        pat = _model_exact_pattern(compact_variant)
+        for match in pat.finditer(hay):
+            local = hay[max(0, match.start() - radius): min(len(hay), match.end() + radius)]
+            local_c = compact(local)
+            if any(v in local_c for v in brand_variants):
+                return True
+    return False
+
+
+def _target_evidence_window(
+    brand: str, model: str, text: str, cfg: Dict[str, Any], max_chars: int = 5000
+) -> Tuple[str, Dict[str, Any]]:
+    """Retém somente uma janela auditável em torno do SKU, priorizando Marca+Modelo próximos."""
+    raw = safe(text)
+    spans = _target_spans(raw, model, cfg)
+    meta: Dict[str, Any] = {
+        "target_occurrences": len(spans),
+        "brand_near_anchor": False,
+        "window_chars": 0,
+        "anchor_model": safe(model),
+    }
+    if not raw or not spans:
+        return "", meta
+    max_chars = max(1000, int(max_chars or 5000))
+    brand_variants = _usable_brand_identity_variants(brand)
+    best: Optional[Tuple[int, int, str, bool]] = None
+    radius = min(600, max(220, max_chars // 6))
+    for a, b in spans:
+        near = raw[max(0, a - radius): min(len(raw), b + radius)]
+        near_c = compact(near)
+        brand_near = any(v in near_c for v in brand_variants) if brand_variants else False
+        half = max_chars // 2
+        left = max(0, a - half)
+        right = min(len(raw), left + max_chars)
+        left = max(0, right - max_chars)
+        window = raw[left:right].strip()
+        score = 1 if brand_near else 0
+        candidate = (score, -a, window, brand_near)
+        if best is None or candidate[:2] > best[:2]:
+            best = candidate
+    if best is None:
+        return "", meta
+    window = best[2]
+    meta["brand_near_anchor"] = bool(best[3])
+    meta["window_chars"] = len(window)
+    return window, meta
+
+
+def _body_identity_rescue_for_result(
+    brand: str, model: str, row: Dict[str, Any], cfg: Dict[str, Any], policy: Dict[str, Any]
+) -> Tuple[Optional[Dict[str, Any]], str, Dict[str, Any]]:
+    """Resgata somente BODY target-anchored com Marca+Modelo próximos; nunca modelo sozinho."""
+    rcfg = policy.get("body_identity_rescue", {}) or {}
+    if not bool(rcfg.get("enabled", True)):
+        return None, "BODY_RESCUE_DISABLED", {}
+    raw_content = safe(row.get("raw_content")) or safe(row.get("_target_evidence_window"))
+    if not raw_content:
+        return None, "BODY_RESCUE_NO_RAW_CONTENT", {}
+    window_chars = max(1000, int(rcfg.get("identity_window_chars", 2400) or 2400))
+    window, meta = _target_evidence_window(brand, model, raw_content, cfg, window_chars)
+    if not window:
+        return None, "BODY_RESCUE_TARGET_NOT_FOUND", meta
+    if bool(rcfg.get("require_brand_near_model", True)) and not bool(meta.get("brand_near_anchor")):
+        return None, "BODY_RESCUE_BRAND_NOT_NEAR_MODEL", meta
+    probe = dict(row)
+    probe["content"] = window
+    identity = _source_identity_for_result(brand, model, probe, cfg)
+    if identity.get("level") not in {"STRONG", "PROBABLE"}:
+        return None, f"BODY_RESCUE_IDENTITY_{identity.get('level', 'WEAK')}", meta
+    return identity, "BODY_RESCUE_ACCEPTED", meta
+
+
 def _looks_like_other_sku_token(token: str, start: int, text: str, model: str, policy: Dict[str, Any]) -> bool:
     raw = safe(token).upper().strip(".,:;()[]{}")
     compact_token = compact(raw)
@@ -2030,36 +2022,65 @@ def _source_sieve(
     for row in rows:
         if not isinstance(row, dict):
             continue
-        identity = _source_identity_for_result(brand, search_model, row, cfg)
+        identity_initial = _source_identity_for_result(brand, search_model, row, cfg)
+        identity = dict(identity_initial)
         title = safe(row.get("title"))
         snippet = safe(row.get("content"))
         url = safe(row.get("url"))
         search_text = f"{title}\n{snippet}".strip()
+        purpose_text = search_text
         flags: List[str] = []
+        rescue_reason = ""
+        rescue_meta: Dict[str, Any] = {}
+        identity_basis = "PRIMARY_SEARCH_FIELDS"
 
-        decision = "ACCEPT_SOURCE_SIEVE"
-        reason = "Identidade target STRONG/PROBABLE e sem propósito negativo detectado"
+        if identity["level"] not in {"STRONG", "PROBABLE"}:
+            rescued, rescue_reason, rescue_meta = _body_identity_rescue_for_result(
+                brand, search_model, row, cfg, policy
+            )
+            if rescued is not None:
+                identity = rescued
+                identity_basis = "RAW_TARGET_WINDOW_BRAND_MODEL"
+                raw_text = safe(row.get("raw_content")) or safe(row.get("_target_evidence_window"))
+                body_window, _ = _target_evidence_window(
+                    brand, search_model, raw_text, cfg,
+                    int((policy.get("body_identity_rescue", {}) or {}).get("identity_window_chars", 2400) or 2400),
+                )
+                purpose_text = f"{title}\n{snippet}\n{body_window}".strip()
+                flags.append("BODY_IDENTITY_RESCUE")
+
+        decision = "ACCEPT_SOURCE_SIEVE_BODY_RESCUE" if identity_basis == "RAW_TARGET_WINDOW_BRAND_MODEL" else "ACCEPT_SOURCE_SIEVE"
+        reason = (
+            "Identidade target PROBABLE resgatada no BODY com Marca+Modelo próximos"
+            if identity_basis == "RAW_TARGET_WINDOW_BRAND_MODEL"
+            else "Identidade target STRONG/PROBABLE e sem propósito negativo detectado"
+        )
         if identity["level"] not in {"STRONG", "PROBABLE"}:
             decision = "REJECT_WEAK_IDENTITY"
-            reason = f"Identity={identity['level']} abaixo de PROBABLE"
-        elif _target_context_has_only_relation(search_text, search_model, cfg, compatibility, window=180):
+            reason = f"Identity={identity['level']} abaixo de PROBABLE; {rescue_reason or 'sem body rescue'}"
+        elif _target_context_has_only_relation(purpose_text, search_model, cfg, compatibility, window=180):
             decision = "REJECT_COMPATIBILITY_ONLY"
             reason = "Marca/Modelo aparecem em contexto de compatibilidade/substituição"
             flags.append("COMPATIBILITY_ONLY")
-        elif _target_context_has_only_relation(search_text, search_model, cfg, related, window=180):
+        elif _target_context_has_only_relation(purpose_text, search_model, cfg, related, window=180):
             decision = "REJECT_RELATED_ONLY"
             reason = "Marca/Modelo aparecem em contexto de related/similar products"
             flags.append("RELATED_ONLY")
 
-        if _term_present(f"{title}\n{url}\n{snippet}", generic):
+        if _term_present(f"{title}\n{url}\n{snippet}\n{purpose_text[:1200]}", generic):
             flags.append("GENERIC_PAGE_SIGNAL")
 
         audit = {
             "url": url,
             "title": title,
             "tavily_score": row.get("score"),
-            "identity_before": identity["level"],
-            "model_match_field_before": identity["model_match_field"],
+            "identity_before": identity_initial["level"],
+            "model_match_field_before": identity_initial["model_match_field"],
+            "identity_after_sieve": identity["level"],
+            "identity_basis": identity_basis,
+            "body_identity_rescue_reason": rescue_reason,
+            "body_identity_rescue_brand_near": bool(rescue_meta.get("brand_near_anchor")),
+            "body_identity_rescue_occurrences": int(rescue_meta.get("target_occurrences", 0) or 0),
             "sieve_decision": decision,
             "sieve_reason": reason,
             "decision": decision,
@@ -2078,6 +2099,7 @@ def _source_sieve(
         if decision.startswith("ACCEPT_"):
             row2 = dict(row)
             row2["_collection_identity"] = identity["level"]
+            row2["_collection_identity_basis"] = identity_basis
             row2["_sieve_audit_index"] = len(audits) - 1
             accepted.append(row2)
 
@@ -2247,6 +2269,29 @@ def _curate_after_source_sieve(
             evidence_text = snippet
 
         evidence_text = _cap_evidence_text(evidence_text, search_model, cfg)
+
+        # R9.6p7.1: preserve a bounded target-anchored window from ANY enriched
+        # evidence (including Serper/Bright Data local fetch). This survives even
+        # when Target Isolation later rejects the source, allowing option 6/rule
+        # changes to re-evaluate the evidence without another Search request.
+        if evidence_text and evidence_mode != "SEARCH_SNIPPET":
+            persistence_cfg = policy.get("persistence", {}) or {}
+            keep_chars = max(1000, int(persistence_cfg.get("target_evidence_window_chars", 5000) or 5000))
+            remembered_window, remembered_meta = _target_evidence_window(
+                brand, search_model, evidence_text, cfg, keep_chars
+            )
+            if remembered_window:
+                original_key = _url_key(res.get("url", ""))
+                for original in search_results:
+                    if not isinstance(original, dict):
+                        continue
+                    if _url_key(original.get("url", "")) != original_key:
+                        continue
+                    original["_target_evidence_window"] = remembered_window
+                    original["_target_evidence_meta"] = remembered_meta
+                    original["_target_evidence_source"] = evidence_mode
+                    break
+
         isolation = _isolate_target_block(
             brand, search_model, safe(res.get("title")), safe(res.get("url")),
             evidence_text if evidence_mode != "SEARCH_SNIPPET" else "",
@@ -2269,6 +2314,7 @@ def _curate_after_source_sieve(
         if decision.startswith("ACCEPT_"):
             row = _make_curated_result(res, isolation, evidence_mode, evidence_mode)
             row["_collection_identity"] = safe(res.get("_collection_identity"))
+            row["_collection_identity_basis"] = safe(res.get("_collection_identity_basis"))
             row["raw_content"] = None
             curated.append(row)
 
@@ -2526,13 +2572,42 @@ def search_product_once(
         "raw_content_requested": bool(usage.get("raw_content_requested")),
     }]
 
-    # Não persistir raw_content integral da Tavily no RAW cache: ele pode ser muito
-    # grande. O trecho target-isolado já está em curated_results e é suficiente para
-    # classificação/auditoria. Mantemos apenas o indicador de disponibilidade.
+    # Não persistimos raw_content integral, mas preservamos uma janela auditável
+    # target-anchored para que mudanças futuras de regra possam reavaliar a fonte
+    # sem gastar nova Search. O conteúdo integral continua descartado.
+    persistence_cfg = policy.get("persistence", {}) or {}
+    persist_window = bool(persistence_cfg.get("persist_target_evidence_window", True))
+    target_window_chars = max(1000, int(persistence_cfg.get("target_evidence_window_chars", 5000) or 5000))
     persisted_results: List[Dict[str, Any]] = []
     for row in normalized:
         r = dict(row)
-        r["_raw_content_available"] = bool(safe(r.get("raw_content")))
+        raw_text = safe(r.get("raw_content"))
+        r["_raw_content_available"] = bool(raw_text)
+
+        # A janela pode ter vindo do raw_content da Tavily OU de enriquecimento
+        # local de Serper/Bright Data. Nunca apaga uma janela já lembrada.
+        target_window = safe(r.get("_target_evidence_window"))
+        target_meta = r.get("_target_evidence_meta") if isinstance(r.get("_target_evidence_meta"), dict) else {}
+        target_source = safe(r.get("_target_evidence_source"))
+        if not target_meta:
+            target_meta = {
+                "target_occurrences": 0, "brand_near_anchor": False, "window_chars": len(target_window),
+                "anchor_model": search_model,
+            }
+        if persist_window and raw_text:
+            raw_window, raw_meta = _target_evidence_window(
+                brand, search_model, raw_text, cfg, target_window_chars
+            )
+            if raw_window:
+                target_window, target_meta = raw_window, raw_meta
+                target_source = "TAVILY_SEARCH_RAW_CONTENT"
+        r["_target_evidence_window"] = target_window
+        r["_target_evidence_meta"] = target_meta
+        r["_target_evidence_source"] = target_source
+        r["_raw_persistence_state"] = (
+            "TARGET_WINDOW_PERSISTED" if target_window
+            else ("RAW_AVAILABLE_NO_TARGET_WINDOW" if raw_text else "RAW_NOT_AVAILABLE")
+        )
         r["raw_content"] = None
         persisted_results.append(r)
 
@@ -2612,22 +2687,34 @@ def _curate_existing_payload(brand: str, model: str, payload: Dict[str, Any], cf
     for res in raw_results:
         identity = _source_identity_for_result(brand, search_model, res, cfg)
         raw_content = safe(res.get("raw_content"))
+        stored_window = safe(res.get("_target_evidence_window"))
+        evidence_body = raw_content or stored_window
+        if raw_content:
+            cache_depth = "CACHE_RAW"
+        elif stored_window:
+            cache_depth = "CACHE_TARGET_WINDOW"
+        else:
+            cache_depth = "CACHE_SNIPPET_ONLY"
         isolation = _isolate_target_block(
             brand, search_model, safe(res.get("title")), safe(res.get("url")),
-            raw_content, safe(res.get("content")), cfg, policy,
+            evidence_body, safe(res.get("content")), cfg, policy,
         )
         decision = safe(isolation.get("decision"))
         if decision.startswith("ACCEPT_"):
-            row = _make_curated_result(res, isolation, "CACHE_RAW", "CACHE_REBUILD_NO_TAVILY")
+            row = _make_curated_result(res, isolation, cache_depth, "CACHE_REBUILD_NO_TAVILY")
             row["_collection_identity"] = _source_identity_for_result(brand, search_model, row, cfg)["level"]
+            row["_collection_identity_basis"] = (
+                "PERSISTED_TARGET_WINDOW" if stored_window and not raw_content else "CACHE_REBUILD"
+            )
             curated.append(row)
         audit.append({
             "url": safe(res.get("url")), "title": safe(res.get("title")), "tavily_score": res.get("score"),
             "identity_before": identity["level"], "model_match_field_before": identity["model_match_field"],
             "decision": decision, "reason": safe(isolation.get("reason")),
             "quality_flags": list(isolation.get("flags", []) or []), "other_skus": list(isolation.get("other_skus", []) or []),
-            "isolated_chars": len(safe(isolation.get("content"))), "extract_depth": "CACHE_RAW",
+            "isolated_chars": len(safe(isolation.get("content"))), "extract_depth": cache_depth,
             "source_mode": "CACHE_REBUILD_NO_TAVILY",
+            "raw_persistence_state": safe(res.get("_raw_persistence_state")),
         })
     curated = _dedupe_curated(curated)
     curated.sort(key=lambda x: (safe(x.get("_collection_identity")) != "STRONG", -float(x.get("score", 0) or 0)))
@@ -3060,6 +3147,9 @@ class Stage1Result:
     best_source_score: int = 0
     identity_best: str = "WEAK"
     conflict_count: int = 0
+    # Informational hints are deliberately outside AUTO/LLM identity gates.
+    review_type_hints: List[str] = field(default_factory=list)
+    review_hint_evidence: Dict[str, List[str]] = field(default_factory=dict)
 
 
 def _weighted_stats(scores: Dict[str, float]) -> Tuple[str, float, float, str]:
@@ -3263,6 +3353,9 @@ def _source_identity_baseline(
 
     primary_model = model_field in {"TITLE", "URL"}
     body_model = model_field == "BODY"
+    brand_near_body_model = bool(
+        body_model and _brand_near_model_in_text(content, brand, model, suffixes, radius=420)
+    )
     core_model = compact(_model_identity_norm(model))
     numeric_short = bool(core_model.isdigit() and len(core_model) <= 5)
     short_ambiguous = bool(core_model and len(core_model) <= max(1, int(short_model_requires_brand_length or 5)))
@@ -3275,6 +3368,10 @@ def _source_identity_baseline(
         level, score, weight = "PROBABLE", 85, 0.80
     elif body_model and brand_primary:
         level, score, weight = "PROBABLE", 78, 0.72
+    elif body_model and brand_near_body_model:
+        # R9.6p7.1: raw/body só sobe quando Marca+Modelo estão co-localizados.
+        # Continua PROBABLE (não STRONG), portanto nunca vence o hard gate de AUTO.
+        level, score, weight = "PROBABLE", 76, 0.70
     elif body_model and brand_any:
         level, score, weight = "CONTEXTUAL", 60, 0.45
     elif brand_primary:
@@ -3417,6 +3514,89 @@ class DeterministicEngine:
             ))
         return out
 
+    def _review_type_hints(self, brand: str, model: str, payload: Dict[str, Any]) -> Dict[str, List[str]]:
+        """Extract TYPE hints from MODEL and raw Search TITLES without granting identity.
+
+        These hints exist to avoid throwing away obvious lexical information such
+        as "INK PUMP", "CYCLON MINI FAN" or "Centrifugal Pumps". They may
+        populate review candidates/taxonomy, but never satisfy STRONG identity and
+        therefore cannot auto-approve or pass the final LLM resolution gate alone.
+        """
+        hints: Dict[str, List[str]] = defaultdict(list)
+        collection = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
+        hard_rejects = {
+            "REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY",
+            "REJECT_QUERY_IDENTITY_DRIFT",
+        }
+        audit_by_url: Dict[str, str] = {}
+        for row in (collection.get("source_audit", []) or []):
+            if not isinstance(row, dict):
+                continue
+            key = _url_key(row.get("url", ""))
+            if key:
+                audit_by_url[key] = safe(row.get("decision"))
+
+        def collect(label: str, text: str) -> None:
+            value = safe(text)
+            if not value:
+                return
+            probe = Source(
+                source_id=0, title=value, content="", url="", relevance="WEAK",
+                quality_flags=[], identity_score=0, model_match="NONE",
+                model_match_field="NONE", source_weight=0.0,
+                collection_decision="REVIEW_HINT_ONLY",
+            )
+            hits, fields = self._type_hits_for_source(probe, brand, model)
+
+            # Review-only plural tolerance. Production aliases remain untouched;
+            # this only catches obvious title morphology such as
+            # "centrifugal pumps" when the JSON alias is "centrifugal pump".
+            folded_value = norm_text(value)
+            for typ, data in self.rules.types.items():
+                if typ in hits:
+                    continue
+                for alias in (data.get("aliases", []) or []):
+                    alias_n = norm_text(alias)
+                    parts = alias_n.split()
+                    if not parts:
+                        continue
+                    last = parts[-1]
+                    variants: List[str] = []
+                    if len(last) >= 3 and not last.endswith("s"):
+                        variants.append(" ".join(parts[:-1] + [last + "s"]))
+                        if last.endswith(("ch", "sh", "x", "z")):
+                            variants.append(" ".join(parts[:-1] + [last + "es"]))
+                        if len(last) > 3 and last.endswith("y") and len(last) >= 2 and last[-2] not in "aeiou":
+                            variants.append(" ".join(parts[:-1] + [last[:-1] + "ies"]))
+                    if any(contains_alias_prepared(folded_value, v) for v in variants):
+                        if not self._collision_allows(typ, alias):
+                            continue
+                        hits.setdefault(typ, []).append(f"[REVIEW_PLURAL:{alias}]")
+                        fields.setdefault(typ, []).append("TITLE")
+                        break
+
+            for typ in hits:
+                # MODEL/TITLE hints are lexical suggestions only.
+                if "TITLE" not in set(fields.get(typ, []) or []) and "MODEL_RULE" not in set(fields.get(typ, []) or []):
+                    continue
+                evidence = f"{label}:{value[:240]}"
+                if evidence not in hints[typ]:
+                    hints[typ].append(evidence)
+
+        collect("MODEL", model)
+        for res in (payload.get("results", []) or []):
+            if not isinstance(res, dict):
+                continue
+            title = safe(res.get("title"))
+            if not title:
+                continue
+            decision = audit_by_url.get(_url_key(res.get("url", "")), "")
+            if decision in hard_rejects:
+                continue
+            collect("TITLE", title)
+
+        return dict(hints)
+
     def _collision_allows(self, typ: str, alias: str) -> bool:
         normalized = norm_text(alias)
         owners = sorted(set(self.rules.alias_to_types.get(normalized, [])))
@@ -3477,8 +3657,6 @@ class DeterministicEngine:
         brand_key = canonical_display(brand)
         model_for_rule = derive_search_model(brand, model, self.cfg) if model else safe(model)
         for rule in self.rules.taxonomy_evidence_rules:
-            if bool(rule.get("semantic_only", False)):
-                continue
             typ = safe(rule.get("primary_type"))
             if typ not in self.rules.types:
                 continue
@@ -3644,7 +3822,12 @@ class DeterministicEngine:
             for power in anchored_powers:
                 all_power_hits[power].append(src.source_id)
 
+        # Core Stage 1 candidates remain based ONLY on target-anchored evidence.
+        # MODEL/TITLE hints are kept on a separate review track so they cannot
+        # create ambiguity, resolve TYPE, or enter the LLM funnel.
         type_candidates = self._apply_specificity(all_type_hits.keys())
+        review_hint_evidence = self._review_type_hints(brand, model, payload)
+        review_type_hints = self._apply_specificity(review_hint_evidence.keys())
         power_candidates = sorted(all_power_hits.keys())
         # Após especificidade, métricas só consideram candidatos sobreviventes.
         type_support = {t: len(set(all_type_hits.get(t, []))) for t in type_candidates}
@@ -3660,6 +3843,8 @@ class DeterministicEngine:
         }
         _, power_share, power_margin, _ = _weighted_stats(power_scores)
         reasons: List[str] = []
+        if review_type_hints:
+            reasons.append("REVIEW_TYPE_HINTS:" + ",".join(review_type_hints))
 
         product_type: Optional[str] = None
         if len(type_candidates) == 1:
@@ -3745,6 +3930,8 @@ class DeterministicEngine:
             best_source_score=best_source_score,
             identity_best=identity_best,
             conflict_count=0,
+            review_type_hints=review_type_hints,
+            review_hint_evidence=review_hint_evidence,
         )
 
 
@@ -3933,177 +4120,6 @@ def _single_funnel_candidate_can_resolve(rules: Rules, s1: Stage1Result, typ: st
 
 
 # -----------------------------------------------------------------------------
-# R9.6p8 - Semantic Product Pilot
-# -----------------------------------------------------------------------------
-def _semantic_tokens(text: str) -> set:
-    return {x for x in norm_text(text).split() if len(x) >= 2}
-
-
-def semantic_taxonomy_candidates(
-    rules: Rules,
-    raw_type: str,
-    limit: int = 5,
-) -> List[Dict[str, Any]]:
-    """Recupera candidatos canônicos sem expor toda a taxonomia à LLM.
-
-    A busca é somente local sobre PRODUCT_TYPES/aliases/famílias do JSON.
-    Não usa embeddings, internet ou fuzzy de Marca+Modelo.
-    """
-    raw_norm = norm_text(raw_type)
-    if not raw_norm:
-        return []
-    raw_tokens = _semantic_tokens(raw_norm)
-    labels_by_type: Dict[str, set] = defaultdict(set)
-    for typ, spec in rules.types.items():
-        labels_by_type[typ].add(typ)
-        for alias in (spec.get("aliases", []) or []):
-            if safe(alias):
-                labels_by_type[typ].add(safe(alias))
-        fp = spec.get("fallback_pair")
-        if isinstance(fp, list) and len(fp) == 2 and safe(fp[1]):
-            labels_by_type[typ].add(safe(fp[1]))
-    for row in rules.taxonomy_rules:
-        typ = safe(row.get("primary_type"))
-        fam = safe(row.get("family"))
-        if typ in rules.types and fam:
-            labels_by_type[typ].add(fam)
-    for row in rules.taxonomy_evidence_rules:
-        typ = safe(row.get("primary_type"))
-        fam = safe(row.get("family"))
-        if typ in rules.types and fam:
-            labels_by_type[typ].add(fam)
-
-    scored: List[Tuple[float, int, str, str]] = []
-    for typ, labels in labels_by_type.items():
-        best_score = 0.0
-        best_label = ""
-        best_len = 0
-        for label in labels:
-            ln = norm_text(label)
-            if not ln:
-                continue
-            lt = _semantic_tokens(ln)
-            if raw_norm == ln:
-                score = 1.0
-            elif ln in raw_norm and len(lt) >= 1:
-                score = 0.94 + min(0.04, 0.01 * len(lt))
-            elif raw_norm in ln and len(raw_tokens) >= 1:
-                score = 0.90
-            else:
-                union = raw_tokens | lt
-                jacc = (len(raw_tokens & lt) / len(union)) if union else 0.0
-                seq = SequenceMatcher(None, raw_norm, ln).ratio()
-                score = 0.62 * jacc + 0.38 * seq
-            if score > best_score or (score == best_score and len(ln) > best_len):
-                best_score = score
-                best_label = label
-                best_len = len(ln)
-        scored.append((best_score, best_len, typ, best_label))
-
-    scored.sort(key=lambda x: (x[0], x[1], rules.specificity_rank.get(x[2], 0)), reverse=True)
-    floor = float(rules.semantic_policy.get("candidate_min_score", 0.28) or 0.28)
-    out = []
-    for score, _, typ, label in scored:
-        if score < floor:
-            continue
-        out.append({"type": typ, "score": round(score, 4), "matched_label": label})
-        if len(out) >= max(1, int(limit)):
-            break
-    return out
-
-
-def semantic_resolve_canonical(
-    rules: Rules,
-    raw_type: str,
-    product_role: str,
-) -> Tuple[str, List[Dict[str, Any]], str]:
-    """Normaliza TYPE_RAW da LLM para o TYPE canônico controlado pelo JSON."""
-    policy = rules.semantic_policy or {}
-    role = safe(product_role).upper()
-    role_overrides = {safe(k).upper(): safe(v) for k, v in (policy.get("role_overrides", {}) or {}).items()}
-    if role in role_overrides and role_overrides[role] in rules.types:
-        typ = role_overrides[role]
-        return typ, [{"type": typ, "score": 1.0, "matched_label": f"ROLE:{role}"}], "ROLE_OVERRIDE"
-
-    raw_norm = norm_text(raw_type)
-    bridges = {norm_text(k): safe(v) for k, v in (policy.get("raw_type_alias_to_canonical", {}) or {}).items()}
-    if raw_norm in bridges and bridges[raw_norm] in rules.types:
-        typ = bridges[raw_norm]
-        return typ, [{"type": typ, "score": 1.0, "matched_label": raw_type}], "RAW_TYPE_BRIDGE"
-
-    candidates = semantic_taxonomy_candidates(
-        rules,
-        raw_type,
-        limit=int(policy.get("max_taxonomy_candidates", 5) or 5),
-    )
-    if not candidates:
-        return "", [], "NO_TAXONOMY_CANDIDATE"
-    top = candidates[0]
-    second = candidates[1]["score"] if len(candidates) > 1 else 0.0
-    threshold = float(policy.get("deterministic_match_threshold", 0.90) or 0.90)
-    margin = float(policy.get("deterministic_margin", 0.08) or 0.08)
-    if float(top["score"]) >= threshold and (float(top["score"]) - float(second)) >= margin:
-        return safe(top["type"]), candidates, "DETERMINISTIC_SEMANTIC_MATCH"
-    return "", candidates, "NEEDS_LLM_TAXONOMY_VALIDATION"
-
-
-def semantic_grounding_ok(
-    rules: Rules,
-    s1: Stage1Result,
-    data: Dict[str, Any],
-) -> Tuple[bool, str]:
-    decision = safe(data.get("decision")).upper()
-    if decision not in {"IDENTIFIED", "INSUFFICIENT_EVIDENCE", "CONFLICT"}:
-        return False, "SEMANTIC_DECISION_INVALID"
-    if decision != "IDENTIFIED":
-        return True, "OK"
-    raw_type = safe(data.get("product_type_raw"))
-    if not raw_type:
-        return False, "SEMANTIC_TYPE_EMPTY"
-    power = safe(data.get("power")).upper() or "UNKNOWN"
-    if power not in rules.allowed_powers:
-        return False, "SEMANTIC_POWER_INVALID"
-    refs = data.get("evidence_source_ids", []) or []
-    if not isinstance(refs, list) or not refs:
-        return False, "SEMANTIC_EVIDENCE_REFS_EMPTY"
-    by_id = {s.source_id: s for s in s1.sources}
-    if any((not isinstance(x, int) or x not in by_id) for x in refs):
-        return False, "SEMANTIC_EVIDENCE_REFS_INVALID"
-    min_identity = safe(rules.semantic_policy.get("min_identity", "PROBABLE")).upper() or "PROBABLE"
-    rank = DeterministicEngine.IDENTITY_RANK
-    cited = [by_id[x] for x in refs]
-    if not any(rank.get(src.relevance, 0) >= rank.get(min_identity, 3) for src in cited):
-        return False, "SEMANTIC_IDENTITY_TOO_WEAK"
-    if bool(rules.semantic_policy.get("require_grounded_evidence_phrase", True)):
-        phrase = norm_text(data.get("evidence_phrase"))
-        if len(phrase) < 4:
-            return False, "SEMANTIC_EVIDENCE_PHRASE_EMPTY"
-        grounded = any(phrase in norm_text(src.text) for src in cited)
-        if not grounded:
-            return False, "SEMANTIC_EVIDENCE_PHRASE_NOT_GROUNDED"
-    return True, "OK"
-
-
-def semantic_taxonomy_result(
-    rules: Rules,
-    s1: Stage1Result,
-    canonical_type: str,
-    raw_type: str,
-    power: str,
-    refs: Sequence[int],
-    brand: str,
-    model: str,
-) -> Tuple[str, str, str]:
-    by_id = {s.source_id: s for s in s1.sources}
-    chunks = [by_id[x].text for x in refs if x in by_id and by_id[x].text]
-    # O TYPE_RAW da LLM funciona como ponte semântica para evidence rules,
-    # mas nunca cria Category/FAMILY fora do JSON.
-    chunks.append(f"SEMANTIC_TYPE_RAW: {safe(raw_type)}")
-    evidence = "\n---SOURCE---\n".join(chunks)
-    return rules.map_taxonomy(canonical_type, power or "UNKNOWN", evidence, brand, model)
-
-
-# -----------------------------------------------------------------------------
 # Classificação DB / checkpoint
 # -----------------------------------------------------------------------------
 class ClassificationDB:
@@ -4249,18 +4265,6 @@ class ClassificationDB:
             return json.loads(row["response_json"]), json.loads(row["usage_json"] or "{}")
         except Exception:
             return None
-
-    def delete_llm(
-        self,
-        key: str,
-        raw_hash: str,
-        rules_hash: str,
-        provider: str,
-        model: str,
-    ) -> None:
-        cid = self.llm_cache_id(key, raw_hash, rules_hash, provider, model)
-        self.conn.execute("DELETE FROM llm_cache WHERE cache_id=?", (cid,))
-        self.conn.commit()
 
     def put_llm(
         self,
@@ -4647,75 +4651,6 @@ class OpenAICompatibleClassifier:
             return "nvidia:[" + ",".join(candidates) + "]"
         return f"{self.provider}:{self.model}"
 
-    def _discover_groq_model(self) -> Dict[str, Any]:
-        """Valida credencial e modelo Groq antes de entrar na rota do piloto.
-
-        p8.4: possuir GROQ_API_KEY no .env não é suficiente; a chave precisa
-        autenticar de fato. Um 401/403 aqui desabilita o fallback antes da
-        primeira inferência, evitando derrubar o lote depois de uma falha NVIDIA.
-        """
-        import requests
-
-        headers = {
-            "Authorization": f"Bearer {os.environ[self.api_key_env].strip()}",
-            "Accept": "application/json",
-        }
-        models_url = self.base_url + "/models"
-        try:
-            resp = requests.get(
-                models_url,
-                headers=headers,
-                timeout=min(self.timeout_seconds, 30),
-            )
-        except requests.RequestException as exc:
-            raise OperationalPause(
-                "GROQ_PREFLIGHT_NETWORK",
-                f"Falha de rede ao validar Groq em GET /models: {type(exc).__name__}: {safe(exc)}",
-            ) from exc
-
-        detail = safe(resp.text)[:1500]
-        if resp.status_code in {401, 403}:
-            raise OperationalPause(
-                "GROQ_AUTH",
-                f"Groq rejeitou a credencial no preflight (HTTP {resp.status_code}). Atualize GROQ_API_KEY ou remova Groq da rota do piloto.",
-            )
-        if resp.status_code == 429:
-            raise OperationalPause(
-                "GROQ_RATE_LIMIT",
-                f"Groq indisponível no preflight por rate/quota limit: {detail}",
-            )
-        if resp.status_code != 200:
-            raise OperationalPause(
-                f"GROQ_PREFLIGHT_HTTP_{resp.status_code}",
-                f"Groq GET /models falhou no preflight: {detail}",
-            )
-
-        try:
-            payload = resp.json() or {}
-            available = {
-                safe(row.get("id"))
-                for row in (payload.get("data", []) or [])
-                if safe(row.get("id"))
-            }
-        except Exception as exc:
-            raise OperationalPause(
-                "GROQ_PREFLIGHT_PARSE",
-                f"Groq GET /models retornou JSON inválido: {type(exc).__name__}: {safe(exc)}",
-            ) from exc
-
-        if self.model not in available:
-            raise OperationalPause(
-                "GROQ_MODEL_UNAVAILABLE",
-                f"Modelo Groq configurado não está disponível: {self.model}",
-            )
-
-        return {
-            "requested_model": self.model,
-            "selected_model": self.model,
-            "available_count": len(available),
-            "auth_validated": True,
-        }
-
     def _discover_openrouter_model(self) -> Dict[str, Any]:
         """Valida chave/modelo diretamente no catálogo vivo do OpenRouter.
 
@@ -4861,8 +4796,6 @@ class OpenAICompatibleClassifier:
         discovery = None
         if self.provider == "nvidia":
             discovery = self._discover_nvidia_model()
-        elif self.provider == "groq":
-            discovery = self._discover_groq_model()
         elif self.provider == "openrouter":
             discovery = self._discover_openrouter_model()
 
@@ -5410,7 +5343,7 @@ class OpenAICompatibleClassifier:
 
     def _wait_provider_limits(self, payload: Dict[str, Any]) -> None:
         """Aplica pacing RPM e, no Groq, também a janela TPM."""
-        self.limiter.wait(self.provider.upper())
+        self.limiter.wait()
         if self.groq_window_limiter is not None:
             estimated = self._estimate_request_tokens(payload)
             self.groq_window_limiter.wait(estimated)
@@ -5460,402 +5393,6 @@ class OpenAICompatibleClassifier:
             prompt_to_source_id[x] for x in normalized_local
         ]
         return out, True
-
-    def _structured_json_call(
-        self,
-        *,
-        cache_scope: str,
-        key: str,
-        raw_hash: str,
-        schema_name: str,
-        schema: Dict[str, Any],
-        messages: List[Dict[str, str]],
-    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
-        """Chamada estruturada reutilizável para o piloto semântico.
-
-        O namespace de cache é separado da classificação legada para impedir
-        colisão entre respostas de prompts com contratos diferentes.
-        """
-        scoped_rules_hash = hashlib.sha256(
-            f"{self.rules.hash}|{cache_scope}".encode("utf-8")
-        ).hexdigest()
-        cached = self.db.get_llm(key, raw_hash, scoped_rules_hash, self.provider, self.model)
-        if cached is not None:
-            data, usage = cached
-            contract_errors = _json_schema_contract_errors(data, schema)
-            if not contract_errors:
-                return data, True, usage
-            LOG.warning(
-                "%s SEMANTIC CACHE INVALID | schema=%s | errors=%s | descartando e refazendo chamada",
-                self.provider.upper(), schema_name, ",".join(contract_errors[:6]),
-            )
-            self.db.delete_llm(key, raw_hash, scoped_rules_hash, self.provider, self.model)
-
-        if self.max_calls_per_run and self.api_calls >= self.max_calls_per_run:
-            raise OperationalPause(
-                f"{self.provider.upper()}_RUN_CAP",
-                f"Limite local de {self.max_calls_per_run} chamadas {self.provider.upper()}/run atingido.",
-            )
-        if self.max_total_tokens_per_run and self.total_tokens >= self.max_total_tokens_per_run:
-            raise OperationalPause(
-                f"{self.provider.upper()}_LOCAL_TOKEN_CAP",
-                f"Cap real de {self.max_total_tokens_per_run} tokens/run atingido. Consumidos={self.total_tokens}.",
-            )
-
-        self.api_calls += 1
-        if self.provider in {"groq", "openrouter"}:
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": schema_name,
-                        "strict": True,
-                        "schema": schema,
-                    },
-                },
-                "temperature": 0,
-                "stream": False,
-            }
-            if self.provider == "groq":
-                payload["reasoning_effort"] = self.reasoning_effort
-                payload["max_completion_tokens"] = self.max_output_tokens
-            else:
-                payload["max_tokens"] = self.max_output_tokens
-        else:
-            # NVIDIA aceita JSON Object Mode, mas não recebe o JSON Schema pelo
-            # response_format como Groq/OpenRouter. p8.3 validava um contrato que
-            # o modelo nunca tinha visto explicitamente, o que podia gerar JSON
-            # válido porém com campos ausentes. p8.4 injeta o schema completo no
-            # último turno do prompt e continua validando em Python.
-            nvidia_messages = [dict(m) for m in messages]
-            schema_instruction = (
-                "\n\nOUTPUT CONTRACT - return ONLY one JSON object that matches this JSON Schema exactly. "
-                "Every required field must be present; use only the declared enum values; do not add fields.\n"
-                + json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
-            )
-            if nvidia_messages and safe(nvidia_messages[-1].get("role")).casefold() == "user":
-                nvidia_messages[-1]["content"] = safe(nvidia_messages[-1].get("content")) + schema_instruction
-            else:
-                nvidia_messages.append({"role": "user", "content": schema_instruction.strip()})
-            payload = {
-                "model": self.model,
-                "messages": nvidia_messages,
-                "response_format": {"type": "json_object"},
-                "temperature": 0,
-                "max_tokens": self.max_output_tokens,
-                "stream": False,
-            }
-            # NVIDIA GPT-OSS expõe reasoning_effort no endpoint de Chat Completions.
-            # Manter LOW reduz raciocínio residual e reserva o orçamento de saída
-            # para o JSON final do contrato semântico.
-            if self.model.startswith("openai/gpt-oss-"):
-                payload["reasoning_effort"] = self.reasoning_effort
-            if self.model == "nvidia/nemotron-3.5-lightning-30b-a3b":
-                payload["chat_template_kwargs"] = {"enable_thinking": False}
-
-        parse_max_attempts = 2
-        failed_parse_tokens = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        data: Optional[Dict[str, Any]] = None
-        usage: Optional[Dict[str, Any]] = None
-        last_error: Optional[Exception] = None
-
-        for parse_attempt in range(1, parse_max_attempts + 1):
-            self._wait_provider_limits(payload)
-            resp = self._post(payload)
-            try:
-                envelope = resp.json()
-                raw_usage = envelope.get("usage", {}) or {}
-                current_usage = {
-                    "prompt_tokens": int(raw_usage.get("prompt_tokens", 0) or 0),
-                    "completion_tokens": int(raw_usage.get("completion_tokens", 0) or 0),
-                    "total_tokens": int(raw_usage.get("total_tokens", 0) or 0),
-                }
-                content = safe(envelope["choices"][0]["message"]["content"])
-                data = self._decode_model_json(content)
-                contract_errors = _json_schema_contract_errors(data, schema)
-                if contract_errors:
-                    raise ValueError("SEMANTIC_SCHEMA_INVALID: " + "; ".join(contract_errors[:8]))
-                usage = {
-                    **current_usage,
-                    "rate_limit_headers": self._header_snapshot(resp),
-                    "json_parse_retries": parse_attempt - 1,
-                    "failed_parse_tokens": failed_parse_tokens["total_tokens"],
-                }
-                break
-            except Exception as exc:
-                last_error = exc
-                try:
-                    envelope_for_usage = resp.json()
-                    raw_failed = envelope_for_usage.get("usage", {}) or {}
-                    for k in failed_parse_tokens:
-                        failed_parse_tokens[k] += int(raw_failed.get(k, 0) or 0)
-                except Exception:
-                    pass
-                if parse_attempt < parse_max_attempts:
-                    retry_payload = dict(payload)
-                    retry_messages = list(payload.get("messages", []))
-                    retry_messages.append({
-                        "role": "user",
-                        "content": "Return ONLY one syntactically valid JSON object matching the requested schema. No markdown or commentary.",
-                    })
-                    retry_payload["messages"] = retry_messages
-                    payload = retry_payload
-                    self.api_calls += 1
-                    time.sleep(1.0)
-                    continue
-                raise OperationalPause(
-                    f"{self.provider.upper()}_OUTPUT_PARSE",
-                    f"Falha ao interpretar JSON semântico após {parse_max_attempts} tentativa(s): {type(exc).__name__}: {safe(exc)}",
-                ) from exc
-
-        if data is None or usage is None:
-            raise OperationalPause(
-                f"{self.provider.upper()}_OUTPUT_PARSE",
-                f"Resposta semântica sem JSON válido: {safe(last_error)}",
-            )
-
-        self.prompt_tokens += usage["prompt_tokens"] + failed_parse_tokens["prompt_tokens"]
-        self.completion_tokens += usage["completion_tokens"] + failed_parse_tokens["completion_tokens"]
-        self.total_tokens += usage["total_tokens"] + failed_parse_tokens["total_tokens"]
-        self.db.put_llm(
-            key, raw_hash, scoped_rules_hash, self.provider, self.model, data, usage
-        )
-        return data, False, usage
-
-    def semantic_contract_smoke(self) -> Dict[str, Any]:
-        """Executa UMA inferência real antes do piloto para provar o contrato JSON.
-
-        Diferente de GET /models, este teste valida o caminho que de fato falhou
-        no p8.3: autenticação + inferência + JSON parse + aderência ao schema.
-        Em NVIDIA, testa os candidatos servidos em ordem e fixa o primeiro que
-        cumprir o contrato. Nenhum resultado do smoke permanece no cache.
-        """
-        schema = {
-            "type": "object",
-            "properties": {
-                "decision": {"type": "string", "enum": ["IDENTIFIED", "INSUFFICIENT_EVIDENCE", "CONFLICT"]},
-                "product_type_raw": {"type": "string"},
-                "product_role": {"type": "string", "enum": ["WHOLE_PRODUCT", "COMPONENT_PART", "ACCESSORY", "ASSEMBLY", "UNKNOWN"]},
-                "domain_hint": {"type": "string", "enum": ["GARDEN_OUTDOOR", "INDUSTRIAL_HVAC", "AUTOMOTIVE", "AGRICULTURAL", "POWER_TOOL", "PUMP_FLUID", "ELECTRONICS", "OTHER", "UNKNOWN"]},
-                "power": {"type": "string", "enum": sorted(set(self.rules.allowed_powers))},
-                "evidence_source_ids": {"type": "array", "items": {"type": "integer"}},
-                "evidence_phrase": {"type": "string"},
-                "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
-                "reason_short": {"type": "string"},
-            },
-            "required": ["decision", "product_type_raw", "product_role", "domain_hint", "power", "evidence_source_ids", "evidence_phrase", "confidence", "reason_short"],
-            "additionalProperties": False,
-        }
-        expected_phrase = "TEST PRODUCT"
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Provider contract smoke test. Return only the requested JSON object. "
-                    "Do not explain or add markdown."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    "Return a valid contract object for the literal evidence TEST PRODUCT. "
-                    "Use decision=IDENTIFIED, product_type_raw=TEST PRODUCT, "
-                    "product_role=WHOLE_PRODUCT, domain_hint=OTHER, power=UNKNOWN, "
-                    "evidence_source_ids=[1], evidence_phrase=TEST PRODUCT, "
-                    "confidence=HIGH, reason_short=provider contract smoke."
-                ),
-            },
-        ]
-
-        original_model = self.model
-        candidates = [self.model]
-        if self.provider == "nvidia":
-            candidates = list(getattr(self, "available_model_candidates", []) or self.model_candidates or [self.model])
-
-        errors: List[str] = []
-        for candidate in candidates:
-            self.model = candidate
-            smoke_scope = SEMANTIC_PROMPT_VERSION + "-live-provider-smoke"
-            smoke_key = "__SEMANTIC_PROVIDER_SMOKE__"
-            smoke_raw_hash = hashlib.sha256((self.provider + "|" + candidate + "|" + expected_phrase).encode("utf-8")).hexdigest()
-            scoped_rules_hash = hashlib.sha256(
-                f"{self.rules.hash}|{smoke_scope}".encode("utf-8")
-            ).hexdigest()
-            # Força inferência AO VIVO em toda execução; cache não pode mascarar provider quebrado.
-            self.db.delete_llm(smoke_key, smoke_raw_hash, scoped_rules_hash, self.provider, candidate)
-            started = time.monotonic()
-            try:
-                data, _hit, usage = self._structured_json_call(
-                    cache_scope=smoke_scope,
-                    key=smoke_key,
-                    raw_hash=smoke_raw_hash,
-                    schema_name="semantic_provider_contract_smoke",
-                    schema=schema,
-                    messages=messages,
-                )
-                if safe(data.get("decision")).upper() != "IDENTIFIED":
-                    raise OperationalPause(
-                        f"{self.provider.upper()}_STRUCTURED_SMOKE_INVALID",
-                        f"Smoke respondeu decision={safe(data.get('decision'))!r}.",
-                    )
-                if safe(data.get("product_type_raw")).upper() != expected_phrase:
-                    raise OperationalPause(
-                        f"{self.provider.upper()}_STRUCTURED_SMOKE_INVALID",
-                        f"Smoke respondeu product_type_raw={safe(data.get('product_type_raw'))!r}.",
-                    )
-                return {
-                    "provider": self.provider,
-                    "model": self.model,
-                    "elapsed_seconds": round(time.monotonic() - started, 2),
-                    "total_tokens": int((usage or {}).get("total_tokens", 0) or 0),
-                }
-            except OperationalPause as exc:
-                errors.append(f"{candidate}:{exc.code}")
-                LOG.warning(
-                    "LLM LIVE SMOKE FAIL | provider=%s | model=%s | code=%s | %s",
-                    self.provider.upper(), candidate, exc.code, safe(exc),
-                )
-            finally:
-                self.db.delete_llm(smoke_key, smoke_raw_hash, scoped_rules_hash, self.provider, candidate)
-
-        self.model = original_model
-        raise OperationalPause(
-            f"{self.provider.upper()}_STRUCTURED_SMOKE_FAILED",
-            "Nenhum modelo do provider completou uma inferência JSON válida. " + " | ".join(errors),
-        )
-
-    def semantic_identify(
-        self,
-        key: str,
-        raw_hash: str,
-        brand: str,
-        model: str,
-        s1: Stage1Result,
-    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
-        policy = self.rules.semantic_policy or {}
-        max_sources = max(1, int(policy.get("max_sources", 3) or 3))
-        rank = DeterministicEngine.IDENTITY_RANK
-        min_identity = safe(policy.get("min_identity", "PROBABLE")).upper() or "PROBABLE"
-        eligible_sources = [
-            src for src in s1.sources
-            if rank.get(src.relevance, 0) >= rank.get(min_identity, 3)
-        ]
-        sources_ranked = sorted(
-            eligible_sources,
-            key=lambda src: (
-                rank.get(src.relevance, 0),
-                src.identity_score,
-                src.source_weight,
-                1 if src.title else 0,
-            ),
-            reverse=True,
-        )[:max_sources]
-        prompt_to_source_id: Dict[int, int] = {}
-        prompt_sources = []
-        for i, src in enumerate(sources_ranked, 1):
-            prompt_to_source_id[i] = src.source_id
-            prompt_sources.append({
-                "id": i,
-                "identity": src.relevance,
-                "model_match": src.model_match,
-                "title": src.title,
-                "content": src.content[: self.evidence_content_chars],
-            })
-
-        schema = {
-            "type": "object",
-            "properties": {
-                "decision": {"type": "string", "enum": ["IDENTIFIED", "INSUFFICIENT_EVIDENCE", "CONFLICT"]},
-                "product_type_raw": {"type": "string"},
-                "product_role": {"type": "string", "enum": ["WHOLE_PRODUCT", "COMPONENT_PART", "ACCESSORY", "ASSEMBLY", "UNKNOWN"]},
-                "domain_hint": {"type": "string", "enum": ["GARDEN_OUTDOOR", "INDUSTRIAL_HVAC", "AUTOMOTIVE", "AGRICULTURAL", "POWER_TOOL", "PUMP_FLUID", "ELECTRONICS", "OTHER", "UNKNOWN"]},
-                "power": {"type": "string", "enum": sorted(set(self.rules.allowed_powers))},
-                "evidence_source_ids": {"type": "array", "items": {"type": "integer"}},
-                "evidence_phrase": {"type": "string"},
-                "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
-                "reason_short": {"type": "string"},
-            },
-            "required": ["decision", "product_type_raw", "product_role", "domain_hint", "power", "evidence_source_ids", "evidence_phrase", "confidence", "reason_short"],
-            "additionalProperties": False,
-        }
-        system = SEMANTIC_DEFINITION_SYSTEM_PROMPT
-        user = json.dumps({
-            "brand_from_import": brand,
-            "model": model,
-            "sources": prompt_sources,
-        }, ensure_ascii=False)
-        data, hit, usage = self._structured_json_call(
-            cache_scope=SEMANTIC_PROMPT_VERSION,
-            key=key,
-            raw_hash=raw_hash,
-            schema_name="semantic_product_definition",
-            schema=schema,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        )
-        data, refs_ok = self._normalize_evidence_refs(data, prompt_to_source_id)
-        usage = dict(usage or {})
-        usage["evidence_refs_valid"] = refs_ok
-        usage["semantic_prompt_sources"] = prompt_to_source_id
-        return data, hit, usage
-
-    def semantic_map(
-        self,
-        key: str,
-        raw_hash: str,
-        raw_type: str,
-        product_role: str,
-        domain_hint: str,
-        candidates: Sequence[Dict[str, Any]],
-    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
-        allowed = [safe(x.get("type")) for x in candidates if safe(x.get("type")) in self.rules.types]
-        if not allowed:
-            return {"decision": "NONE", "canonical_type": "NONE", "reason_short": "No taxonomy candidates"}, True, {}
-        candidate_rows = []
-        for row in candidates:
-            typ = safe(row.get("type"))
-            if typ not in allowed:
-                continue
-            spec = self.rules.types.get(typ, {}) or {}
-            candidate_rows.append({
-                "canonical_type": typ,
-                "matched_label": safe(row.get("matched_label")),
-                "score": row.get("score"),
-                "aliases": list(spec.get("aliases", []) or [])[:6],
-            })
-        schema = {
-            "type": "object",
-            "properties": {
-                "decision": {"type": "string", "enum": ["MATCH", "NONE"]},
-                "canonical_type": {"type": "string", "enum": sorted(set(allowed) | {"NONE"})},
-                "reason_short": {"type": "string"},
-            },
-            "required": ["decision", "canonical_type", "reason_short"],
-            "additionalProperties": False,
-        }
-        system = (
-            "You map an already-identified physical product type to a controlled taxonomy. "
-            "You may choose ONLY one supplied canonical candidate or NONE. Do not force a match. "
-            "Match physical meaning, not superficial shared words. product_role and domain_hint are supporting context."
-        )
-        user = json.dumps({
-            "product_type_raw": raw_type,
-            "product_role": product_role,
-            "domain_hint": domain_hint,
-            "candidates": candidate_rows,
-        }, ensure_ascii=False)
-        map_key = key + "|SEM_MAP|" + hashlib.sha256(
-            json.dumps([raw_type, product_role, domain_hint, allowed], ensure_ascii=False).encode("utf-8")
-        ).hexdigest()[:16]
-        return self._structured_json_call(
-            cache_scope=SEMANTIC_MAP_PROMPT_VERSION,
-            key=map_key,
-            raw_hash=raw_hash,
-            schema_name="semantic_taxonomy_mapping",
-            schema=schema,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        )
 
     def classify(
         self,
@@ -6185,58 +5722,6 @@ class ProviderCascade:
         self.active_index = enabled_indexes[0]
         return results
 
-    def semantic_live_smoke_all(self) -> List[Dict[str, Any]]:
-        """Prova inferência estruturada real e desabilita providers incompatíveis.
-
-        Só é usado no Product Definition Pilot. Se todos falharem, o piloto
-        encerra ANTES do primeiro produto em vez de descobrir o problema no lote.
-        """
-        results: List[Dict[str, Any]] = []
-        enabled_indexes: List[int] = []
-        for idx, provider in enumerate(self.providers):
-            if idx in self.disabled:
-                continue
-            LOG.info(
-                "LLM LIVE SMOKE START | provider=%s | model=%s",
-                provider.provider.upper(), provider.model,
-            )
-            try:
-                result = dict(provider.semantic_contract_smoke() or {})
-                result["enabled"] = True
-                result["error_code"] = ""
-                results.append(result)
-                enabled_indexes.append(idx)
-                LOG.info(
-                    "LLM LIVE SMOKE PASS | provider=%s | model=%s | %.1fs",
-                    provider.provider.upper(), provider.model, float(result.get("elapsed_seconds", 0.0) or 0.0),
-                )
-            except OperationalPause as exc:
-                self.disabled.add(idx)
-                results.append({
-                    "provider": provider.provider,
-                    "model": provider.model,
-                    "enabled": False,
-                    "error_code": exc.code,
-                    "error_detail": safe(exc),
-                })
-                LOG.warning(
-                    "LLM LIVE SMOKE SKIP | provider=%s | model=%s | code=%s | %s",
-                    provider.provider.upper(), provider.model, exc.code, safe(exc),
-                )
-
-        if not enabled_indexes:
-            details = " | ".join(
-                f"{x.get('provider')}={x.get('error_code')}" for x in results
-            )
-            raise OperationalPause(
-                "LLM_NO_STRUCTURED_PROVIDER_AVAILABLE",
-                "Nenhum provider concluiu o live structured-output smoke. " + details,
-            )
-
-        # Se o primeiro provider foi desabilitado no smoke, reposiciona a rota.
-        self.active_index = enabled_indexes[0]
-        return results
-
     def enabled_route(self) -> List[OpenAICompatibleClassifier]:
         return [
             p for idx, p in enumerate(self.providers)
@@ -6323,85 +5808,6 @@ class ProviderCascade:
                     self.active.provider.upper(),
                     self.active.model,
                 )
-
-
-    def _semantic_invoke(self, method_name: str, *args) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
-        while True:
-            current = self.active
-            try:
-                method = getattr(current, method_name)
-                data, cache_hit, usage = method(*args)
-                usage = dict(usage or {})
-                usage["provider"] = current.provider
-                usage["model"] = current.model
-                return data, cache_hit, usage
-            except OperationalPause as exc:
-                nvidia_model_failover = (
-                    current.provider == "nvidia"
-                    and (
-                        exc.code.endswith("_OUTPUT_PARSE")
-                        or exc.code.endswith("_JSON_TOKEN_LIMIT")
-                        or exc.code.endswith("_MODEL_EOL")
-                        or (
-                            not self.switch_only_on_quota_exhaustion
-                            and exc.code.endswith("_TRANSIENT")
-                        )
-                    )
-                )
-                if nvidia_model_failover and current.advance_nvidia_model(exc.code):
-                    continue
-                always_rotate = (
-                    exc.code in self.EXHAUSTION_CODES
-                    or exc.code.endswith("_LOCAL_TOKEN_CAP")
-                    or exc.code.endswith("_RUN_CAP")
-                    or exc.code.endswith("_OUTPUT_PARSE")
-                    or exc.code.endswith("_JSON_TOKEN_LIMIT")
-                )
-                operational_rotate = (
-                    not self.switch_only_on_quota_exhaustion
-                    and (
-                        exc.code.endswith("_TRANSIENT")
-                        or exc.code.endswith("_RATE_LIMIT")
-                        or exc.code.endswith("_MODEL_EOL")
-                    )
-                )
-                if not (always_rotate or operational_rotate):
-                    raise
-                old_provider = current.provider.upper()
-                old_model = current.model
-                self.disabled.add(self.active_index)
-                if not self._advance():
-                    raise
-                LOG.warning(
-                    "%s / %s falhou no piloto semântico (%s). FALLBACK -> %s / %s",
-                    old_provider, old_model, exc.code,
-                    self.active.provider.upper(), self.active.model,
-                )
-
-    def semantic_identify(
-        self,
-        key: str,
-        raw_hash: str,
-        brand: str,
-        model: str,
-        s1: Stage1Result,
-    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
-        return self._semantic_invoke(
-            "semantic_identify", key, raw_hash, brand, model, s1
-        )
-
-    def semantic_map(
-        self,
-        key: str,
-        raw_hash: str,
-        raw_type: str,
-        product_role: str,
-        domain_hint: str,
-        candidates: Sequence[Dict[str, Any]],
-    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
-        return self._semantic_invoke(
-            "semantic_map", key, raw_hash, raw_type, product_role, domain_hint, candidates
-        )
 
 
 # -----------------------------------------------------------------------------
@@ -6603,7 +6009,7 @@ def taxonomy_consensus_for_review(
     Nao resolve o TYPE e nao remove Review Required. Ex.: DRILL + SCREWDRIVER
     podem permanecer ambíguos, mas ambos pertencem a OTHERS | POWER TOOLS.
     """
-    candidates = list(dict.fromkeys(s1.type_candidates or []))
+    candidates = list(dict.fromkeys(s1.type_candidates or s1.review_type_hints or []))
     if not candidates:
         return "", "", ""
     power = s1.power or "UNKNOWN"
@@ -6766,6 +6172,10 @@ def finalize_product(
     consensus_cg, consensus_fam, consensus_reason = taxonomy_consensus_for_review(rules, s1, brand, model)
     if s1.state == "RESOLVED_RULE":
         next_action = "CONCLUIDO"
+    elif not s1.type_candidates and s1.review_type_hints and consensus_cg and consensus_fam:
+        next_action = "TYPE_HINT_REVIEW_FAMILY_JA_DEFINIDA"
+    elif not s1.type_candidates and s1.review_type_hints:
+        next_action = "TYPE_HINT_REVIEW"
     elif not s1.type_candidates and ref_identity in {"STRONG", "PROBABLE"}:
         next_action = "JSON_GAP_OU_LLM_GAP"
     elif not s1.type_candidates and raw_result_count:
@@ -6791,6 +6201,9 @@ def finalize_product(
         "Título Referência Decision": ref_decision,
         "Próxima Ação": next_action,
         "Stage1 Type Candidates": " | ".join(s1.type_candidates),
+        "Review Type Hints": " | ".join(s1.review_type_hints),
+        "Review Suggested Type": s1.review_type_hints[0] if len(s1.review_type_hints) == 1 else "",
+        "Review Hint Evidence": json.dumps(s1.review_hint_evidence, ensure_ascii=False, sort_keys=True),
         "Stage1.5 Type Candidates": " | ".join(funnel.candidates),
         "Stage1 Type Scores": json.dumps(s1.type_scores, ensure_ascii=False, sort_keys=True),
         "Stage1 Power Candidates": " | ".join(s1.power_candidates),
@@ -8544,7 +7957,7 @@ def run_pipeline(
     inventory_path = Path(args.inventory_output or cfg["files"]["inventory_output"])
 
     baseline_pre_stats: Dict[str, int] = {}
-    if args.mode in {"classify", "full", "recover", "semantic", "cachefirst"}:
+    if args.mode in {"classify", "full", "recover"}:
         backup_root = Path(cfg.get("files", {}).get("baseline_backup_dir", "Backups_Baseline"))
         backup_folder = _backup_baseline_files(master_path, final_path, backup_root)
         if backup_folder:
@@ -9075,1319 +8488,6 @@ def run_pipeline(
         store.close()
 
 
-
-def _semantic_build_llm_cascade(
-    rules: Rules,
-    cfg: Dict[str, Any],
-    db: ClassificationDB,
-) -> ProviderCascade:
-    pilot_cfg = cfg.get("semantic_pilot", {}) or {}
-    # p8.5: o piloto pode usar um modelo/rota próprios sem alterar a classificação
-    # normal. O preflight valida credencial/modelo antes da primeira inferência.
-    groq_model = safe(pilot_cfg.get("groq_model")) or os.getenv("GROQ_MODEL", "").strip() or safe(cfg.get("groq", {}).get("model")) or DEFAULT_MODEL
-    nvidia_model = safe(pilot_cfg.get("nvidia_model")) or os.getenv("NVIDIA_MODEL", "").strip() or safe(cfg.get("nvidia", {}).get("model")) or "openai/gpt-oss-20b"
-    openrouter_model = safe(pilot_cfg.get("openrouter_model")) or os.getenv("OPENROUTER_MODEL", "").strip() or safe(cfg.get("openrouter", {}).get("model")) or "openai/gpt-oss-120b:free"
-    route_source = pilot_cfg.get("llm_route", cfg.get("llm", {}).get("route", [])) or []
-    route_names = [safe(x).casefold() for x in route_source if safe(x)] or ["nvidia", "groq"]
-    provider_map = {
-        "groq": OpenAICompatibleClassifier(rules, cfg, db, "groq", groq_model),
-        "nvidia": OpenAICompatibleClassifier(rules, cfg, db, "nvidia", nvidia_model),
-        "openrouter": OpenAICompatibleClassifier(rules, cfg, db, "openrouter", openrouter_model),
-    }
-    ordered = [provider_map[x] for x in route_names if x in provider_map]
-    if not ordered:
-        ordered = [provider_map["nvidia"], provider_map["groq"]]
-    cascade = ProviderCascade(
-        ordered,
-        switch_only_on_quota_exhaustion=bool(cfg.get("llm", {}).get("switch_only_on_quota_exhaustion", False)),
-    )
-    preflights = cascade.preflight_all()
-    disabled_preflight = [
-        f"{safe(x.get('provider')).upper()}={safe(x.get('error_code'))}"
-        for x in preflights if not x.get("enabled")
-    ]
-    if disabled_preflight:
-        LOG.warning("PRODUCT DEFINITION PILOT PROVIDERS DESABILITADOS NO PREFLIGHT: %s", " | ".join(disabled_preflight))
-
-    # p8.5: GET /models não basta. Antes de tocar em qualquer produto, executa
-    # uma inferência estruturada real com o MESMO parser/schema usado pelo piloto.
-    smoke_results = cascade.semantic_live_smoke_all()
-    enabled = [
-        f"{p.provider.upper()}[{p.model}]"
-        for idx, p in enumerate(cascade.providers) if idx not in cascade.disabled
-    ]
-    disabled_smoke = [
-        f"{safe(x.get('provider')).upper()}={safe(x.get('error_code'))}"
-        for x in smoke_results if not x.get("enabled")
-    ]
-    LOG.info("PRODUCT DEFINITION PILOT LLM ROUTE VALIDADA AO VIVO: %s", " -> ".join(enabled))
-    if disabled_smoke:
-        LOG.warning("PRODUCT DEFINITION PILOT PROVIDERS DESABILITADOS NO LIVE SMOKE: %s", " | ".join(disabled_smoke))
-    return cascade
-
-
-def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
-    """Piloto de definição de produto via LLM sem alterar Base Final/Consolidado/checkpoint de classificação.
-
-    R9.6p8.5: mantém coorte elegível e exige live structured-output smoke antes do primeiro produto; falhas encerram de forma segura.
-    """
-    pilot_cfg = cfg.get("semantic_pilot", {}) or {}
-    if not bool(pilot_cfg.get("enabled", True)):
-        raise RuntimeError("SEMANTIC_PILOT_DISABLED no pipeline_config.json")
-    if args.no_llm:
-        raise RuntimeError("SEMANTIC_PILOT_REQUIRES_LLM: remova --no-llm")
-
-    input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
-    cache_path = Path(args.cache or cfg["files"]["cache"])
-    db_path = Path(args.db or cfg["files"]["classification_db"])
-    output_path = Path(args.output or cfg.get("files", {}).get("semantic_pilot_output", "Piloto_Definicao_LLM_R9_6p8_4.xlsx"))
-    source_rows = read_input_rows(input_path)
-    default_limit = int(pilot_cfg.get("default_max_items", 10) or 10)
-    limit = int(args.max_items or default_limit)
-    checkpoint_every = max(1, int(pilot_cfg.get("checkpoint_every", 5) or 5))
-    target_states = {
-        safe(x).upper() for x in (pilot_cfg.get("target_stage1_states", ["UNRESOLVED", "AMBIGUOUS"]) or [])
-        if safe(x)
-    } or {"UNRESOLVED", "AMBIGUOUS"}
-
-    store = TavilyReadOnlyStore(cache_path)
-    engine = DeterministicEngine(rules, cfg)
-    rank = DeterministicEngine.IDENTITY_RANK
-    min_identity = safe(rules.semantic_policy.get("min_identity", "PROBABLE")).upper() or "PROBABLE"
-
-    # p8.5 preserva: o limite do piloto significa N CASOS ELEGÍVEIS, não as N
-    # primeiras linhas da base. Assim SEM_CACHE_UTIL/COLLECTION_GAP não consomem
-    # a amostra destinada a validar a LLM Product Definition.
-    seen = set()
-    cohort: List[InputProductRow] = []
-    prepared: Dict[str, Tuple[RawEvidence, Stage1Result]] = {}
-    selection_stats = defaultdict(int)
-    LOG.info(
-        "PILOTO COHORT SCAN START | alvo=%s | states=%s | min_identity=%s",
-        limit if limit > 0 else "ALL", ",".join(sorted(target_states)), min_identity,
-    )
-    for scan_idx, row in enumerate(source_rows, 1):
-        selection_stats["rows_scanned"] += 1
-        if scan_idx % 500 == 0:
-            LOG.info(
-                "PILOTO COHORT SCAN | varridas=%d | elegíveis=%d | selecionados=%d",
-                selection_stats["rows_scanned"], selection_stats["eligible"], len(cohort),
-            )
-        if not row.valid:
-            selection_stats["invalid_input"] += 1
-            continue
-        if row.key in seen:
-            selection_stats["duplicate"] += 1
-            continue
-        seen.add(row.key)
-
-        raw = store.get(row.brand_original, row.model_original)
-        if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
-            selection_stats["no_usable_cache"] += 1
-            continue
-
-        s1 = engine.classify(row.brand_original, row.model_original, raw.payload or {})
-        target_sources = [
-            src for src in s1.sources
-            if rank.get(src.relevance, 0) >= rank.get(min_identity, 3)
-        ]
-        if not target_sources:
-            selection_stats["no_target_evidence"] += 1
-            continue
-        if safe(s1.state).upper() not in target_states:
-            selection_stats[f"skip_state_{safe(s1.state).lower() or 'unknown'}"] += 1
-            continue
-
-        selection_stats["eligible"] += 1
-        cohort.append(row)
-        prepared[row.key] = (raw, s1)
-        LOG.info(
-            "PILOTO COHORT +%03d | %s | %s | stage1=%s | target_sources=%d",
-            len(cohort), row.brand_original, row.model_original, s1.state, len(target_sources),
-        )
-        if limit > 0 and len(cohort) >= limit:
-            break
-
-    LOG.info(
-        "PILOTO COHORT READY | varridas=%d | selecionados=%d | sem_cache=%d | sem_target=%d | states=%s",
-        selection_stats["rows_scanned"], len(cohort), selection_stats["no_usable_cache"],
-        selection_stats["no_target_evidence"], ",".join(sorted(target_states)),
-    )
-    if not cohort:
-        store.close()
-        raise RuntimeError(
-            "SEMANTIC_PILOT_NO_ELIGIBLE_ITEMS: nenhum item com cache utilizável + evidência target "
-            f">={min_identity} + Stage1 em {sorted(target_states)}."
-        )
-
-    db = ClassificationDB(db_path)
-    try:
-        llm = _semantic_build_llm_cascade(rules, cfg, db)
-    except OperationalPause as exc:
-        LOG.error(
-            "PILOTO NÃO INICIADO | code=%s | %s",
-            exc.code, safe(exc),
-        )
-        LOG.error(
-            "Nenhum produto foi enviado à LLM. Base Final/Consolidado permanecem intactos. "
-            "Corrija somente a credencial/provider indicado antes de tentar novamente."
-        )
-        db.close()
-        store.close()
-        return
-    except Exception as exc:
-        LOG.error(
-            "PILOTO NÃO INICIADO | erro de integração LLM=%s | %s",
-            type(exc).__name__, safe(exc),
-        )
-        LOG.error("Nenhum produto foi processado; Base Final/Consolidado permanecem intactos.")
-        db.close()
-        store.close()
-        return
-    rows: List[Dict[str, Any]] = []
-    stats = defaultdict(int)
-    pilot_started = time.monotonic()
-
-    def _summary(status: str) -> Dict[str, Any]:
-        return {
-            "Pipeline Version": PIPELINE_VERSION,
-            "Rules Version": rules.version,
-            "Modo": "PRODUCT_DEFINITION_PILOT_NO_BASELINE_WRITE",
-            "Pilot Status": status,
-            "Produtos solicitados": len(cohort),
-            "Produtos registrados": len(rows),
-            "LLM API Calls": llm.api_calls,
-            "LLM Total Tokens": llm.total_tokens,
-            "Elapsed Seconds": round(time.monotonic() - pilot_started, 1),
-            **{f"Selection::{k}": v for k, v in dict(selection_stats).items()},
-            **dict(stats),
-        }
-
-    def _snapshot(status: str) -> None:
-        if not rows:
-            return
-        export_excel(rows, output_path, _summary(status))
-        LOG.info("PILOTO SNAPSHOT | status=%s | linhas=%d | arquivo=%s", status, len(rows), output_path)
-
-    def _finish_item(idx: int, started: float, calls_before: int) -> None:
-        row = rows[-1] if rows else {}
-        elapsed = time.monotonic() - started
-        calls = llm.api_calls - calls_before
-        LOG.info(
-            "PILOTO %03d/%03d | END | decision=%s | definido=%s | type=%s | taxonomy=%s|%s | reason=%s | live_llm_calls=%d | %.1fs",
-            idx, len(cohort), safe(row.get("Pilot Decision")) or "-",
-            safe(row.get("Produto Definido LLM")) or "-", safe(row.get("O que é (Tipo)")) or "-",
-            safe(row.get("Category General")) or "-", safe(row.get("FAMILY")) or "-",
-            safe(row.get("Reason Code")) or "-", calls, elapsed,
-        )
-        if idx % checkpoint_every == 0 or idx == len(cohort):
-            _snapshot("RUNNING" if idx < len(cohort) else "COMPLETED")
-
-    try:
-        for idx, item in enumerate(cohort, 1):
-            item_started = time.monotonic()
-            calls_before = llm.api_calls
-            brand, model, key = item.brand_original, item.model_original, item.key
-            LOG.info("PILOTO %03d/%03d | START | %s | %s", idx, len(cohort), brand, model)
-            prepared_item = prepared.get(key)
-            if prepared_item is not None:
-                raw, s1 = prepared_item
-            else:
-                raw, s1 = store.get(brand, model), None
-            base = {
-                "Marca": brand,
-                "Modelo": model,
-                "Raw State": raw.state,
-                "Pipeline Version": PIPELINE_VERSION,
-                "Processed At": now_iso(),
-            }
-            if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
-                rows.append({
-                    **base,
-                    "Produto Definido LLM": "",
-                    "O que é (Tipo)": "REVISAR",
-                    "Alimentação": "UNKNOWN",
-                    "Category General": "",
-                    "FAMILY": "",
-                    "Título Real": "",
-                    "Pilot Decision": "SEM_CACHE_UTIL",
-                    "Review Required": "SIM",
-                    "Reason Code": raw.state,
-                    "Motivo": raw.reason,
-                })
-                stats["sem_cache_util"] += 1
-                _finish_item(idx, item_started, calls_before)
-                continue
-
-            if s1 is None:
-                s1 = engine.classify(brand, model, raw.payload or {})
-            ref_title, ref_url, ref_identity, _ = choose_reference_title(raw, brand, model, cfg)
-            target_sources = [src for src in s1.sources if rank.get(src.relevance, 0) >= rank.get(min_identity, 3)]
-            if not target_sources:
-                rows.append({
-                    **base,
-                    "Produto Definido LLM": "",
-                    "O que é (Tipo)": "REVISAR",
-                    "Alimentação": "UNKNOWN",
-                    "Category General": "",
-                    "FAMILY": "",
-                    "Título Real": ref_title,
-                    "Fonte URL": ref_url,
-                    "Pilot Decision": "COLLECTION_GAP",
-                    "Review Required": "SIM",
-                    "Reason Code": "NO_PROBABLE_TARGET_EVIDENCE",
-                    "Motivo": "A coleta não entregou fonte target PROBABLE/STRONG suficiente para chamar a LLM semântica.",
-                })
-                stats["collection_gap"] += 1
-                _finish_item(idx, item_started, calls_before)
-                continue
-
-            define_started = time.monotonic()
-            LOG.info(
-                "PILOTO %03d/%03d | LLM DEFINE START | provider=%s | model=%s | target_sources=%d",
-                idx, len(cohort), llm.provider.upper(), llm.model, len(target_sources),
-            )
-            try:
-                data, identify_cache, usage = llm.semantic_identify(key, raw.raw_hash, brand, model, s1)
-            except OperationalPause as exc:
-                LOG.error(
-                    "PILOTO %03d/%03d | LLM DEFINE STOP | code=%s | %s",
-                    idx, len(cohort), exc.code, safe(exc),
-                )
-                rows.append({
-                    **base,
-                    "Produto Definido LLM": "",
-                    "O que é (Tipo)": "REVISAR",
-                    "Alimentação": "UNKNOWN",
-                    "Category General": "",
-                    "FAMILY": "",
-                    "Título Real": ref_title,
-                    "Fonte URL": ref_url,
-                    "Pilot Decision": "LLM_PROVIDER_ERROR",
-                    "Review Required": "SIM",
-                    "Reason Code": exc.code,
-                    "Motivo": safe(exc),
-                    "LLM Provider": llm.provider.upper() if llm.enabled_route() else "",
-                    "LLM Model": llm.model if llm.enabled_route() else "",
-                })
-                stats["llm_provider_error"] += 1
-                _finish_item(idx, item_started, calls_before)
-                _snapshot("PARTIAL_PROVIDER_ERROR")
-                LOG.error(
-                    "PILOTO INTERROMPIDO COM SEGURANÇA APÓS FALHA DE PROVIDER. "
-                    "O Excel parcial foi salvo; Base Final/Consolidado permanecem intactos."
-                )
-                break
-            except Exception as exc:
-                LOG.exception(
-                    "PILOTO %03d/%03d | LLM DEFINE RUNTIME ERROR | %s",
-                    idx, len(cohort), safe(exc),
-                )
-                rows.append({
-                    **base,
-                    "Produto Definido LLM": "",
-                    "O que é (Tipo)": "REVISAR",
-                    "Alimentação": "UNKNOWN",
-                    "Category General": "",
-                    "FAMILY": "",
-                    "Título Real": ref_title,
-                    "Fonte URL": ref_url,
-                    "Pilot Decision": "LLM_RUNTIME_ERROR",
-                    "Review Required": "SIM",
-                    "Reason Code": type(exc).__name__,
-                    "Motivo": safe(exc),
-                })
-                stats["llm_runtime_error"] += 1
-                _finish_item(idx, item_started, calls_before)
-                _snapshot("PARTIAL_RUNTIME_ERROR")
-                break
-            LOG.info(
-                "PILOTO %03d/%03d | LLM DEFINE END | provider=%s | model=%s | cache=%s | decision=%s | raw=%s | %.1fs",
-                idx, len(cohort), safe(usage.get("provider")).upper() or llm.provider.upper(),
-                safe(usage.get("model")) or llm.model, "SIM" if identify_cache else "NÃO",
-                safe(data.get("decision")).upper() or "-", safe(data.get("product_type_raw")).upper() or "-",
-                time.monotonic() - define_started,
-            )
-            if usage.get("evidence_refs_valid") is False:
-                grounded, grounding_reason = False, "SEMANTIC_EVIDENCE_REFS_INVALID"
-            else:
-                grounded, grounding_reason = semantic_grounding_ok(rules, s1, data)
-
-            decision = safe(data.get("decision")).upper()
-            refs = [x for x in (data.get("evidence_source_ids", []) or []) if isinstance(x, int)]
-            title, url = choose_title(s1.sources, refs)
-            raw_type = safe(data.get("product_type_raw")).upper()
-            role = safe(data.get("product_role")).upper()
-            domain = safe(data.get("domain_hint")).upper()
-            power = safe(data.get("power")).upper() or "UNKNOWN"
-
-            if not grounded:
-                rows.append({
-                    **base,
-                    "Produto Definido LLM": raw_type,
-                    "Papel do Produto": role,
-                    "Contexto": domain,
-                    "O que é (Tipo)": "REVISAR",
-                    "Alimentação": "UNKNOWN",
-                    "Category General": "",
-                    "FAMILY": "",
-                    "Título Real": title or ref_title,
-                    "Fonte URL": url or ref_url,
-                    "Pilot Decision": "LLM_REJECTED",
-                    "Review Required": "SIM",
-                    "Reason Code": grounding_reason,
-                    "Motivo": safe(data.get("reason_short")),
-                    "LLM Provider": safe(usage.get("provider")).upper(),
-                    "LLM Model": safe(usage.get("model")),
-                })
-                stats["llm_rejected"] += 1
-                _finish_item(idx, item_started, calls_before)
-                continue
-
-            if decision != "IDENTIFIED":
-                rows.append({
-                    **base,
-                    "Produto Definido LLM": raw_type,
-                    "Papel do Produto": role,
-                    "Contexto": domain,
-                    "O que é (Tipo)": "REVISAR",
-                    "Alimentação": power,
-                    "Category General": "",
-                    "FAMILY": "",
-                    "Título Real": title or ref_title,
-                    "Fonte URL": url or ref_url,
-                    "Pilot Decision": decision or "INSUFFICIENT_EVIDENCE",
-                    "Review Required": "SIM",
-                    "Reason Code": f"SEMANTIC_{decision or 'INSUFFICIENT_EVIDENCE'}",
-                    "Motivo": safe(data.get("reason_short")),
-                    "LLM Provider": safe(usage.get("provider")).upper(),
-                    "LLM Model": safe(usage.get("model")),
-                })
-                stats["semantic_not_identified"] += 1
-                _finish_item(idx, item_started, calls_before)
-                continue
-
-            canonical, candidates, map_reason = semantic_resolve_canonical(rules, raw_type, role)
-            map_cache = False
-            map_usage: Dict[str, Any] = {}
-            if not canonical and candidates:
-                map_started = time.monotonic()
-                LOG.info(
-                    "PILOTO %03d/%03d | LLM MAP START | provider=%s | model=%s | raw=%s | candidates=%d",
-                    idx, len(cohort), llm.provider.upper(), llm.model, raw_type or "-", len(candidates),
-                )
-                try:
-                    map_data, map_cache, map_usage = llm.semantic_map(
-                        key, raw.raw_hash, raw_type, role, domain, candidates
-                    )
-                except OperationalPause as exc:
-                    LOG.error(
-                        "PILOTO %03d/%03d | LLM MAP STOP | code=%s | %s",
-                        idx, len(cohort), exc.code, safe(exc),
-                    )
-                    rows.append({
-                        **base,
-                        "Produto Definido LLM": raw_type,
-                        "Papel do Produto": role,
-                        "Contexto": domain,
-                        "O que é (Tipo)": "REVISAR",
-                        "Alimentação": power,
-                        "Category General": "",
-                        "FAMILY": "",
-                        "Título Real": title or ref_title,
-                        "Fonte URL": url or ref_url,
-                        "Pilot Decision": "LLM_MAP_PROVIDER_ERROR",
-                        "Review Required": "SIM",
-                        "Reason Code": exc.code,
-                        "Motivo": safe(exc),
-                    })
-                    stats["llm_map_provider_error"] += 1
-                    _finish_item(idx, item_started, calls_before)
-                    _snapshot("PARTIAL_PROVIDER_ERROR")
-                    LOG.error(
-                        "PILOTO INTERROMPIDO COM SEGURANÇA DURANTE TAXONOMY MAP. "
-                        "O Excel parcial foi salvo; Base Final/Consolidado permanecem intactos."
-                    )
-                    break
-                LOG.info(
-                    "PILOTO %03d/%03d | LLM MAP END | provider=%s | model=%s | cache=%s | decision=%s | canonical=%s | %.1fs",
-                    idx, len(cohort), safe(map_usage.get("provider")).upper() or llm.provider.upper(),
-                    safe(map_usage.get("model")) or llm.model, "SIM" if map_cache else "NÃO",
-                    safe(map_data.get("decision")).upper() or "-", safe(map_data.get("canonical_type")) or "-",
-                    time.monotonic() - map_started,
-                )
-                if safe(map_data.get("decision")).upper() == "MATCH":
-                    proposed = safe(map_data.get("canonical_type"))
-                    if proposed in {safe(x.get("type")) for x in candidates} and proposed in rules.types:
-                        canonical = proposed
-                        map_reason = "LLM_TAXONOMY_VALIDATED"
-                    else:
-                        map_reason = "LLM_TAXONOMY_INVALID_CHOICE"
-                else:
-                    map_reason = "LLM_TAXONOMY_NONE"
-
-            candidate_text = " | ".join(
-                f"{safe(x.get('type'))}:{float(x.get('score',0) or 0):.2f}"
-                for x in candidates
-            )
-            if not canonical:
-                rows.append({
-                    **base,
-                    "Produto Definido LLM": raw_type,
-                    "Papel do Produto": role,
-                    "Contexto": domain,
-                    "O que é (Tipo)": "REVISAR",
-                    "Alimentação": power,
-                    "Category General": "",
-                    "FAMILY": "",
-                    "Título Real": title or ref_title,
-                    "Fonte URL": url or ref_url,
-                    "Taxonomy Candidates": candidate_text,
-                    "Pilot Decision": "TAXONOMY_GAP",
-                    "Review Required": "SIM",
-                    "Reason Code": map_reason,
-                    "Motivo": safe(data.get("reason_short")),
-                    "LLM Provider": safe(usage.get("provider")).upper(),
-                    "LLM Model": safe(usage.get("model")),
-                })
-                stats["taxonomy_gap"] += 1
-                _finish_item(idx, item_started, calls_before)
-                continue
-
-            cg, fam, tax_reason = semantic_taxonomy_result(
-                rules, s1, canonical, raw_type, power, refs, brand, model
-            )
-            valid_pair = (cg, fam) in rules.valid_pairs
-            explicit_oo = (
-                (cg, fam) == ("OTHERS", "OTHERS")
-                and canonical in set(rules.type_policy.get("allow_explicit_others_others_types", []) or [])
-                and tax_reason.startswith("TAXONOMY_EVIDENCE:")
-            )
-            review = (not valid_pair) or ((cg, fam) == ("OTHERS", "OTHERS") and not explicit_oo)
-            rows.append({
-                **base,
-                "Produto Definido LLM": raw_type,
-                "Papel do Produto": role,
-                "Contexto": domain,
-                "O que é (Tipo)": canonical,
-                "Alimentação": power,
-                "Category General": cg if valid_pair else "",
-                "FAMILY": fam if valid_pair else "",
-                "Título Real": title or ref_title,
-                "Fonte URL": url or ref_url,
-                "Evidence Phrase": safe(data.get("evidence_phrase")),
-                "Taxonomy Candidates": candidate_text,
-                "Pilot Decision": "MATCHED" if not review else "MATCHED_REVIEW",
-                "Review Required": "SIM" if review else "NÃO",
-                "Reason Code": map_reason,
-                "Motivo": f"{safe(data.get('reason_short'))} | {tax_reason}",
-                "LLM Provider": safe(usage.get("provider")).upper(),
-                "LLM Model": safe(usage.get("model")),
-                "LLM Identify Cache": "SIM" if identify_cache else "NÃO",
-                "LLM Map Cache": "SIM" if map_cache else "NÃO",
-                "LLM Total Tokens": int(usage.get("total_tokens",0) or 0) + int(map_usage.get("total_tokens",0) or 0),
-            })
-            stats["matched_review" if review else "matched"] += 1
-            _finish_item(idx, item_started, calls_before)
-
-        _snapshot("COMPLETED")
-        LOG.info(
-            "PILOTO DEFINIÇÃO LLM CONCLUÍDO | itens=%d | llm_calls=%d | %.1fs | arquivo=%s",
-            len(rows), llm.api_calls, time.monotonic() - pilot_started, output_path,
-        )
-        LOG.info("BASE FINAL/CONSOLIDADO NÃO FORAM ALTERADOS.")
-    except KeyboardInterrupt:
-        _snapshot("INTERRUPTED")
-        LOG.warning(
-            "PILOTO INTERROMPIDO PELO USUÁRIO | linhas preservadas=%d | cache LLM persistido | arquivo=%s",
-            len(rows), output_path,
-        )
-        raise
-    except BaseException:
-        _snapshot("FAILED_PARTIAL")
-        raise
-    finally:
-        db.close()
-        store.close()
-
-# -----------------------------------------------------------------------------
-# R9.7 - Cache-First Free-Tier / Local Taxonomy Retrieval
-# -----------------------------------------------------------------------------
-@dataclass
-class CacheEvidenceItem:
-    source_id: int
-    title: str
-    url: str
-    snippet: str
-    raw_excerpt: str
-    identity: str
-    identity_score: int
-    model_match: str
-    model_match_field: str
-    generic_title: bool
-    cross_brand_conflicts: List[str]
-    tavily_score: float
-    trusted: bool
-    reason: str
-
-    @property
-    def evidence_text(self) -> str:
-        parts = [self.title, self.snippet, self.raw_excerpt]
-        return "\n".join(x for x in parts if safe(x)).strip()
-
-
-@dataclass
-class CacheEvidencePack:
-    brand: str
-    model: str
-    business_key: str
-    raw_state: str
-    raw_hash: str
-    items: List[CacheEvidenceItem]
-    query_text: str
-    best_identity: str
-    trusted_count: int
-    context_count: int
-    cross_brand_count: int
-
-    @property
-    def trusted_items(self) -> List[CacheEvidenceItem]:
-        return [x for x in self.items if x.trusted]
-
-    @property
-    def best_item(self) -> Optional[CacheEvidenceItem]:
-        rank = {"WEAK": 0, "CONTEXTUAL": 1, "PROBABLE": 2, "STRONG": 3}
-        candidates = [x for x in self.items if x.trusted and not x.generic_title]
-        if not candidates:
-            candidates = [x for x in self.items if x.trusted]
-        if not candidates:
-            candidates = [x for x in self.items if not x.generic_title]
-        if not candidates:
-            candidates = list(self.items)
-        if not candidates:
-            return None
-        return sorted(
-            candidates,
-            key=lambda x: (rank.get(x.identity, 0), int(not x.generic_title), x.tavily_score),
-            reverse=True,
-        )[0]
-
-
-class KnownBrandIndex:
-    """Índice local de marcas conhecidas no próprio cache.
-
-    Serve apenas para detectar conflito explícito no título/URL (ex.: alvo HYUNDAI,
-    fonte intitulada TCL ...). Não cria identidade positiva e não usa fuzzy.
-    """
-    def __init__(self, brands: Sequence[str]):
-        self.variant_to_brands: Dict[str, set] = defaultdict(set)
-        self.max_tokens = 1
-        for brand in brands:
-            b = safe(brand)
-            if not b:
-                continue
-            for variant in _brand_identity_variants(b):
-                v = compact(variant)
-                if len(v) < 3:
-                    continue
-                self.variant_to_brands[v].add(canonical_display(b))
-            toks = [t for t in norm_text(b).split() if t]
-            self.max_tokens = max(self.max_tokens, min(5, len(toks)))
-
-    def conflicts(self, target_brand: str, title: str, url: str) -> List[str]:
-        primary = norm_text(f"{title} {url}")
-        if not primary:
-            return []
-        target_variants = {compact(x) for x in _brand_identity_variants(target_brand)}
-        tokens = [x for x in re.split(r"[^a-z0-9]+", primary) if x]
-        found: set = set()
-        nmax = min(self.max_tokens, 5)
-        for n in range(1, nmax + 1):
-            for i in range(0, max(0, len(tokens) - n + 1)):
-                key = compact(" ".join(tokens[i:i+n]))
-                if key in target_variants:
-                    continue
-                for brand in self.variant_to_brands.get(key, set()):
-                    if canonical_display(brand) != canonical_display(target_brand):
-                        found.add(brand)
-        return sorted(found)
-
-
-def _looks_generic_search_title(title: str, url: str = "") -> bool:
-    raw = safe(title).strip()
-    if not raw:
-        return True
-    folded = norm_text(raw)
-    if not folded:
-        return True
-    generic_words = {
-        "home", "homepage", "official", "official website", "website", "products",
-        "product", "catalog", "catalogue", "support", "downloads", "download",
-        "welcome", "shop", "store", "online store", "company", "manufacturer",
-    }
-    if folded in generic_words:
-        return True
-    # Título que é essencialmente um domínio (www.XYtronic-USA.com).
-    domainish = re.sub(r"^https?://", "", raw, flags=re.I).strip().strip("/")
-    if re.fullmatch(r"(?:www\.)?[a-z0-9][a-z0-9._-]*\.[a-z]{2,}(?:/.*)?", domainish, flags=re.I):
-        return True
-    host = safe(urlparse(url).hostname).casefold().removeprefix("www.")
-    if host:
-        label = host.split(".")[0]
-        if compact(raw) in {compact(host), compact(label), compact("www." + host)}:
-            return True
-    if len(folded.split()) <= 3 and any(x in folded for x in ["official site", "official website"]):
-        return True
-    return False
-
-
-def _model_windows_for_cache(text: str, model: str, cfg: Dict[str, Any], before: int, after: int, max_windows: int = 2) -> str:
-    raw = safe(text)
-    if not raw:
-        return ""
-    spans = _target_spans(raw, model, cfg)
-    if not spans:
-        return raw[: max(500, min(len(raw), before + after))]
-    chunks: List[str] = []
-    used: List[Tuple[int, int]] = []
-    for start, end in spans[:max_windows]:
-        lo = max(0, start - before)
-        hi = min(len(raw), end + after)
-        if any(lo >= a and hi <= b for a, b in used):
-            continue
-        used.append((lo, hi))
-        chunks.append(raw[lo:hi].strip())
-    return "\n...\n".join(x for x in chunks if x)
-
-
-def build_cache_evidence_pack(
-    raw: RawEvidence,
-    cfg: Dict[str, Any],
-    brand_index: KnownBrandIndex,
-) -> CacheEvidencePack:
-    ccfg = cfg.get("cache_first_free_tier", {}) or {}
-    max_sources = max(1, int(ccfg.get("max_sources", 5) or 5))
-    before = max(100, int(ccfg.get("model_window_before", 450) or 450))
-    after = max(300, int(ccfg.get("model_window_after", 1200) or 1200))
-    max_query_chars = max(1000, int(ccfg.get("max_query_chars", 6000) or 6000))
-    include_cross = bool(ccfg.get("include_cross_brand_as_context", True))
-    rank = {"WEAK": 0, "CONTEXTUAL": 1, "PROBABLE": 2, "STRONG": 3}
-
-    payload = raw.payload or {}
-    rows = [x for x in (payload.get("results", []) or []) if isinstance(x, dict)]
-    items: List[CacheEvidenceItem] = []
-    identity_model = derive_search_model(raw.brand, raw.model, cfg)
-    for i, res in enumerate(rows, 1):
-        title = safe(res.get("title"))
-        url = safe(res.get("url"))
-        snippet = safe(res.get("content"))
-        raw_content = res.get("raw_content")
-        if not isinstance(raw_content, str):
-            raw_content = ""
-        body_for_identity = "\n".join(x for x in [snippet, raw_content[:5000]] if x)
-        meta = _source_identity_for_result(raw.brand, identity_model, {
-            "title": title, "url": url, "content": body_for_identity,
-        }, cfg)
-        conflicts = brand_index.conflicts(raw.brand, title, url)
-        generic = _looks_generic_search_title(title, url)
-        excerpt_source = raw_content or snippet
-        excerpt = _model_windows_for_cache(excerpt_source, identity_model, cfg, before, after)
-        level = safe(meta.get("level")) or "WEAK"
-        # Fonte trusted exige identidade >= PROBABLE e nenhuma marca concorrente
-        # explícita no campo primário. PROBABLE com marca concorrente ainda pode
-        # ser mantida apenas como contexto manual, nunca como base de auto-aceite.
-        trusted = rank.get(level, 0) >= rank["PROBABLE"] and not conflicts
-        if generic and not excerpt:
-            trusted = False
-        try:
-            tavily_score = float(res.get("score", 0) or 0)
-        except Exception:
-            tavily_score = 0.0
-        reason_parts = [f"IDENTITY={level}"]
-        if conflicts:
-            reason_parts.append("CROSS_BRAND=" + ",".join(conflicts[:4]))
-        if generic:
-            reason_parts.append("GENERIC_TITLE")
-        if trusted:
-            reason_parts.append("TRUSTED")
-        elif include_cross and rank.get(level, 0) >= rank["PROBABLE"]:
-            reason_parts.append("CONTEXT_ONLY")
-        items.append(CacheEvidenceItem(
-            source_id=i,
-            title=title,
-            url=url,
-            snippet=snippet,
-            raw_excerpt=excerpt,
-            identity=level,
-            identity_score=int(meta.get("score", 0) or 0),
-            model_match=safe(meta.get("model_match")),
-            model_match_field=safe(meta.get("model_match_field")),
-            generic_title=generic,
-            cross_brand_conflicts=conflicts,
-            tavily_score=tavily_score,
-            trusted=trusted,
-            reason=" | ".join(reason_parts),
-        ))
-
-    def order_key(x: CacheEvidenceItem) -> Tuple[int, int, int, float]:
-        return (
-            int(x.trusted),
-            rank.get(x.identity, 0),
-            int(not x.generic_title),
-            x.tavily_score,
-        )
-
-    items.sort(key=order_key, reverse=True)
-    items = items[:max_sources]
-    chunks: List[str] = []
-    for item in items:
-        if not item.trusted and not include_cross:
-            continue
-        label = "TRUSTED" if item.trusted else "CONTEXT_ONLY"
-        text = item.evidence_text
-        if not text:
-            continue
-        chunks.append(f"[{label} SOURCE {item.source_id}]\n{text}")
-    query_text = "\n---\n".join(chunks)[:max_query_chars]
-    trusted = [x for x in items if x.trusted]
-    best_identity = max((x.identity for x in trusted), key=lambda v: rank.get(v, 0), default="WEAK")
-    return CacheEvidencePack(
-        brand=raw.brand,
-        model=raw.model,
-        business_key=business_key(raw.brand, raw.model),
-        raw_state=raw.state,
-        raw_hash=raw.raw_hash,
-        items=items,
-        query_text=query_text,
-        best_identity=best_identity,
-        trusted_count=len(trusted),
-        context_count=len(items) - len(trusted),
-        cross_brand_count=sum(1 for x in items if x.cross_brand_conflicts),
-    )
-
-
-class LocalTaxonomyRetriever:
-    """Recuperador local de TYPEs da taxonomia sem API paga.
-
-    Ordem de backend:
-      1) sentence-transformers local (se pacote + modelo já estiverem disponíveis)
-      2) scikit-learn TF-IDF char n-gram
-      3) similaridade lexical pura (stdlib)
-
-    O backend local nunca escreve Category/FAMILY por conta própria. Ele apenas
-    propõe PRODUCT_TYPE canônico; o mapeamento final continua em regras_negocio.json.
-    """
-    def __init__(self, rules: Rules, cfg: Dict[str, Any]):
-        self.rules = rules
-        self.cfg = cfg
-        self.ccfg = cfg.get("cache_first_free_tier", {}) or {}
-        self.backend_requested = safe(self.ccfg.get("backend", "auto")).casefold() or "auto"
-        self.model_id = safe(self.ccfg.get(
-            "sentence_transformers_model",
-            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-        ))
-        self.entries: List[Tuple[str, str, str]] = []
-        self._build_entries()
-        self.backend = "lexical"
-        self.signature = "lexical-v1"
-        self._st_model = None
-        self._st_matrix = None
-        self._tfidf = None
-        self._tfidf_matrix = None
-        self._init_backend()
-
-    def _build_entries(self) -> None:
-        seen = set()
-        def add(typ: str, phrase: str, origin: str) -> None:
-            t, p = safe(typ), safe(phrase)
-            if t not in self.rules.types or not p:
-                return
-            key = (t, norm_text(p))
-            if not key[1] or key in seen:
-                return
-            seen.add(key)
-            self.entries.append((t, p, origin))
-
-        for typ, data in self.rules.types.items():
-            add(typ, typ.replace("_", " "), "TYPE")
-            for alias in (data.get("aliases", []) or []):
-                add(typ, alias, "ALIAS")
-            fp = data.get("fallback_pair")
-            if isinstance(fp, list) and len(fp) == 2:
-                add(typ, safe(fp[1]), "FAMILY")
-        for row in self.rules.taxonomy_rules:
-            typ = safe(row.get("primary_type"))
-            add(typ, safe(row.get("family")), "TAXONOMY_FAMILY")
-            add(typ, safe(row.get("category_general")), "TAXONOMY_CATEGORY")
-        for row in self.rules.taxonomy_evidence_rules:
-            typ = safe(row.get("primary_type"))
-            add(typ, safe(row.get("family")), "EVIDENCE_FAMILY")
-            for alias in (row.get("aliases", []) or []):
-                add(typ, alias, "EVIDENCE_ALIAS")
-        for phrase, typ in (self.rules.semantic_policy.get("raw_type_alias_to_canonical", {}) or {}).items():
-            add(safe(typ), safe(phrase), "SEMANTIC_BRIDGE")
-
-    def _init_backend(self) -> None:
-        wanted = self.backend_requested
-        allow_st = wanted in {"auto", "sentence_transformers", "sentence-transformers", "st"}
-        if allow_st:
-            try:
-                from sentence_transformers import SentenceTransformer
-                local_only = bool(self.ccfg.get("sentence_transformers_local_only", True))
-                kwargs: Dict[str, Any] = {}
-                if local_only:
-                    kwargs["local_files_only"] = True
-                self._st_model = SentenceTransformer(self.model_id, **kwargs)
-                phrases = [p for _, p, _ in self.entries]
-                self._st_matrix = self._st_model.encode(
-                    phrases,
-                    normalize_embeddings=True,
-                    convert_to_numpy=True,
-                    show_progress_bar=False,
-                )
-                self.backend = "sentence_transformers"
-                self.signature = f"sentence_transformers:{self.model_id}"
-                LOG.info("CACHE-FIRST LOCAL BACKEND | sentence-transformers | model=%s | entries=%d", self.model_id, len(self.entries))
-                return
-            except Exception as exc:
-                LOG.warning(
-                    "CACHE-FIRST sentence-transformers indisponível (%s: %s). Fallback local -> TF-IDF.",
-                    type(exc).__name__, safe(exc)[:300],
-                )
-                self._st_model = None
-                self._st_matrix = None
-                if wanted not in {"auto", "sentence_transformers", "sentence-transformers", "st"}:
-                    raise
-
-        if wanted in {"auto", "tfidf", "sklearn", "sentence_transformers", "sentence-transformers", "st"}:
-            try:
-                from sklearn.feature_extraction.text import TfidfVectorizer
-                self._tfidf = TfidfVectorizer(
-                    analyzer="char_wb",
-                    ngram_range=(3, 5),
-                    lowercase=True,
-                    strip_accents="unicode",
-                    sublinear_tf=True,
-                )
-                self._tfidf_matrix = self._tfidf.fit_transform([p for _, p, _ in self.entries])
-                self.backend = "sklearn_tfidf"
-                self.signature = "sklearn_tfidf:char_wb_3_5:v1"
-                LOG.info("CACHE-FIRST LOCAL BACKEND | scikit-learn TF-IDF | entries=%d", len(self.entries))
-                return
-            except Exception as exc:
-                LOG.warning("CACHE-FIRST TF-IDF indisponível (%s: %s). Fallback -> lexical stdlib.", type(exc).__name__, safe(exc)[:300])
-
-        self.backend = "lexical"
-        self.signature = "lexical:jaccard-sequencematcher:v1"
-        LOG.info("CACHE-FIRST LOCAL BACKEND | lexical stdlib | entries=%d", len(self.entries))
-
-    def _aggregate(self, scores: Sequence[float], top_k: int) -> List[Dict[str, Any]]:
-        best: Dict[str, Dict[str, Any]] = {}
-        for idx, raw_score in enumerate(scores):
-            try:
-                score = float(raw_score)
-            except Exception:
-                continue
-            typ, phrase, origin = self.entries[idx]
-            prev = best.get(typ)
-            if prev is None or score > float(prev["score"]):
-                best[typ] = {"type": typ, "score": score, "matched_phrase": phrase, "origin": origin}
-        rows = sorted(best.values(), key=lambda x: (-float(x["score"]), safe(x["type"])))
-        return rows[:max(1, top_k)]
-
-    @staticmethod
-    def _meaningful_tokens(value: str) -> List[str]:
-        stop = {
-            "a", "an", "the", "of", "for", "with", "and", "or", "to", "de", "da", "do", "das", "dos",
-            "el", "la", "los", "las", "y", "con", "para", "product", "products", "tool", "tools", "machine",
-            "electric", "electrical", "battery", "corded", "cordless", "petrol", "gas", "part", "parts", "spare",
-        }
-        return [t for t in norm_text(value).split() if len(t) >= 3 and t not in stop]
-
-    def _rerank_local_lexical_support(self, rows: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
-        """Conservador para TF-IDF/lexical: sem âncora lexical, não força match.
-
-        Char n-gram sozinho pode confundir 'air conditioner' com 'mower conditioner'.
-        A recuperação local só sobe candidatos que compartilhem palavras/bigramas
-        informativos com a evidência. Sentence-transformers não usa este redutor.
-        """
-        if self.backend == "sentence_transformers":
-            return rows
-        qtokens = self._meaningful_tokens(query)
-        qset = set(qtokens)
-        qbigrams = set(zip(qtokens, qtokens[1:]))
-        out: List[Dict[str, Any]] = []
-        qfold = norm_text(query)
-        for row in rows:
-            typ = safe(row.get("type"))
-            phrase = safe(row.get("matched_phrase"))
-            ptokens = self._meaningful_tokens(phrase)
-            pset = set(ptokens)
-            if not pset:
-                continue
-            overlap = len(pset & qset) / max(1, len(pset))
-            pbigrams = set(zip(ptokens, ptokens[1:]))
-            bigram_overlap = len(pbigrams & qbigrams) / max(1, len(pbigrams)) if pbigrams else 0.0
-            exact = 1.0 if norm_text(phrase) and norm_text(phrase) in qfold else 0.0
-            # Bloqueia candidatos cuja própria taxonomia declara contexto negativo.
-            negatives = (self.rules.types.get(typ, {}) or {}).get("negative_aliases", []) or []
-            negative_hit = next((x for x in negatives if safe(x) and contains_alias_prepared(qfold, x)), "")
-            if negative_hit:
-                continue
-            base = float(row.get("score", 0.0) or 0.0)
-            support_multiplier = 0.30 + (0.40 * overlap) + (0.20 * bigram_overlap) + (0.10 * exact)
-            adjusted = base * support_multiplier
-            # Sem qualquer palavra informativa compartilhada, TF-IDF char-ngram é
-            # tratado como ruído, salvo match quase-exato excepcional.
-            if overlap <= 0.0 and exact <= 0.0 and base < 0.80:
-                continue
-            row = dict(row)
-            row["base_score"] = base
-            row["lexical_overlap"] = overlap
-            row["bigram_overlap"] = bigram_overlap
-            row["score"] = adjusted
-            out.append(row)
-        out.sort(key=lambda x: (-float(x.get("score", 0.0) or 0.0), safe(x.get("type"))))
-        return out
-
-    def retrieve(self, text: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        query = safe(text)
-        if not query:
-            return []
-        # Embedding models têm contexto limitado; o início privilegia título e
-        # primeiras janelas target, que o EvidencePack ordena por qualidade.
-        query = query[:8000]
-        if self.backend == "sentence_transformers" and self._st_model is not None and self._st_matrix is not None:
-            q = self._st_model.encode([query], normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)[0]
-            scores = self._st_matrix @ q
-            return self._aggregate(scores, top_k)
-        if self.backend == "sklearn_tfidf" and self._tfidf is not None and self._tfidf_matrix is not None:
-            from sklearn.metrics.pairwise import cosine_similarity
-            q = self._tfidf.transform([query])
-            scores = cosine_similarity(q, self._tfidf_matrix).ravel()
-            raw_rows = self._aggregate(scores, max(top_k * 6, 30))
-            return self._rerank_local_lexical_support(raw_rows, query)[:max(1, top_k)]
-
-        qnorm = norm_text(query)
-        qtokens = set(qnorm.split())
-        vals: List[float] = []
-        for _, phrase, _ in self.entries:
-            pnorm = norm_text(phrase)
-            ptokens = set(pnorm.split())
-            inter = len(qtokens & ptokens)
-            union = len(qtokens | ptokens) or 1
-            jaccard = inter / union
-            seq = SequenceMatcher(None, pnorm, qnorm[: max(len(pnorm) * 4, 120)]).ratio()
-            contains = 1.0 if pnorm and pnorm in qnorm else 0.0
-            vals.append(max(contains, 0.65 * jaccard + 0.35 * seq))
-        raw_rows = self._aggregate(vals, max(top_k * 6, 30))
-        return self._rerank_local_lexical_support(raw_rows, query)[:max(1, top_k)]
-
-
-class CacheFirstResultStore:
-    def __init__(self, path: Path):
-        self.path = path
-        self.conn = sqlite3.connect(path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute(
-            """CREATE TABLE IF NOT EXISTS cache_first_results (
-                result_id TEXT PRIMARY KEY,
-                business_key TEXT NOT NULL,
-                raw_hash TEXT NOT NULL,
-                rules_hash TEXT NOT NULL,
-                retriever_signature TEXT NOT NULL,
-                result_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )"""
-        )
-        self.conn.commit()
-
-    @staticmethod
-    def make_id(key: str, raw_hash: str, rules_hash: str, signature: str) -> str:
-        return hashlib.sha256(f"{key}|{raw_hash}|{rules_hash}|{signature}".encode("utf-8")).hexdigest()
-
-    def get(self, key: str, raw_hash: str, rules_hash: str, signature: str) -> Optional[Dict[str, Any]]:
-        rid = self.make_id(key, raw_hash, rules_hash, signature)
-        row = self.conn.execute("SELECT result_json FROM cache_first_results WHERE result_id=?", (rid,)).fetchone()
-        if not row:
-            return None
-        try:
-            data = json.loads(row["result_json"])
-            return data if isinstance(data, dict) else None
-        except Exception:
-            return None
-
-    def put(self, key: str, raw_hash: str, rules_hash: str, signature: str, result: Dict[str, Any]) -> None:
-        rid = self.make_id(key, raw_hash, rules_hash, signature)
-        self.conn.execute(
-            """INSERT INTO cache_first_results(result_id,business_key,raw_hash,rules_hash,retriever_signature,result_json,created_at)
-               VALUES(?,?,?,?,?,?,?)
-               ON CONFLICT(result_id) DO UPDATE SET result_json=excluded.result_json, created_at=excluded.created_at""",
-            (rid, key, raw_hash, rules_hash, signature, json.dumps(result, ensure_ascii=False, default=str), now_iso()),
-        )
-        self.conn.commit()
-
-    def close(self) -> None:
-        self.conn.commit()
-        self.conn.close()
-
-
-def _cache_first_stage1_payload(pack: CacheEvidencePack) -> Dict[str, Any]:
-    rows: List[Dict[str, Any]] = []
-    for item in pack.trusted_items:
-        rows.append({
-            "title": item.title,
-            "content": "\n".join(x for x in [item.snippet, item.raw_excerpt] if x),
-            "url": item.url,
-            "score": item.tavily_score,
-        })
-    return {"results": rows}
-
-
-def _cache_first_candidate_taxonomy(rules: Rules, candidate: Dict[str, Any], power: str, pack: CacheEvidencePack) -> Tuple[str, str, str]:
-    typ = safe(candidate.get("type"))
-    if typ not in rules.types:
-        return "", "", "TYPE_OUTSIDE_TAXONOMY"
-    return rules.map_taxonomy(typ, power or "UNKNOWN", pack.query_text, pack.brand, pack.model)
-
-
-def _cache_first_product_title(item: Optional[CacheEvidenceItem], model: str) -> str:
-    """Nunca devolve domínio/homepage como Título Real.
-
-    Quando o SERP title é genérico, usa um trecho curto da evidência local que
-    contenha o modelo; isso atende o requisito de levar informação de produto à
-    base de revisão sem fingir que o domínio é título do anúncio.
-    """
-    if item is None:
-        return ""
-    if item.title and not item.generic_title:
-        return item.title[:300]
-    candidates = [item.raw_excerpt, item.snippet]
-    model_compact = compact(model)
-    for text in candidates:
-        raw = safe(text).replace("\r", " ").replace("\n", " ")
-        if not raw:
-            continue
-        pieces = [x.strip() for x in re.split(r"(?<=[.!?])\s+|\s{2,}", raw) if x.strip()]
-        for piece in pieces:
-            if model_compact and model_compact in compact(piece):
-                return piece[:300]
-        return raw[:300]
-    return ""
-
-
-def _cache_first_snapshot(rows: List[Dict[str, Any]], output_path: Path, status: str) -> None:
-    import pandas as pd
-    df = pd.DataFrame(rows)
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Cache First")
-        summary = pd.DataFrame([
-            {"Status": status, "Linhas": len(rows), "Gerado em": now_iso()},
-        ])
-        summary.to_excel(writer, index=False, sheet_name="Resumo")
-
-
-def run_cache_first_free_tier(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
-    """Piloto escalável, 0 Search e 0 LLM/API paga.
-
-    Reaproveita todo o cache Tavily, reconstrói evidência por Marca+Modelo,
-    bloqueia conflito explícito de marca e usa recuperação taxonômica local.
-    Nunca altera Base Final/Consolidado.
-    """
-    ccfg = cfg.get("cache_first_free_tier", {}) or {}
-    cache_path = Path(args.cache or cfg["files"]["cache"])
-    output_path = Path(args.output or cfg["files"].get("cache_first_output", "Piloto_Cache_First_Free_Tier_R9_7.xlsx"))
-    evidence_path = Path(cfg["files"].get("cache_first_evidence_jsonl", "Cache_Evidence_Packs_R9_7.jsonl"))
-    db_path = Path(args.db or cfg["files"].get("classification_db", "pipeline_v3.sqlite"))
-    target_states = {safe(x) for x in (ccfg.get("target_stage1_states", ["UNRESOLVED", "AMBIGUOUS"]) or []) if safe(x)}
-    max_items = int(args.max_items or ccfg.get("default_max_items", 100) or 100)
-    checkpoint_every = max(1, int(ccfg.get("checkpoint_every", 25) or 25))
-    top_k = max(1, int(ccfg.get("top_k", 5) or 5))
-    auto_accept = bool(ccfg.get("auto_accept", False))
-    auto_margin = float(ccfg.get("auto_accept_margin", 0.10) or 0.10)
-
-    store = TavilyReadOnlyStore(cache_path)
-    result_store = CacheFirstResultStore(db_path)
-    try:
-        catalog = store.catalog()
-        brands = sorted({b for b, _, _ in catalog if safe(b)})
-        brand_index = KnownBrandIndex(brands)
-        retriever = LocalTaxonomyRetriever(rules, cfg)
-        engine = DeterministicEngine(rules, cfg)
-        LOG.info(
-            "CACHE-FIRST START | cache=%d produtos | brands=%d | backend=%s | alvo=%d | 0 Search | 0 LLM",
-            len(catalog), len(brands), retriever.backend, max_items,
-        )
-
-        # Primeiro monta coorte local inteira e faz sampling estável por hash.
-        cohort: List[Tuple[str, RawEvidence, CacheEvidencePack, Stage1Result]] = []
-        scan_stats = defaultdict(int)
-        for brand, model, key in catalog:
-            raw = store.get(brand, model)
-            if raw.state not in {"RAW_OK", "RAW_OK_MERGED"} or not raw.payload:
-                scan_stats["raw_unusable"] += 1
-                continue
-            pack = build_cache_evidence_pack(raw, cfg, brand_index)
-            s1 = engine.classify(brand, model, _cache_first_stage1_payload(pack))
-            scan_stats[f"stage1_{s1.state}"] += 1
-            if target_states and s1.state not in target_states:
-                continue
-            if not pack.query_text:
-                scan_stats["no_query"] += 1
-            cohort.append((key, raw, pack, s1))
-
-        cohort.sort(key=lambda x: hashlib.sha256(x[0].encode("utf-8")).hexdigest())
-        if max_items > 0:
-            cohort = cohort[:max_items]
-        LOG.info(
-            "CACHE-FIRST COHORT READY | selecionados=%d | scanned=%d | unresolved=%d | ambiguous=%d | resolved_rule=%d",
-            len(cohort), len(catalog), scan_stats.get("stage1_UNRESOLVED", 0), scan_stats.get("stage1_AMBIGUOUS", 0), scan_stats.get("stage1_RESOLVED_RULE", 0),
-        )
-
-        rows: List[Dict[str, Any]] = []
-        evidence_path.parent.mkdir(parents=True, exist_ok=True)
-        with evidence_path.open("w", encoding="utf-8") as evf:
-            for idx, (key, raw, pack, s1) in enumerate(cohort, 1):
-                cached = result_store.get(key, raw.raw_hash, rules.hash, retriever.signature)
-                if cached is not None:
-                    result = dict(cached)
-                    result["Checkpoint Cache"] = "SIM"
-                    LOG.info("CACHE-FIRST %03d/%03d | CACHE HIT | %s | %s | decision=%s", idx, len(cohort), pack.brand, pack.model, safe(result.get("Decision")))
-                else:
-                    LOG.info(
-                        "CACHE-FIRST %03d/%03d | START | %s | %s | trusted=%d | context=%d | identity=%s",
-                        idx, len(cohort), pack.brand, pack.model, pack.trusted_count, pack.context_count, pack.best_identity,
-                    )
-                    candidates = retriever.retrieve(pack.query_text, top_k=top_k) if pack.query_text else []
-                    top = candidates[0] if candidates else {}
-                    second = candidates[1] if len(candidates) > 1 else {}
-                    top_score = float(top.get("score", 0.0) or 0.0)
-                    second_score = float(second.get("score", 0.0) or 0.0)
-                    margin = top_score - second_score
-                    power = safe(s1.power) or "UNKNOWN"
-                    best_item = pack.best_item
-                    top_cg = top_fam = top_tax_reason = ""
-                    if top:
-                        top_cg, top_fam, top_tax_reason = _cache_first_candidate_taxonomy(rules, top, power, pack)
-
-                    thresholds = ccfg.get("proposal_thresholds", {}) or {}
-                    proposal_threshold = float(thresholds.get(retriever.backend, thresholds.get("default", 0.20)) or 0.20)
-                    accept_thresholds = ccfg.get("auto_accept_thresholds", {}) or {}
-                    accept_threshold = float(accept_thresholds.get(retriever.backend, accept_thresholds.get("default", 0.80)) or 0.80)
-                    no_conflict = pack.cross_brand_count == 0
-                    strong = pack.best_identity == "STRONG"
-
-                    exact_alias_auto = bool(ccfg.get("exact_alias_auto_accept", True))
-                    matched_phrase = safe(top.get("matched_phrase"))
-                    exact_phrase = bool(matched_phrase and contains_alias(pack.query_text, matched_phrase))
-                    exact_phrase_specific = len(LocalTaxonomyRetriever._meaningful_tokens(matched_phrase)) >= 2
-
-                    if pack.trusted_count == 0:
-                        decision = "CACHE_IDENTITY_GAP"
-                        review = "SIM"
-                    elif not pack.query_text:
-                        decision = "CACHE_INSUFFICIENT"
-                        review = "SIM"
-                    elif not top or top_score < proposal_threshold:
-                        decision = "LOCAL_LOW_SIGNAL"
-                        review = "SIM"
-                    elif exact_alias_auto and strong and no_conflict and exact_phrase and exact_phrase_specific and (top_cg, top_fam) in rules.valid_pairs and (top_cg, top_fam) != ("OTHERS", "OTHERS"):
-                        decision = "LOCAL_EXACT_ALIAS_ACCEPTED"
-                        review = "NÃO"
-                    elif auto_accept and strong and no_conflict and top_score >= accept_threshold and margin >= auto_margin and (top_cg, top_fam) in rules.valid_pairs and (top_cg, top_fam) != ("OTHERS", "OTHERS"):
-                        decision = "LOCAL_SEMANTIC_ACCEPTED"
-                        review = "NÃO"
-                    else:
-                        decision = "LOCAL_SEMANTIC_PROPOSAL"
-                        review = "SIM"
-
-                    cand_text_parts = []
-                    for cand in candidates:
-                        cg, fam, _ = _cache_first_candidate_taxonomy(rules, cand, power, pack)
-                        cand_text_parts.append(f"{safe(cand.get('type'))}:{float(cand.get('score',0) or 0):.3f}->{cg}|{fam} [{safe(cand.get('matched_phrase'))}]")
-
-                    result = {
-                        "Marca": pack.brand,
-                        "Modelo": pack.model,
-                        "Raw State": pack.raw_state,
-                        "Pipeline Version": PIPELINE_VERSION,
-                        "Build": BUILD_LABEL,
-                        "Processed At": now_iso(),
-                        "Stage1 State": s1.state,
-                        "Stage1 Type": safe(s1.product_type),
-                        "Stage1 Power": power,
-                        "Best Identity": pack.best_identity,
-                        "Trusted Sources": pack.trusted_count,
-                        "Context Sources": pack.context_count,
-                        "Cross Brand Sources": pack.cross_brand_count,
-                        "Local Backend": retriever.backend,
-                        "Local Model": retriever.model_id if retriever.backend == "sentence_transformers" else retriever.signature,
-                        "Suggested Type": safe(top.get("type")),
-                        "Matched Taxonomy Phrase": safe(top.get("matched_phrase")),
-                        "Similarity Score": round(top_score, 6),
-                        "Similarity Margin": round(margin, 6),
-                        "Suggested Category General": top_cg,
-                        "Suggested FAMILY": top_fam,
-                        "Taxonomy Reason": top_tax_reason,
-                        "Top Candidates": " ; ".join(cand_text_parts),
-                        "Título Real": _cache_first_product_title(best_item, pack.model),
-                        "Fonte URL": best_item.url if best_item else "",
-                        "Evidence Extract": (best_item.evidence_text[:2200] if best_item else ""),
-                        "Evidence Reason": best_item.reason if best_item else "",
-                        "Decision": decision,
-                        "Review Required": review,
-                        "Checkpoint Cache": "NÃO",
-                    }
-                    result_store.put(key, raw.raw_hash, rules.hash, retriever.signature, result)
-                    LOG.info(
-                        "CACHE-FIRST %03d/%03d | END | decision=%s | suggested=%s | score=%.3f | margin=%.3f | taxonomy=%s|%s",
-                        idx, len(cohort), decision, safe(top.get("type")) or "-", top_score, margin, top_cg or "-", top_fam or "-",
-                    )
-
-                rows.append(result)
-                evidence_payload = {
-                    "brand": pack.brand,
-                    "model": pack.model,
-                    "business_key": pack.business_key,
-                    "raw_hash": pack.raw_hash,
-                    "best_identity": pack.best_identity,
-                    "query_text": pack.query_text,
-                    "sources": [
-                        {
-                            "source_id": x.source_id,
-                            "title": x.title,
-                            "url": x.url,
-                            "identity": x.identity,
-                            "generic_title": x.generic_title,
-                            "cross_brand_conflicts": x.cross_brand_conflicts,
-                            "trusted": x.trusted,
-                            "reason": x.reason,
-                            "evidence_text": x.evidence_text,
-                        }
-                        for x in pack.items
-                    ],
-                }
-                evf.write(json.dumps(evidence_payload, ensure_ascii=False, default=str) + "\n")
-
-                if idx % checkpoint_every == 0:
-                    _cache_first_snapshot(rows, output_path, "RUNNING")
-                    LOG.info("CACHE-FIRST SNAPSHOT | linhas=%d | arquivo=%s", len(rows), output_path)
-
-        _cache_first_snapshot(rows, output_path, "COMPLETED")
-        counts: Dict[str, int] = defaultdict(int)
-        for row in rows:
-            counts[safe(row.get("Decision"))] += 1
-        LOG.info(
-            "CACHE-FIRST CONCLUÍDO | itens=%d | backend=%s | decisions=%s | arquivo=%s | evidence_jsonl=%s",
-            len(rows), retriever.backend, dict(counts), output_path, evidence_path,
-        )
-        LOG.info("BASE FINAL/CONSOLIDADO NÃO FORAM ALTERADOS | Search=0 | LLM/API=0")
-    finally:
-        result_store.close()
-        store.close()
-
-
 def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
     """Executa regressões sintéticas + cobertura dos casos reais validados.
 
@@ -10515,36 +8615,6 @@ def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
         else:
             real_passed += 1
 
-    semantic_cases = qg.get("SEMANTIC_RECOVERY_CASES", []) or []
-    semantic_passed = 0
-    for i, case in enumerate(semantic_cases, 1):
-        cid = safe(case.get("id")) or f"semantic_{i}"
-        raw_type = safe(case.get("semantic_raw"))
-        role = safe(case.get("role"))
-        power = safe(case.get("power")) or "UNKNOWN"
-        canonical, _, _ = semantic_resolve_canonical(rules, raw_type, role)
-        expected_type = safe(case.get("expect_type"))
-        if canonical != expected_type:
-            errors.append(f"{cid}: semantic canonical={canonical!r}, esperado={expected_type!r}")
-            continue
-        title = safe(case.get("title"))
-        probe = engine.classify(
-            safe(case.get("brand")) or "TEST",
-            safe(case.get("model")) or f"SEM{i}",
-            {"results": [{"title": title, "content": title, "url": "https://example.com/semantic-case"}]},
-        )
-        refs = [probe.sources[0].source_id] if probe.sources else []
-        cg, fam, _ = semantic_taxonomy_result(
-            rules, probe, canonical, raw_type, power, refs,
-            safe(case.get("brand")), safe(case.get("model")),
-        )
-        if cg != safe(case.get("expect_category")) or fam != safe(case.get("expect_family")):
-            errors.append(
-                f"{cid}: semantic taxonomy={cg}|{fam}, esperado={safe(case.get('expect_category'))}|{safe(case.get('expect_family'))}"
-            )
-            continue
-        semantic_passed += 1
-
     if errors:
         raise RuntimeError(
             f"QUALITY_GATE_FAILED: {len(errors)} falha(s). " + " | ".join(errors[:25])
@@ -10558,8 +8628,6 @@ def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
         "real_explicit": real_explicit,
         "real_passed": real_passed,
         "real_reference_only": real_reference_only,
-        "semantic_cases": len(semantic_cases),
-        "semantic_passed": semantic_passed,
     }
 
 
@@ -10572,8 +8640,8 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
     qg = run_quality_gates(rules, cfg)
     LOG.info(
-        "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | reference_only=%d | semantic=%d/%d",
-        qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"], qg["real_reference_only"], qg.get("semantic_passed",0), qg.get("semantic_cases",0),
+        "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | reference_only=%d",
+        qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"], qg["real_reference_only"],
     )
 
     cache = Path(cache_override or cfg["files"]["cache"])
@@ -10590,7 +8658,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v3")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "semantic", "cachefirst"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -10644,7 +8712,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     parser = build_parser()
     print("=" * 86)
     print(f" PIPELINE ENRIQUECEDOR DE PRODUTOS {PIPELINE_VERSION} | {BUILD_LABEL}")
-    print(" Search/Cache -> Identity -> Evidence Pack -> Stage 1 -> Local Taxonomy Retrieval -> optional LLM")
+    print(" Search Provider -> Identity -> Target Isolation -> Curated Evidence -> Stage 1 -> Funnel -> NVIDIA/Groq")
     print(" COLLECTION HARD RULE: 1 produto = no máximo 1 request | sem retry/fallback/extract/advanced")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 86)
@@ -10654,9 +8722,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
     print("5 - AUDITORIA / REPARO BASE (SEM LLM)")
     print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
-    print("7 - PILOTO DEFINIÇÃO LLM LEGADO/EXPERIMENTAL (NÃO ALTERA BASE)")
-    print("8 - CACHE-FIRST FREE-TIER LOCAL (0 BUSCA / 0 LLM / NÃO ALTERA BASE)")
-    print("9 - SAIR")
+    print("7 - SAIR")
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
@@ -10701,24 +8767,6 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
-    if op == "7":
-        raw = input("Limite do piloto LLM legado (ENTER = 5): ").strip()
-        limite = 5
-        if raw:
-            if raw.isdigit() and int(raw) > 0:
-                limite = int(raw)
-            else:
-                print("Valor inválido. Será usado 5.")
-        return parser.parse_args(["--mode", "semantic", "--max-items", str(limite)])
-    if op == "8":
-        raw = input("Limite do piloto Cache-First local (ENTER = 100): ").strip()
-        limite = 100
-        if raw:
-            if raw.isdigit() and int(raw) > 0:
-                limite = int(raw)
-            else:
-                print("Valor inválido. Será usado 100.")
-        return parser.parse_args(["--mode", "cachefirst", "--max-items", str(limite)])
     raise SystemExit(0)
 
 
@@ -10811,18 +8859,12 @@ def main() -> int:
     if args.mode == "repair":
         run_baseline_repair(args, cfg, rules)
         return 0
-    if args.mode in {"classify", "full", "recover", "semantic", "cachefirst"}:
+    if args.mode in {"classify", "full", "recover"}:
         qg = run_quality_gates(rules, cfg)
         LOG.info(
-            "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | semantic=%d/%d | classificação liberada",
-            qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"], qg.get("semantic_passed",0), qg.get("semantic_cases",0),
+            "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | classificação liberada",
+            qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"],
         )
-    if args.mode == "semantic":
-        run_semantic_pilot(args, cfg, rules)
-        return 0
-    if args.mode == "cachefirst":
-        run_cache_first_free_tier(args, cfg, rules)
-        return 0
     if args.mode == "inventory":
         run_pipeline(args, cfg, rules)
         return 0

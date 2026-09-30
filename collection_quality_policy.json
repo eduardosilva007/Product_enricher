@@ -1,11 +1,11 @@
 {
-  "VERSION": "2026-09-29-r9.6p7-brand-primary-gate-v1",
+  "VERSION": "2026-09-30-r9.6p7.1a-evidence-retention-safe-hints",
   "DESIGN_PRINCIPLES": [
     "Uma unica Search por produto: sem fallback, rescue, retry automatico, provider Extract ou provider failover.",
     "Busca 100% aberta: sem include_domains, country, language filter ou exact_match.",
     "Marca e Modelo originais nunca sao alterados; Search Model existe apenas para busca e identidade.",
-    "Source Sieve acontece antes de qualquer aprofundamento de pagina.",
-    "Somente fontes STRONG/PROBABLE e sem sinais de compatibilidade/related podem ser aprofundadas.",
+    "Source Sieve usa TITLE/SNIPPET primeiro; Tavily raw_content da mesma Search pode resgatar identidade somente em janela target-anchored com Marca+Modelo próximos.",
+    "BODY rescue nunca promove modelo isolado: exige Marca alvo próxima do SKU e continua no máximo PROBABLE.",
     "Tavily pode usar raw_content retornado na MESMA Search basic; usage.credits acima de 1 aborta a coleta.",
     "Serper/Bright Data podem aprofundar URL aprovada apenas por fetch local, sem nova Search API request.",
     "Bright Data aceita somente Google Light JSON / parsed_light e audita general.query/detected_query/spelling.",
@@ -15,7 +15,10 @@
     "RAW de Search permanece auditavel; Stage 1 recebe somente curated_results.",
     "Compatibilidade, related products e outro produto dominante nao podem contaminar a evidencia do target.",
     "Evidencia insuficiente termina em LOW/NO_TARGET_EVIDENCE; nunca dispara gasto adicional automatico.",
-    "Fonte PROBABLE pode ser enriquecida/retida para revisão, mas aprovação automática de classificação exige fonte STRONG com Marca+Modelo no TITLE/URL."
+    "Fonte PROBABLE pode ser enriquecida/retida para revisão, mas aprovação automática de classificação exige fonte STRONG com Marca+Modelo no TITLE/URL.",
+    "Coletas novas persistem somente uma janela target-anchored auditável do raw_content; o corpo integral continua descartado.",
+    "Serper/Bright Data: qualquer fetch local útil preserva uma janela target-anchored no cache para reavaliação sem nova Search.",
+    "Modelo e títulos de Search podem gerar TYPE hints de revisão, mas nunca satisfazem sozinhos o gate STRONG de AUTO/LLM final."
   ],
   "identity": {
     "direct_accept_levels": [
@@ -125,6 +128,21 @@
     "REJECT_WEAK_IDENTITY",
     "REJECT_EXTRACT_FAILED",
     "ACCEPT_SOURCE_SIEVE",
-    "REJECT_QUERY_IDENTITY_DRIFT"
-  ]
+    "REJECT_QUERY_IDENTITY_DRIFT",
+    "ACCEPT_SOURCE_SIEVE_BODY_RESCUE"
+  ],
+  "body_identity_rescue": {
+    "enabled": true,
+    "identity_window_chars": 2400,
+    "require_brand_near_model": true,
+    "max_identity_level": "PROBABLE",
+    "block_compatibility_only": true,
+    "block_related_only": true
+  },
+  "persistence": {
+    "persist_target_evidence_window": true,
+    "target_evidence_window_chars": 5000,
+    "raw_content_full_persisted": false,
+    "persist_local_enrichment_window": true
+  }
 }

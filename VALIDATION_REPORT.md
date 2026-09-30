@@ -1,55 +1,41 @@
-# VALIDATION REPORT — R9.7 Cache-First Free-Tier
+# VALIDATION REPORT — R9.6p7
 
-Date: 2026-09-30
+Date: 2026-09-29
 
-## Static / core
-
+## Static / schema
 - `python -m py_compile pipeline_produtos.py`: PASS
 - `python pipeline_produtos.py --mode validate`: PASS
+- Rules version: `2026-09-29-v3.0.10-r9.6p7-import-noise-taxonomy`
+- Collection policy: `2026-09-29-r9.6p7-brand-primary-gate-v1`
 
 ## Quality gates
-
-- Synthetic: 84/84 PASS
+- Synthetic: 80/80 PASS
 - Identity: 17/17 PASS
 - Real explicit: 22/22 PASS
-- Real reference-only: 12 (informational)
-- Semantic GOLD: 6/6 PASS
+- Real reference-only: 12 retained as reference-only
 
 ## Regression suites
+- `test_collection_single_request_r96.py`: PASS
+- `test_collection_source_sieve_r96p5.py`: PASS
+- `test_recovery_hf3.py`: PASS
+- `test_taxonomy_hf2.py`: PASS
+- `test_baseline_export_hf3_1p2.py`: PASS
+- `test_classification_recovery_r96p6.py`: PASS
+- `test_import_noise_taxonomy_r96p7.py`: PASS
 
-- R9.6 single-request cost policy: PASS
-- R9.6p4 source sieve + local enrichment: PASS
-- R9.5 HF3 recovery: PASS
-- R9.5 HF2 taxonomy: PASS
-- HF3.1p2 baseline export: PASS
-- R9.6p7 import-noise taxonomy: PASS
-- R9.7 cache-first free-tier: PASS
+## R9.6p7 targeted protections
+- Brand/model mismatch cannot auto-approve even when an exact model appears in the source.
+- Company legal suffix normalization remains deterministic and non-fuzzy.
+- Industrial/venturi blowers cannot inflate garden BLOWER categories.
+- Fan/cooler import noise routes to OTHERS with a specific physical family.
+- Windscreen/ink/fuel/oil/vacuum/condensate pumps are blocked from WATERPUMP.
+- TILLER can close to TILLERS|TILLERS with UNKNOWN power.
+- Resolved rows force `Próxima Ação=CONCLUIDO`.
+- Resolved `Título Real` is selected only from a STRONG source supporting the TYPE.
 
-## R9.7 targeted validations
-
-PASS:
-- `www.XYtronic-USA.com` is detected as generic title.
-- Explicit `TCL` source against target `HYUNDAI` is detected as cross-brand conflict.
-- TF-IDF fallback retrieves `CROSS FLOW FAN` for explicit cross-flow evidence.
-- TF-IDF fallback retrieves `SOLDERING STATION` for explicit soldering-station evidence.
-- TF-IDF fallback retrieves `WINDSCREEN WASHER RESERVOIR` for explicit reservoir evidence.
-- `WINDSCREEN WASHER PUMP` is suppressed when evidence explicitly says washer-fluid reservoir.
-- New types map to valid deterministic taxonomy pairs.
-
-## Synthetic cache integration smoke
-
-A local SQLite cache was created only for validation and was not included in the package.
-The cache-first mode completed with:
-
-- Search API calls: 0
-- LLM/API calls: 0
-- Sentence Transformers unavailable in validation environment -> clean fallback to scikit-learn TF-IDF
-- Explicit strong CROSS FLOW FAN -> `LOCAL_EXACT_ALIAS_ACCEPTED`
-- HYUNDAI target with TCL source -> `CACHE_IDENTITY_GAP`
-- No writes to Base Final / Consolidado
-
-## Not live-validated here
-
-- The user's real `cache_tavily.sqlite` is not present in this environment.
-- The optional multilingual Sentence Transformers model is not installed in this environment.
-- Therefore final retrieval quality over the user's full real cache must be measured by running option 8 on the user's machine.
+## Critical invariants preserved
+- Maximum 1 Search-provider request per product.
+- No automatic Search retry, secondary query, provider failover, Tavily Extract or Advanced.
+- `Revisão B.I = OK` hard lock unchanged.
+- LLM cannot invent TYPE or taxonomy.
+- Wrong-SKU near matches remain blocked; no fuzzy edit-distance identity.

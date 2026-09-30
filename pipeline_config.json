@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-30-r9.7-cache-first-free-tier",
+  "VERSION": "2026-09-30-r9.6p7.1a-safe-hints-evidence-retention",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -15,10 +15,7 @@
     "baseline_backup_dir": "Backups_Baseline",
     "baseline_audit": "Auditoria_Baseline_R9_5.csv",
     "collection_policy": "collection_quality_policy.json",
-    "collection_report_cache_rebuild": "Curadoria_Cache_R9_6.xlsx",
-    "semantic_pilot_output": "Piloto_Definicao_LLM_R9_6p8_5.xlsx",
-    "cache_first_output": "Piloto_Cache_First_Free_Tier_R9_7.xlsx",
-    "cache_first_evidence_jsonl": "Cache_Evidence_Packs_R9_7.jsonl"
+    "collection_report_cache_rebuild": "Curadoria_Cache_R9_6.xlsx"
   },
   "evidence": {
     "max_results": 5,
@@ -230,59 +227,5 @@
       "engine": "trafilatura",
       "dynamic_browser_fallback": false
     }
-  },
-  "semantic_pilot": {
-    "enabled": true,
-    "default_max_items": 5,
-    "write_baseline": false,
-    "use_checkpoint": false,
-    "description": "Piloto LLM Product Definition p8.5: coorte elegível + preflight de credencial/modelo + LIVE structured-output smoke obrigatório antes do primeiro produto + encerramento seguro.",
-    "checkpoint_every": 5,
-    "target_stage1_states": [
-      "UNRESOLVED",
-      "AMBIGUOUS"
-    ],
-    "llm_route": [
-      "nvidia",
-      "groq"
-    ],
-    "nvidia_model": "openai/gpt-oss-20b",
-    "groq_model": "openai/gpt-oss-120b",
-    "stop_on_provider_error": true,
-    "live_provider_smoke": true
-  },
-  "cache_first_free_tier": {
-    "enabled": true,
-    "description": "Cache Tavily -> Evidence Pack target-aware -> Stage1 -> local taxonomy retrieval. Zero Search e zero LLM/API paga.",
-    "default_max_items": 100,
-    "target_stage1_states": [
-      "UNRESOLVED",
-      "AMBIGUOUS"
-    ],
-    "max_sources": 5,
-    "max_query_chars": 6000,
-    "model_window_before": 450,
-    "model_window_after": 1200,
-    "include_cross_brand_as_context": true,
-    "backend": "auto",
-    "sentence_transformers_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-    "sentence_transformers_local_only": true,
-    "top_k": 5,
-    "proposal_thresholds": {
-      "sentence_transformers": 0.38,
-      "sklearn_tfidf": 0.2,
-      "lexical": 0.25,
-      "default": 0.2
-    },
-    "auto_accept": false,
-    "auto_accept_thresholds": {
-      "sentence_transformers": 0.68,
-      "sklearn_tfidf": 0.55,
-      "lexical": 0.72,
-      "default": 0.8
-    },
-    "auto_accept_margin": 0.1,
-    "checkpoint_every": 25,
-    "exact_alias_auto_accept": true
   }
 }

@@ -1,0 +1,515 @@
+--- pipeline_produtos_R9_6p7_original.py	2026-09-30 19:09:01.071344604 +0000
++++ pipeline_produtos.py	2026-09-30 19:19:02.409009007 +0000
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ """
+-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p7
++PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1p7.1 / Collection R9.6p7.1
+ 
+ Arquitetura:
+     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
+@@ -51,11 +51,11 @@
+ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+ from urllib.parse import quote, unquote, urlencode, urlparse
+ 
+-PIPELINE_VERSION = "3.9.5-hf3.1"
++PIPELINE_VERSION = "3.9.5-hf3.1p7.1a"
+ PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
+ DEFAULT_MODEL = "openai/gpt-oss-120b"
+-BUILD_LABEL = "v3.9.5-HF3.1p7 R9.6 Import Noise Taxonomy + Strong Identity"
+-COLLECTION_ENGINE_VERSION = "2026-09-29-r9.6p7-import-noise-taxonomy"
++BUILD_LABEL = "v3.9.5-HF3.1p7.1a R9.6 Evidence Retention + Safe Semantic Hints"
++COLLECTION_ENGINE_VERSION = "2026-09-30-r9.6p7.1a-evidence-retention-safe-hints"
+ MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
+ ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
+ 
+@@ -1393,6 +1393,100 @@
+     return dedup
+ 
+ 
++def _usable_brand_identity_variants(brand: str) -> List[str]:
++    variants: List[str] = []
++    for value in _brand_identity_variants(brand):
++        short_alnum = bool(re.search(r"[a-z]", value) and re.search(r"\d", value))
++        if len(value) >= (2 if short_alnum else 3):
++            variants.append(value)
++    return list(dict.fromkeys(variants))
++
++
++def _brand_near_model_in_text(
++    text: str, brand: str, model: str, suffixes: Sequence[str], radius: int = 420
++) -> bool:
++    """Exige co-localização Marca+Modelo no BODY; evita catálogo multi-marca virar identidade."""
++    hay = strip_accents(unquote(safe(text))).casefold()
++    if not hay:
++        return False
++    brand_variants = _usable_brand_identity_variants(brand)
++    if not brand_variants:
++        return False
++    for compact_variant, _ in _model_identity_variants(model, suffixes):
++        if not compact_variant:
++            continue
++        pat = _model_exact_pattern(compact_variant)
++        for match in pat.finditer(hay):
++            local = hay[max(0, match.start() - radius): min(len(hay), match.end() + radius)]
++            local_c = compact(local)
++            if any(v in local_c for v in brand_variants):
++                return True
++    return False
++
++
++def _target_evidence_window(
++    brand: str, model: str, text: str, cfg: Dict[str, Any], max_chars: int = 5000
++) -> Tuple[str, Dict[str, Any]]:
++    """Retém somente uma janela auditável em torno do SKU, priorizando Marca+Modelo próximos."""
++    raw = safe(text)
++    spans = _target_spans(raw, model, cfg)
++    meta: Dict[str, Any] = {
++        "target_occurrences": len(spans),
++        "brand_near_anchor": False,
++        "window_chars": 0,
++        "anchor_model": safe(model),
++    }
++    if not raw or not spans:
++        return "", meta
++    max_chars = max(1000, int(max_chars or 5000))
++    brand_variants = _usable_brand_identity_variants(brand)
++    best: Optional[Tuple[int, int, str, bool]] = None
++    radius = min(600, max(220, max_chars // 6))
++    for a, b in spans:
++        near = raw[max(0, a - radius): min(len(raw), b + radius)]
++        near_c = compact(near)
++        brand_near = any(v in near_c for v in brand_variants) if brand_variants else False
++        half = max_chars // 2
++        left = max(0, a - half)
++        right = min(len(raw), left + max_chars)
++        left = max(0, right - max_chars)
++        window = raw[left:right].strip()
++        score = 1 if brand_near else 0
++        candidate = (score, -a, window, brand_near)
++        if best is None or candidate[:2] > best[:2]:
++            best = candidate
++    if best is None:
++        return "", meta
++    window = best[2]
++    meta["brand_near_anchor"] = bool(best[3])
++    meta["window_chars"] = len(window)
++    return window, meta
++
++
++def _body_identity_rescue_for_result(
++    brand: str, model: str, row: Dict[str, Any], cfg: Dict[str, Any], policy: Dict[str, Any]
++) -> Tuple[Optional[Dict[str, Any]], str, Dict[str, Any]]:
++    """Resgata somente BODY target-anchored com Marca+Modelo próximos; nunca modelo sozinho."""
++    rcfg = policy.get("body_identity_rescue", {}) or {}
++    if not bool(rcfg.get("enabled", True)):
++        return None, "BODY_RESCUE_DISABLED", {}
++    raw_content = safe(row.get("raw_content")) or safe(row.get("_target_evidence_window"))
++    if not raw_content:
++        return None, "BODY_RESCUE_NO_RAW_CONTENT", {}
++    window_chars = max(1000, int(rcfg.get("identity_window_chars", 2400) or 2400))
++    window, meta = _target_evidence_window(brand, model, raw_content, cfg, window_chars)
++    if not window:
++        return None, "BODY_RESCUE_TARGET_NOT_FOUND", meta
++    if bool(rcfg.get("require_brand_near_model", True)) and not bool(meta.get("brand_near_anchor")):
++        return None, "BODY_RESCUE_BRAND_NOT_NEAR_MODEL", meta
++    probe = dict(row)
++    probe["content"] = window
++    identity = _source_identity_for_result(brand, model, probe, cfg)
++    if identity.get("level") not in {"STRONG", "PROBABLE"}:
++        return None, f"BODY_RESCUE_IDENTITY_{identity.get('level', 'WEAK')}", meta
++    return identity, "BODY_RESCUE_ACCEPTED", meta
++
++
+ def _looks_like_other_sku_token(token: str, start: int, text: str, model: str, policy: Dict[str, Any]) -> bool:
+     raw = safe(token).upper().strip(".,:;()[]{}")
+     compact_token = compact(raw)
+@@ -1928,36 +2022,65 @@
+     for row in rows:
+         if not isinstance(row, dict):
+             continue
+-        identity = _source_identity_for_result(brand, search_model, row, cfg)
++        identity_initial = _source_identity_for_result(brand, search_model, row, cfg)
++        identity = dict(identity_initial)
+         title = safe(row.get("title"))
+         snippet = safe(row.get("content"))
+         url = safe(row.get("url"))
+         search_text = f"{title}\n{snippet}".strip()
++        purpose_text = search_text
+         flags: List[str] = []
++        rescue_reason = ""
++        rescue_meta: Dict[str, Any] = {}
++        identity_basis = "PRIMARY_SEARCH_FIELDS"
+ 
+-        decision = "ACCEPT_SOURCE_SIEVE"
+-        reason = "Identidade target STRONG/PROBABLE e sem propósito negativo detectado"
++        if identity["level"] not in {"STRONG", "PROBABLE"}:
++            rescued, rescue_reason, rescue_meta = _body_identity_rescue_for_result(
++                brand, search_model, row, cfg, policy
++            )
++            if rescued is not None:
++                identity = rescued
++                identity_basis = "RAW_TARGET_WINDOW_BRAND_MODEL"
++                raw_text = safe(row.get("raw_content")) or safe(row.get("_target_evidence_window"))
++                body_window, _ = _target_evidence_window(
++                    brand, search_model, raw_text, cfg,
++                    int((policy.get("body_identity_rescue", {}) or {}).get("identity_window_chars", 2400) or 2400),
++                )
++                purpose_text = f"{title}\n{snippet}\n{body_window}".strip()
++                flags.append("BODY_IDENTITY_RESCUE")
++
++        decision = "ACCEPT_SOURCE_SIEVE_BODY_RESCUE" if identity_basis == "RAW_TARGET_WINDOW_BRAND_MODEL" else "ACCEPT_SOURCE_SIEVE"
++        reason = (
++            "Identidade target PROBABLE resgatada no BODY com Marca+Modelo próximos"
++            if identity_basis == "RAW_TARGET_WINDOW_BRAND_MODEL"
++            else "Identidade target STRONG/PROBABLE e sem propósito negativo detectado"
++        )
+         if identity["level"] not in {"STRONG", "PROBABLE"}:
+             decision = "REJECT_WEAK_IDENTITY"
+-            reason = f"Identity={identity['level']} abaixo de PROBABLE"
+-        elif _target_context_has_only_relation(search_text, search_model, cfg, compatibility, window=180):
++            reason = f"Identity={identity['level']} abaixo de PROBABLE; {rescue_reason or 'sem body rescue'}"
++        elif _target_context_has_only_relation(purpose_text, search_model, cfg, compatibility, window=180):
+             decision = "REJECT_COMPATIBILITY_ONLY"
+             reason = "Marca/Modelo aparecem em contexto de compatibilidade/substituição"
+             flags.append("COMPATIBILITY_ONLY")
+-        elif _target_context_has_only_relation(search_text, search_model, cfg, related, window=180):
++        elif _target_context_has_only_relation(purpose_text, search_model, cfg, related, window=180):
+             decision = "REJECT_RELATED_ONLY"
+             reason = "Marca/Modelo aparecem em contexto de related/similar products"
+             flags.append("RELATED_ONLY")
+ 
+-        if _term_present(f"{title}\n{url}\n{snippet}", generic):
++        if _term_present(f"{title}\n{url}\n{snippet}\n{purpose_text[:1200]}", generic):
+             flags.append("GENERIC_PAGE_SIGNAL")
+ 
+         audit = {
+             "url": url,
+             "title": title,
+             "tavily_score": row.get("score"),
+-            "identity_before": identity["level"],
+-            "model_match_field_before": identity["model_match_field"],
++            "identity_before": identity_initial["level"],
++            "model_match_field_before": identity_initial["model_match_field"],
++            "identity_after_sieve": identity["level"],
++            "identity_basis": identity_basis,
++            "body_identity_rescue_reason": rescue_reason,
++            "body_identity_rescue_brand_near": bool(rescue_meta.get("brand_near_anchor")),
++            "body_identity_rescue_occurrences": int(rescue_meta.get("target_occurrences", 0) or 0),
+             "sieve_decision": decision,
+             "sieve_reason": reason,
+             "decision": decision,
+@@ -1976,6 +2099,7 @@
+         if decision.startswith("ACCEPT_"):
+             row2 = dict(row)
+             row2["_collection_identity"] = identity["level"]
++            row2["_collection_identity_basis"] = identity_basis
+             row2["_sieve_audit_index"] = len(audits) - 1
+             accepted.append(row2)
+ 
+@@ -2145,6 +2269,29 @@
+             evidence_text = snippet
+ 
+         evidence_text = _cap_evidence_text(evidence_text, search_model, cfg)
++
++        # R9.6p7.1: preserve a bounded target-anchored window from ANY enriched
++        # evidence (including Serper/Bright Data local fetch). This survives even
++        # when Target Isolation later rejects the source, allowing option 6/rule
++        # changes to re-evaluate the evidence without another Search request.
++        if evidence_text and evidence_mode != "SEARCH_SNIPPET":
++            persistence_cfg = policy.get("persistence", {}) or {}
++            keep_chars = max(1000, int(persistence_cfg.get("target_evidence_window_chars", 5000) or 5000))
++            remembered_window, remembered_meta = _target_evidence_window(
++                brand, search_model, evidence_text, cfg, keep_chars
++            )
++            if remembered_window:
++                original_key = _url_key(res.get("url", ""))
++                for original in search_results:
++                    if not isinstance(original, dict):
++                        continue
++                    if _url_key(original.get("url", "")) != original_key:
++                        continue
++                    original["_target_evidence_window"] = remembered_window
++                    original["_target_evidence_meta"] = remembered_meta
++                    original["_target_evidence_source"] = evidence_mode
++                    break
++
+         isolation = _isolate_target_block(
+             brand, search_model, safe(res.get("title")), safe(res.get("url")),
+             evidence_text if evidence_mode != "SEARCH_SNIPPET" else "",
+@@ -2167,6 +2314,7 @@
+         if decision.startswith("ACCEPT_"):
+             row = _make_curated_result(res, isolation, evidence_mode, evidence_mode)
+             row["_collection_identity"] = safe(res.get("_collection_identity"))
++            row["_collection_identity_basis"] = safe(res.get("_collection_identity_basis"))
+             row["raw_content"] = None
+             curated.append(row)
+ 
+@@ -2424,13 +2572,42 @@
+         "raw_content_requested": bool(usage.get("raw_content_requested")),
+     }]
+ 
+-    # Não persistir raw_content integral da Tavily no RAW cache: ele pode ser muito
+-    # grande. O trecho target-isolado já está em curated_results e é suficiente para
+-    # classificação/auditoria. Mantemos apenas o indicador de disponibilidade.
++    # Não persistimos raw_content integral, mas preservamos uma janela auditável
++    # target-anchored para que mudanças futuras de regra possam reavaliar a fonte
++    # sem gastar nova Search. O conteúdo integral continua descartado.
++    persistence_cfg = policy.get("persistence", {}) or {}
++    persist_window = bool(persistence_cfg.get("persist_target_evidence_window", True))
++    target_window_chars = max(1000, int(persistence_cfg.get("target_evidence_window_chars", 5000) or 5000))
+     persisted_results: List[Dict[str, Any]] = []
+     for row in normalized:
+         r = dict(row)
+-        r["_raw_content_available"] = bool(safe(r.get("raw_content")))
++        raw_text = safe(r.get("raw_content"))
++        r["_raw_content_available"] = bool(raw_text)
++
++        # A janela pode ter vindo do raw_content da Tavily OU de enriquecimento
++        # local de Serper/Bright Data. Nunca apaga uma janela já lembrada.
++        target_window = safe(r.get("_target_evidence_window"))
++        target_meta = r.get("_target_evidence_meta") if isinstance(r.get("_target_evidence_meta"), dict) else {}
++        target_source = safe(r.get("_target_evidence_source"))
++        if not target_meta:
++            target_meta = {
++                "target_occurrences": 0, "brand_near_anchor": False, "window_chars": len(target_window),
++                "anchor_model": search_model,
++            }
++        if persist_window and raw_text:
++            raw_window, raw_meta = _target_evidence_window(
++                brand, search_model, raw_text, cfg, target_window_chars
++            )
++            if raw_window:
++                target_window, target_meta = raw_window, raw_meta
++                target_source = "TAVILY_SEARCH_RAW_CONTENT"
++        r["_target_evidence_window"] = target_window
++        r["_target_evidence_meta"] = target_meta
++        r["_target_evidence_source"] = target_source
++        r["_raw_persistence_state"] = (
++            "TARGET_WINDOW_PERSISTED" if target_window
++            else ("RAW_AVAILABLE_NO_TARGET_WINDOW" if raw_text else "RAW_NOT_AVAILABLE")
++        )
+         r["raw_content"] = None
+         persisted_results.append(r)
+ 
+@@ -2510,22 +2687,34 @@
+     for res in raw_results:
+         identity = _source_identity_for_result(brand, search_model, res, cfg)
+         raw_content = safe(res.get("raw_content"))
++        stored_window = safe(res.get("_target_evidence_window"))
++        evidence_body = raw_content or stored_window
++        if raw_content:
++            cache_depth = "CACHE_RAW"
++        elif stored_window:
++            cache_depth = "CACHE_TARGET_WINDOW"
++        else:
++            cache_depth = "CACHE_SNIPPET_ONLY"
+         isolation = _isolate_target_block(
+             brand, search_model, safe(res.get("title")), safe(res.get("url")),
+-            raw_content, safe(res.get("content")), cfg, policy,
++            evidence_body, safe(res.get("content")), cfg, policy,
+         )
+         decision = safe(isolation.get("decision"))
+         if decision.startswith("ACCEPT_"):
+-            row = _make_curated_result(res, isolation, "CACHE_RAW", "CACHE_REBUILD_NO_TAVILY")
++            row = _make_curated_result(res, isolation, cache_depth, "CACHE_REBUILD_NO_TAVILY")
+             row["_collection_identity"] = _source_identity_for_result(brand, search_model, row, cfg)["level"]
++            row["_collection_identity_basis"] = (
++                "PERSISTED_TARGET_WINDOW" if stored_window and not raw_content else "CACHE_REBUILD"
++            )
+             curated.append(row)
+         audit.append({
+             "url": safe(res.get("url")), "title": safe(res.get("title")), "tavily_score": res.get("score"),
+             "identity_before": identity["level"], "model_match_field_before": identity["model_match_field"],
+             "decision": decision, "reason": safe(isolation.get("reason")),
+             "quality_flags": list(isolation.get("flags", []) or []), "other_skus": list(isolation.get("other_skus", []) or []),
+-            "isolated_chars": len(safe(isolation.get("content"))), "extract_depth": "CACHE_RAW",
++            "isolated_chars": len(safe(isolation.get("content"))), "extract_depth": cache_depth,
+             "source_mode": "CACHE_REBUILD_NO_TAVILY",
++            "raw_persistence_state": safe(res.get("_raw_persistence_state")),
+         })
+     curated = _dedupe_curated(curated)
+     curated.sort(key=lambda x: (safe(x.get("_collection_identity")) != "STRONG", -float(x.get("score", 0) or 0)))
+@@ -2958,6 +3147,9 @@
+     best_source_score: int = 0
+     identity_best: str = "WEAK"
+     conflict_count: int = 0
++    # Informational hints are deliberately outside AUTO/LLM identity gates.
++    review_type_hints: List[str] = field(default_factory=list)
++    review_hint_evidence: Dict[str, List[str]] = field(default_factory=dict)
+ 
+ 
+ def _weighted_stats(scores: Dict[str, float]) -> Tuple[str, float, float, str]:
+@@ -3161,6 +3353,9 @@
+ 
+     primary_model = model_field in {"TITLE", "URL"}
+     body_model = model_field == "BODY"
++    brand_near_body_model = bool(
++        body_model and _brand_near_model_in_text(content, brand, model, suffixes, radius=420)
++    )
+     core_model = compact(_model_identity_norm(model))
+     numeric_short = bool(core_model.isdigit() and len(core_model) <= 5)
+     short_ambiguous = bool(core_model and len(core_model) <= max(1, int(short_model_requires_brand_length or 5)))
+@@ -3173,6 +3368,10 @@
+         level, score, weight = "PROBABLE", 85, 0.80
+     elif body_model and brand_primary:
+         level, score, weight = "PROBABLE", 78, 0.72
++    elif body_model and brand_near_body_model:
++        # R9.6p7.1: raw/body só sobe quando Marca+Modelo estão co-localizados.
++        # Continua PROBABLE (não STRONG), portanto nunca vence o hard gate de AUTO.
++        level, score, weight = "PROBABLE", 76, 0.70
+     elif body_model and brand_any:
+         level, score, weight = "CONTEXTUAL", 60, 0.45
+     elif brand_primary:
+@@ -3315,6 +3514,89 @@
+             ))
+         return out
+ 
++    def _review_type_hints(self, brand: str, model: str, payload: Dict[str, Any]) -> Dict[str, List[str]]:
++        """Extract TYPE hints from MODEL and raw Search TITLES without granting identity.
++
++        These hints exist to avoid throwing away obvious lexical information such
++        as "INK PUMP", "CYCLON MINI FAN" or "Centrifugal Pumps". They may
++        populate review candidates/taxonomy, but never satisfy STRONG identity and
++        therefore cannot auto-approve or pass the final LLM resolution gate alone.
++        """
++        hints: Dict[str, List[str]] = defaultdict(list)
++        collection = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
++        hard_rejects = {
++            "REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY",
++            "REJECT_QUERY_IDENTITY_DRIFT",
++        }
++        audit_by_url: Dict[str, str] = {}
++        for row in (collection.get("source_audit", []) or []):
++            if not isinstance(row, dict):
++                continue
++            key = _url_key(row.get("url", ""))
++            if key:
++                audit_by_url[key] = safe(row.get("decision"))
++
++        def collect(label: str, text: str) -> None:
++            value = safe(text)
++            if not value:
++                return
++            probe = Source(
++                source_id=0, title=value, content="", url="", relevance="WEAK",
++                quality_flags=[], identity_score=0, model_match="NONE",
++                model_match_field="NONE", source_weight=0.0,
++                collection_decision="REVIEW_HINT_ONLY",
++            )
++            hits, fields = self._type_hits_for_source(probe, brand, model)
++
++            # Review-only plural tolerance. Production aliases remain untouched;
++            # this only catches obvious title morphology such as
++            # "centrifugal pumps" when the JSON alias is "centrifugal pump".
++            folded_value = norm_text(value)
++            for typ, data in self.rules.types.items():
++                if typ in hits:
++                    continue
++                for alias in (data.get("aliases", []) or []):
++                    alias_n = norm_text(alias)
++                    parts = alias_n.split()
++                    if not parts:
++                        continue
++                    last = parts[-1]
++                    variants: List[str] = []
++                    if len(last) >= 3 and not last.endswith("s"):
++                        variants.append(" ".join(parts[:-1] + [last + "s"]))
++                        if last.endswith(("ch", "sh", "x", "z")):
++                            variants.append(" ".join(parts[:-1] + [last + "es"]))
++                        if len(last) > 3 and last.endswith("y") and len(last) >= 2 and last[-2] not in "aeiou":
++                            variants.append(" ".join(parts[:-1] + [last[:-1] + "ies"]))
++                    if any(contains_alias_prepared(folded_value, v) for v in variants):
++                        if not self._collision_allows(typ, alias):
++                            continue
++                        hits.setdefault(typ, []).append(f"[REVIEW_PLURAL:{alias}]")
++                        fields.setdefault(typ, []).append("TITLE")
++                        break
++
++            for typ in hits:
++                # MODEL/TITLE hints are lexical suggestions only.
++                if "TITLE" not in set(fields.get(typ, []) or []) and "MODEL_RULE" not in set(fields.get(typ, []) or []):
++                    continue
++                evidence = f"{label}:{value[:240]}"
++                if evidence not in hints[typ]:
++                    hints[typ].append(evidence)
++
++        collect("MODEL", model)
++        for res in (payload.get("results", []) or []):
++            if not isinstance(res, dict):
++                continue
++            title = safe(res.get("title"))
++            if not title:
++                continue
++            decision = audit_by_url.get(_url_key(res.get("url", "")), "")
++            if decision in hard_rejects:
++                continue
++            collect("TITLE", title)
++
++        return dict(hints)
++
+     def _collision_allows(self, typ: str, alias: str) -> bool:
+         normalized = norm_text(alias)
+         owners = sorted(set(self.rules.alias_to_types.get(normalized, [])))
+@@ -3540,7 +3822,12 @@
+             for power in anchored_powers:
+                 all_power_hits[power].append(src.source_id)
+ 
++        # Core Stage 1 candidates remain based ONLY on target-anchored evidence.
++        # MODEL/TITLE hints are kept on a separate review track so they cannot
++        # create ambiguity, resolve TYPE, or enter the LLM funnel.
+         type_candidates = self._apply_specificity(all_type_hits.keys())
++        review_hint_evidence = self._review_type_hints(brand, model, payload)
++        review_type_hints = self._apply_specificity(review_hint_evidence.keys())
+         power_candidates = sorted(all_power_hits.keys())
+         # Após especificidade, métricas só consideram candidatos sobreviventes.
+         type_support = {t: len(set(all_type_hits.get(t, []))) for t in type_candidates}
+@@ -3556,6 +3843,8 @@
+         }
+         _, power_share, power_margin, _ = _weighted_stats(power_scores)
+         reasons: List[str] = []
++        if review_type_hints:
++            reasons.append("REVIEW_TYPE_HINTS:" + ",".join(review_type_hints))
+ 
+         product_type: Optional[str] = None
+         if len(type_candidates) == 1:
+@@ -3641,6 +3930,8 @@
+             best_source_score=best_source_score,
+             identity_best=identity_best,
+             conflict_count=0,
++            review_type_hints=review_type_hints,
++            review_hint_evidence=review_hint_evidence,
+         )
+ 
+ 
+@@ -5718,7 +6009,7 @@
+     Nao resolve o TYPE e nao remove Review Required. Ex.: DRILL + SCREWDRIVER
+     podem permanecer ambíguos, mas ambos pertencem a OTHERS | POWER TOOLS.
+     """
+-    candidates = list(dict.fromkeys(s1.type_candidates or []))
++    candidates = list(dict.fromkeys(s1.type_candidates or s1.review_type_hints or []))
+     if not candidates:
+         return "", "", ""
+     power = s1.power or "UNKNOWN"
+@@ -5881,6 +6172,10 @@
+     consensus_cg, consensus_fam, consensus_reason = taxonomy_consensus_for_review(rules, s1, brand, model)
+     if s1.state == "RESOLVED_RULE":
+         next_action = "CONCLUIDO"
++    elif not s1.type_candidates and s1.review_type_hints and consensus_cg and consensus_fam:
++        next_action = "TYPE_HINT_REVIEW_FAMILY_JA_DEFINIDA"
++    elif not s1.type_candidates and s1.review_type_hints:
++        next_action = "TYPE_HINT_REVIEW"
+     elif not s1.type_candidates and ref_identity in {"STRONG", "PROBABLE"}:
+         next_action = "JSON_GAP_OU_LLM_GAP"
+     elif not s1.type_candidates and raw_result_count:
+@@ -5906,6 +6201,9 @@
+         "Título Referência Decision": ref_decision,
+         "Próxima Ação": next_action,
+         "Stage1 Type Candidates": " | ".join(s1.type_candidates),
++        "Review Type Hints": " | ".join(s1.review_type_hints),
++        "Review Suggested Type": s1.review_type_hints[0] if len(s1.review_type_hints) == 1 else "",
++        "Review Hint Evidence": json.dumps(s1.review_hint_evidence, ensure_ascii=False, sort_keys=True),
+         "Stage1.5 Type Candidates": " | ".join(funnel.candidates),
+         "Stage1 Type Scores": json.dumps(s1.type_scores, ensure_ascii=False, sort_keys=True),
+         "Stage1 Power Candidates": " | ".join(s1.power_candidates),
