@@ -1,3 +1,28 @@
+# R9.6p8.1 — Product Definition Prompt Contract (2026-09-29)
+
+- Reframes the semantic LLM stage from “identify the physical product” to “define the primary product represented by the evidence”.
+- Requires the most specific technical/commercial product name supported by the supplied evidence.
+- Explicitly forbids forcing the answer into the internal taxonomy or returning only an industry/use/function/generic class when a specific product is evidenced.
+- Keeps Category General and FAMILY outside the Product Definition prompt; taxonomy remains a downstream controlled step.
+- Renames the pilot output column to `Produto Definido LLM`.
+- Bumps the semantic prompt namespace so prior p8 semantic responses are not reused from cache.
+- Keeps the pilot read-only for Base Final/Consolidado and performs zero Search-provider calls.
+
+# R9.6p8 — Semantic Product Pilot (2026-09-29)
+
+- Adds a pilot-only LLM-first product identification stage using existing curated evidence.
+- LLM returns `product_type_raw`, product role, domain hint, power, cited source IDs and a verbatim evidence phrase.
+- Rejects semantic output when the evidence phrase is not literally grounded in a cited target source.
+- Keeps full taxonomy authority in `regras_negocio.json`; LLM never creates Category General or FAMILY.
+- Adds local semantic candidate retrieval over canonical types, aliases and families; only the top candidates are exposed to the taxonomy validator LLM.
+- Adds `role_overrides` so component/module/fixed-part evidence can normalize to `PART` without losing the richer raw physical description.
+- Adds semantic bridge rules for explosion-proof axial blower, blower assembly and rotary tiller.
+- Adds semantic-only taxonomy evidence rules for the six B.I.-validated deviations from the 22 classified items.
+- `OTHERS|OTHERS` is allowed only as an explicit evidence-driven proposal for authorized types (`PART`) and is not enabled as a generic production fallback.
+- Adds `semantic` mode and menu option 7; the pilot never writes Base Final or Consolidado.
+- Preserves max 1 Search-provider request per product and does not change the collection path.
+- All previous regression tests plus 6/6 semantic gold cases pass.
+
 # CHANGELOG
 
 ## R9.6p7 — Import Noise Taxonomy + Strong Identity (2026-09-29)

@@ -1,9 +1,9 @@
 {
-  "VERSION": "2026-09-29-v3.0.10-r9.6p7-import-noise-taxonomy",
+  "VERSION": "2026-09-29-v3.0.11-r9.6p8.1-product-definition-pilot",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
-    "LLM é somente desempate restrito quando existe candidato determinístico de TYPE; sem candidato de TYPE o item vai para REVISAR sem chamada LLM.",
+    "No modo piloto Product Definition, a LLM pode definir o produto principal a partir de evidência target-grounded antes do funil taxonômico; no fluxo de classificação legado, a LLM continua restrita aos candidatos determinísticos existentes.",
     "LLM nunca cria candidato: PRODUCT_TYPE deve pertencer aos candidatos do Stage 1; POWER deve pertencer aos candidatos de power do Stage 1 ou ser UNKNOWN.",
     "RESOLVED via LLM exige evidência citada que sustente o TYPE e fonte com identidade STRONG (Marca+Modelo no campo primário); source_id sozinho não é prova.",
     "Category General e FAMILY são sempre determinísticos por TAXONOMY_RULES/fallback_pair; nenhum provider decide taxonomia.",
@@ -31,7 +31,12 @@
     "AUTO_APROVADO exige identidade STRONG: Marca e Modelo devem estar ancorados no TITLE/URL da fonte que sustenta o TYPE; modelo isolado sem a marca pode gerar candidato/revisão, nunca aprovação automática.",
     "Ruído de importação de FAN/COOLER/BLOWER industrial é classificado como OTHERS na FAMILY física específica, evitando inflar PETROL/CORDED/BATTERY garden equipment.",
     "WATERPUMP não pode nascer de usos não-hídricos de pump (windscreen/windshield washer, ink, fuel, oil, vacuum, condensate); quando explícitos, esses produtos usam TYPE/FAMILY próprios em OTHERS.",
-    "Próxima Ação deve ser CONCLUIDO em todo registro realmente RESOLVED; AUTO_APROVADO nunca pode coexistir com ação de LLM/revisão."
+    "Próxima Ação deve ser CONCLUIDO em todo registro realmente RESOLVED; AUTO_APROVADO nunca pode coexistir com ação de LLM/revisão.",
+    "R9.6p8 PILOT: a LLM pode identificar semanticamente o produto físico a partir de evidência target já coletada, sem escolher Category General/FAMILY.",
+    "SEMANTIC RECOVERY separa PRODUCT_TYPE_RAW (linguagem real) do PRODUCT_TYPE canônico do JSON; o funil taxonômico continua determinístico/controlado.",
+    "A LLM semantic recovery deve citar fonte e uma evidence_phrase literalmente presente na fonte; sem grounding o resultado é rejeitado.",
+    "Marca de importação pode divergir da marca comercial; modelo/part number exato pode sustentar identidade PROBABLE, mas near-model continua bloqueado.",
+    "Componentes identificados semanticamente podem ser normalizados para PART/ACCESSORY conforme role, preservando o tipo físico bruto para auditoria."
   ],
   "TAXONOMY_PAIRS": [
     {
@@ -773,6 +778,22 @@
     {
       "category_general": "OTHERS",
       "family": "MIXER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AXIAL EXPLOSION-PROOF"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY TILLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "OTHERS"
     }
   ],
   "PRODUCT_TYPES": {
@@ -4893,7 +4914,10 @@
     "output_voltage_rule": "Para GENERATOR, INVERTER GENERATOR e INVERTER WELDER, tensão isolada pode ser saída. O engine deve suprimir power inferido somente por voltage/amp keywords quando houver um desses tipos na mesma fonte.",
     "replacement_compatibility_rule": "ACCESSORY/PART exige evidência de que o Brand+Model consultado é o próprio componente. Página com replacement/spare/repuesto/compatible/para/for pode apenas referenciar o equipamento-alvo; não transformar automaticamente o modelo pesquisado em ACCESSORY/PART.",
     "source_conflict_rule": "Em conflito entre fontes, preferir a fonte que identifica explicitamente Brand+Model e o substantivo físico do produto. Página de peça/replacement/compatibilidade é evidência secundária. Manual oficial ou ficha técnica do SKU pode ser evidência primária quando Brand+Model e o tipo físico aparecem de forma explícita.",
-    "agricultural_mower_rule": "front/rear/disc/mounted mower e mower-conditioner de implementos agrícolas => DISC MOWER; não usar RIDER/LAWN MOWER apenas pela palavra mower."
+    "agricultural_mower_rule": "front/rear/disc/mounted mower e mower-conditioner de implementos agrícolas => DISC MOWER; não usar RIDER/LAWN MOWER apenas pela palavra mower.",
+    "allow_explicit_others_others_types": [
+      "PART"
+    ]
   },
   "RESOLUTION_POLICY": {
     "alias_collision_policy": {
@@ -4990,6 +5014,34 @@
         "require_title_support_or_min_sources": 2,
         "block_when_candidates_exceed_max": true,
         "single_candidate_can_resolve_without_llm": true
+      }
+    },
+    "semantic_recovery": {
+      "enabled": true,
+      "pilot_only": true,
+      "min_identity": "PROBABLE",
+      "allow_exact_model_with_brand_mismatch": true,
+      "require_grounded_evidence_phrase": true,
+      "max_sources": 3,
+      "max_taxonomy_candidates": 5,
+      "candidate_min_score": 0.28,
+      "deterministic_match_threshold": 0.9,
+      "deterministic_margin": 0.08,
+      "role_overrides": {
+        "COMPONENT_PART": "PART",
+        "ACCESSORY": "ACCESSORY"
+      },
+      "raw_type_alias_to_canonical": {
+        "explosion proof axial blower": "BLOWER",
+        "explosion-proof axial blower": "BLOWER",
+        "axial explosion proof blower": "BLOWER",
+        "axial explosion-proof blower": "BLOWER",
+        "blower assembly": "BLOWER",
+        "rotary tiller": "TILLER",
+        "rotavator": "TILLER",
+        "rotovator": "TILLER",
+        "fixed fan": "PART",
+        "fan module": "PART"
       }
     }
   },
@@ -5139,7 +5191,7 @@
       ]
     }
   ],
-  "SCHEMA_VERSION": "2.9",
+  "SCHEMA_VERSION": "2.8",
   "QUALITY_GATES": {
     "VERSION": "2026-09-29-r9.6p7-import-noise-taxonomy",
     "POLICY": {
@@ -7070,6 +7122,80 @@
         "url": "https://example.com/lasko-u12104",
         "expected_level": "PROBABLE"
       }
+    ],
+    "SEMANTIC_RECOVERY_CASES": [
+      {
+        "id": "bi_allegro_9548_25e",
+        "brand": "ALLEGRO",
+        "model": "9548 25E",
+        "title": "Allegro 9548-25E Lightweight Explosion-Proof Axial Blower",
+        "semantic_raw": "EXPLOSION-PROOF AXIAL BLOWER",
+        "role": "WHOLE_PRODUCT",
+        "power": "CORDED",
+        "expect_type": "BLOWER",
+        "expect_category": "OTHERS",
+        "expect_family": "AXIAL EXPLOSION-PROOF"
+      },
+      {
+        "id": "bi_addasnd_5900t52001n",
+        "brand": "ADDASND INT L CO., L",
+        "model": "5900T52001N",
+        "title": "LG Fan Module - 5900T52001N",
+        "semantic_raw": "FAN MODULE",
+        "role": "COMPONENT_PART",
+        "power": "UNKNOWN",
+        "expect_type": "PART",
+        "expect_category": "OTHERS",
+        "expect_family": "OTHERS"
+      },
+      {
+        "id": "bi_agco_4391736m91",
+        "brand": "AGCO CHINA INVESTM",
+        "model": "4391736M91",
+        "title": "Massey Ferguson Fan, Fixed 4391736M91",
+        "semantic_raw": "FIXED FAN",
+        "role": "COMPONENT_PART",
+        "power": "UNKNOWN",
+        "expect_type": "PART",
+        "expect_category": "OTHERS",
+        "expect_family": "OTHERS"
+      },
+      {
+        "id": "bi_agilent_3160_1017",
+        "brand": "AGILENT",
+        "model": "3160 1017",
+        "title": "AGILENT FAN, BIN PUMP 3160-1017",
+        "semantic_raw": "FAN",
+        "role": "COMPONENT_PART",
+        "power": "UNKNOWN",
+        "expect_type": "PART",
+        "expect_category": "OTHERS",
+        "expect_family": "FAN"
+      },
+      {
+        "id": "bi_aeromotors_101_384135_3",
+        "brand": "Aeromotors LLC",
+        "model": "101 384135 3",
+        "title": "101-384135-3 - BLOWER",
+        "semantic_raw": "BLOWER ASSEMBLY",
+        "role": "WHOLE_PRODUCT",
+        "power": "PETROL",
+        "expect_type": "BLOWER",
+        "expect_category": "OTHERS",
+        "expect_family": "BLOWER ASSEMBLY"
+      },
+      {
+        "id": "bi_aiemery_lgm180",
+        "brand": "AIEMERY",
+        "model": "LGM180",
+        "title": "Aiemery Heavy Duty LGM180 Rotary Tiller - 8 Flanges, 6 ...",
+        "semantic_raw": "ROTARY TILLER",
+        "role": "WHOLE_PRODUCT",
+        "power": "UNKNOWN",
+        "expect_type": "TILLER",
+        "expect_category": "OTHERS",
+        "expect_family": "ROTARY TILLER"
+      }
     ]
   },
   "TAXONOMY_EVIDENCE_RULES": [
@@ -7537,6 +7663,69 @@
         "horizontal multistage centrifugal pump"
       ],
       "priority": 330
+    },
+    {
+      "primary_type": "BLOWER",
+      "aliases": [
+        "explosion-proof axial blower",
+        "explosion proof axial blower",
+        "axial explosion-proof blower",
+        "axial explosion proof blower"
+      ],
+      "category_general": "OTHERS",
+      "family": "AXIAL EXPLOSION-PROOF",
+      "priority": 280,
+      "semantic_only": true
+    },
+    {
+      "primary_type": "BLOWER",
+      "aliases": [
+        "blower assembly"
+      ],
+      "category_general": "OTHERS",
+      "family": "BLOWER ASSEMBLY",
+      "priority": 270,
+      "semantic_only": true
+    },
+    {
+      "primary_type": "TILLER",
+      "aliases": [
+        "rotary tiller",
+        "rotavator",
+        "rotovator"
+      ],
+      "category_general": "OTHERS",
+      "family": "ROTARY TILLER",
+      "priority": 270,
+      "semantic_only": true
+    },
+    {
+      "primary_type": "PART",
+      "aliases": [
+        "fan module",
+        "fixed fan",
+        "fan fixed"
+      ],
+      "category_general": "OTHERS",
+      "family": "OTHERS",
+      "priority": 280,
+      "semantic_only": true
+    },
+    {
+      "primary_type": "PART",
+      "aliases": [
+        "fan",
+        "bin pump fan"
+      ],
+      "negative_aliases": [
+        "fan module",
+        "fixed fan",
+        "fan fixed"
+      ],
+      "category_general": "OTHERS",
+      "family": "FAN",
+      "priority": 260,
+      "semantic_only": true
     }
   ],
   "COMBO_KIT_POLICY": {

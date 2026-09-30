@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-29-r9.6p7-import-noise-taxonomy",
+  "VERSION": "2026-09-29-r9.6p8.1-product-definition-pilot",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -15,7 +15,8 @@
     "baseline_backup_dir": "Backups_Baseline",
     "baseline_audit": "Auditoria_Baseline_R9_5.csv",
     "collection_policy": "collection_quality_policy.json",
-    "collection_report_cache_rebuild": "Curadoria_Cache_R9_6.xlsx"
+    "collection_report_cache_rebuild": "Curadoria_Cache_R9_6.xlsx",
+    "semantic_pilot_output": "Piloto_Definicao_LLM_R9_6p8_1.xlsx"
   },
   "evidence": {
     "max_results": 5,
@@ -227,5 +228,12 @@
       "engine": "trafilatura",
       "dynamic_browser_fallback": false
     }
+  },
+  "semantic_pilot": {
+    "enabled": true,
+    "default_max_items": 100,
+    "write_baseline": false,
+    "use_checkpoint": false,
+    "description": "Piloto LLM Product Definition: define o produto principal pela evidência, reconcilia com a taxonomia JSON e nunca altera Base Final/Consolidado."
   }
 }

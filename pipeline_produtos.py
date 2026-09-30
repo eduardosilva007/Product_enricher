@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p7
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p8.1 Product Definition Pilot
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -10,8 +10,9 @@ Arquitetura:
     Stage 0D - Target Isolation + Collection Quality Gate
     Stage 1 - Regras determinísticas do JSON
     Stage 1.5 - Candidate Funnel determinístico
-    Stage 2 - NVIDIA (model failover) -> Groq somente para ambiguidade real
-    Stage 3 - Validação estrita e simétrica da saída LLM
+    Stage 2A - Product Definition Pilot: LLM define o produto principal a partir da evidência
+    Stage 2B - Funil taxonômico reconcilia a definição da LLM com PRODUCT_TYPE canônico
+    Stage 3 - NVIDIA (model failover) -> Groq
     Stage 4 - Taxonomia determinística do JSON
 
 Princípios:
@@ -47,17 +48,32 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
 
 PIPELINE_VERSION = "3.9.5-hf3.1"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
+SEMANTIC_PROMPT_VERSION = "2026-09-29-v2-product-definition"
+SEMANTIC_MAP_PROMPT_VERSION = "2026-09-29-v1-semantic-taxonomy-mapper"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3.1p7 R9.6 Import Noise Taxonomy + Strong Identity"
-COLLECTION_ENGINE_VERSION = "2026-09-29-r9.6p7-import-noise-taxonomy"
+BUILD_LABEL = "v3.9.5-HF3.1p8.1 R9.6 Product Definition Pilot"
+COLLECTION_ENGINE_VERSION = "2026-09-29-r9.6p8.1-product-definition-pilot"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
+
+SEMANTIC_DEFINITION_SYSTEM_PROMPT = (
+    "Define the primary product represented by the supplied evidence, using the most specific technical/commercial product name that the evidence supports. "
+    "Use ONLY the supplied evidence. Do not classify Category General or FAMILY and do not consult outside knowledge. "
+    "Do not force the product into the internal taxonomy and do not generalize when the evidence explicitly supports a more specific product name. "
+    "Return a short, specific, uppercase English product_type_raw. Preserve meaningful subtype words such as AXIAL, ROTARY, EXPLOSION-PROOF, MODULE, ASSEMBLY, PRESS TOOL, etc. "
+    "Do not answer with only an industry, use case, function, material, or generic class when the evidence names the actual product. "
+    "The Brand field can be an importer/trading/company name and may differ from the commercial product brand. An exact model/part number in the evidence can still identify the target, but NEVER accept a different or near model. "
+    "product_role=COMPONENT_PART when the item itself is a component/spare/module/blade/fixed part; ACCESSORY only when it is sold as an accessory; ASSEMBLY when the evidence explicitly describes an assembly; otherwise WHOLE_PRODUCT. "
+    "evidence_phrase MUST be a short verbatim phrase copied from one cited source and must directly support product_type_raw. "
+    "If the supplied evidence does not tie the requested model to a definable product, return INSUFFICIENT_EVIDENCE."
+)
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -451,6 +467,7 @@ class Rules:
         self.type_policy = self.raw.get("TYPE_POLICY", {}) or {}
         self.resolution_policy = self.raw.get("RESOLUTION_POLICY", {}) or {}
         self.classification_policy = self.raw.get("CLASSIFICATION_POLICY", {}) or {}
+        self.semantic_policy = self.classification_policy.get("semantic_recovery", {}) or {}
         self.composite_rules = self.raw.get("COMPOSITE_TYPE_RULES", []) or []
         self.component_context = self.raw.get("COMPONENT_CONTEXT_RULES", {}) or {}
         self.source_rules = self.raw.get("SOURCE_RULES", {}) or {}
@@ -526,6 +543,10 @@ class Rules:
             pair = (safe(r.get("category_general")), safe(r.get("family")))
             if pair not in self.valid_pairs:
                 errors.append(f"TAXONOMY_EVIDENCE_RULE par inválido: {pair}")
+            if pair == ("OTHERS", "OTHERS"):
+                allowed_oo = set(self.type_policy.get("allow_explicit_others_others_types", []) or [])
+                if t not in allowed_oo:
+                    errors.append(f"TAXONOMY_EVIDENCE_RULE OTHERS|OTHERS não autorizado para type={t}")
             aliases = r.get("aliases", []) or []
             if not isinstance(aliases, list):
                 errors.append(f"TAXONOMY_EVIDENCE_RULES[{i}].aliases deve ser lista")
@@ -555,7 +576,9 @@ class Rules:
                 errors.append(f"TYPE_WITHOUT_EXECUTABLE_TAXONOMY: {t}")
 
         if ("OTHERS", "OTHERS") in self.valid_pairs:
-            errors.append("FORBIDDEN_TAXONOMY_DEAD_END: OTHERS|OTHERS não pode existir em TAXONOMY_PAIRS")
+            allowed_oo = set(self.type_policy.get("allow_explicit_others_others_types", []) or [])
+            if not allowed_oo:
+                errors.append("FORBIDDEN_TAXONOMY_DEAD_END: OTHERS|OTHERS exige TYPE_POLICY.allow_explicit_others_others_types")
 
         for t in sorted(self.output_voltage_not_input_power_types):
             if t not in self.types:
@@ -618,6 +641,19 @@ class Rules:
                 errors.append(f"LLM_SAFETY_GATE_DISABLED: {key} deve ser true")
         if safe(llm_gate.get("require_identity_at_least")) not in {"PROBABLE", "STRONG"}:
             errors.append("LLM_SAFETY_GATE_WEAK: require_identity_at_least deve ser PROBABLE ou STRONG")
+        semantic_policy = self.classification_policy.get("semantic_recovery", {}) or {}
+        if semantic_policy:
+            if safe(semantic_policy.get("min_identity", "PROBABLE")) not in {"PROBABLE", "STRONG"}:
+                errors.append("CLASSIFICATION_POLICY.semantic_recovery.min_identity deve ser PROBABLE ou STRONG")
+            role_overrides = semantic_policy.get("role_overrides", {}) or {}
+            for role, typ in role_overrides.items():
+                if safe(typ) not in self.types:
+                    errors.append(f"SEMANTIC_ROLE_OVERRIDE_UNKNOWN_TYPE: {role}->{typ}")
+            bridges = semantic_policy.get("raw_type_alias_to_canonical", {}) or {}
+            for raw_alias, typ in bridges.items():
+                if not safe(raw_alias) or safe(typ) not in self.types:
+                    errors.append(f"SEMANTIC_RAW_BRIDGE_INVALID: {raw_alias!r}->{typ!r}")
+
         funnel_policy = llm_gate.get("candidate_funnel", {}) or {}
         if not funnel_policy:
             errors.append("CLASSIFICATION_POLICY.llm_resolution_gate.candidate_funnel ausente")
@@ -672,7 +708,7 @@ class Rules:
             if key not in allowed_resolution:
                 errors.append(f"UNKNOWN_RESOLUTION_POLICY_FIELD: {key}")
 
-        allowed_classification = {"llm_resolution_gate"}
+        allowed_classification = {"llm_resolution_gate", "semantic_recovery"}
         for key in self.classification_policy:
             if key not in allowed_classification:
                 errors.append(f"UNKNOWN_CLASSIFICATION_POLICY_FIELD: {key}")
@@ -681,7 +717,7 @@ class Rules:
             "component_primary_types", "passive_power_types", "specificity_groups",
             "output_voltage_not_input_power_types", "output_voltage_rule",
             "replacement_compatibility_rule", "source_conflict_rule",
-            "agricultural_mower_rule",
+            "agricultural_mower_rule", "allow_explicit_others_others_types",
         }
         for key in self.type_policy:
             if key not in allowed_type_policy:
@@ -703,7 +739,7 @@ class Rules:
 
         allowed_taxonomy_evidence_fields = {
             "primary_type", "category_general", "family", "aliases",
-            "negative_aliases", "priority", "brand", "model_regex",
+            "negative_aliases", "priority", "brand", "model_regex", "semantic_only",
         }
         for i, row in enumerate(self.taxonomy_evidence_rules):
             for key in row:
@@ -755,6 +791,8 @@ class Rules:
         evidence_candidates = []
         for r in self.taxonomy_evidence_rules:
             if safe(r.get("primary_type")) != product_type:
+                continue
+            if bool(r.get("semantic_only", False)) and "semantic_type_raw" not in evidence_fold:
                 continue
             rule_brand = safe(r.get("brand"))
             if rule_brand and canonical_display(rule_brand) != canonical_display(brand):
@@ -3375,6 +3413,8 @@ class DeterministicEngine:
         brand_key = canonical_display(brand)
         model_for_rule = derive_search_model(brand, model, self.cfg) if model else safe(model)
         for rule in self.rules.taxonomy_evidence_rules:
+            if bool(rule.get("semantic_only", False)):
+                continue
             typ = safe(rule.get("primary_type"))
             if typ not in self.rules.types:
                 continue
@@ -3826,6 +3866,177 @@ def _single_funnel_candidate_can_resolve(rules: Rules, s1: Stage1Result, typ: st
     tax_evidence = taxonomy_evidence_text(s1.sources, typ)
     cg, fam, _ = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
     return (cg, fam) in rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS")
+
+
+# -----------------------------------------------------------------------------
+# R9.6p8 - Semantic Product Pilot
+# -----------------------------------------------------------------------------
+def _semantic_tokens(text: str) -> set:
+    return {x for x in norm_text(text).split() if len(x) >= 2}
+
+
+def semantic_taxonomy_candidates(
+    rules: Rules,
+    raw_type: str,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    """Recupera candidatos canônicos sem expor toda a taxonomia à LLM.
+
+    A busca é somente local sobre PRODUCT_TYPES/aliases/famílias do JSON.
+    Não usa embeddings, internet ou fuzzy de Marca+Modelo.
+    """
+    raw_norm = norm_text(raw_type)
+    if not raw_norm:
+        return []
+    raw_tokens = _semantic_tokens(raw_norm)
+    labels_by_type: Dict[str, set] = defaultdict(set)
+    for typ, spec in rules.types.items():
+        labels_by_type[typ].add(typ)
+        for alias in (spec.get("aliases", []) or []):
+            if safe(alias):
+                labels_by_type[typ].add(safe(alias))
+        fp = spec.get("fallback_pair")
+        if isinstance(fp, list) and len(fp) == 2 and safe(fp[1]):
+            labels_by_type[typ].add(safe(fp[1]))
+    for row in rules.taxonomy_rules:
+        typ = safe(row.get("primary_type"))
+        fam = safe(row.get("family"))
+        if typ in rules.types and fam:
+            labels_by_type[typ].add(fam)
+    for row in rules.taxonomy_evidence_rules:
+        typ = safe(row.get("primary_type"))
+        fam = safe(row.get("family"))
+        if typ in rules.types and fam:
+            labels_by_type[typ].add(fam)
+
+    scored: List[Tuple[float, int, str, str]] = []
+    for typ, labels in labels_by_type.items():
+        best_score = 0.0
+        best_label = ""
+        best_len = 0
+        for label in labels:
+            ln = norm_text(label)
+            if not ln:
+                continue
+            lt = _semantic_tokens(ln)
+            if raw_norm == ln:
+                score = 1.0
+            elif ln in raw_norm and len(lt) >= 1:
+                score = 0.94 + min(0.04, 0.01 * len(lt))
+            elif raw_norm in ln and len(raw_tokens) >= 1:
+                score = 0.90
+            else:
+                union = raw_tokens | lt
+                jacc = (len(raw_tokens & lt) / len(union)) if union else 0.0
+                seq = SequenceMatcher(None, raw_norm, ln).ratio()
+                score = 0.62 * jacc + 0.38 * seq
+            if score > best_score or (score == best_score and len(ln) > best_len):
+                best_score = score
+                best_label = label
+                best_len = len(ln)
+        scored.append((best_score, best_len, typ, best_label))
+
+    scored.sort(key=lambda x: (x[0], x[1], rules.specificity_rank.get(x[2], 0)), reverse=True)
+    floor = float(rules.semantic_policy.get("candidate_min_score", 0.28) or 0.28)
+    out = []
+    for score, _, typ, label in scored:
+        if score < floor:
+            continue
+        out.append({"type": typ, "score": round(score, 4), "matched_label": label})
+        if len(out) >= max(1, int(limit)):
+            break
+    return out
+
+
+def semantic_resolve_canonical(
+    rules: Rules,
+    raw_type: str,
+    product_role: str,
+) -> Tuple[str, List[Dict[str, Any]], str]:
+    """Normaliza TYPE_RAW da LLM para o TYPE canônico controlado pelo JSON."""
+    policy = rules.semantic_policy or {}
+    role = safe(product_role).upper()
+    role_overrides = {safe(k).upper(): safe(v) for k, v in (policy.get("role_overrides", {}) or {}).items()}
+    if role in role_overrides and role_overrides[role] in rules.types:
+        typ = role_overrides[role]
+        return typ, [{"type": typ, "score": 1.0, "matched_label": f"ROLE:{role}"}], "ROLE_OVERRIDE"
+
+    raw_norm = norm_text(raw_type)
+    bridges = {norm_text(k): safe(v) for k, v in (policy.get("raw_type_alias_to_canonical", {}) or {}).items()}
+    if raw_norm in bridges and bridges[raw_norm] in rules.types:
+        typ = bridges[raw_norm]
+        return typ, [{"type": typ, "score": 1.0, "matched_label": raw_type}], "RAW_TYPE_BRIDGE"
+
+    candidates = semantic_taxonomy_candidates(
+        rules,
+        raw_type,
+        limit=int(policy.get("max_taxonomy_candidates", 5) or 5),
+    )
+    if not candidates:
+        return "", [], "NO_TAXONOMY_CANDIDATE"
+    top = candidates[0]
+    second = candidates[1]["score"] if len(candidates) > 1 else 0.0
+    threshold = float(policy.get("deterministic_match_threshold", 0.90) or 0.90)
+    margin = float(policy.get("deterministic_margin", 0.08) or 0.08)
+    if float(top["score"]) >= threshold and (float(top["score"]) - float(second)) >= margin:
+        return safe(top["type"]), candidates, "DETERMINISTIC_SEMANTIC_MATCH"
+    return "", candidates, "NEEDS_LLM_TAXONOMY_VALIDATION"
+
+
+def semantic_grounding_ok(
+    rules: Rules,
+    s1: Stage1Result,
+    data: Dict[str, Any],
+) -> Tuple[bool, str]:
+    decision = safe(data.get("decision")).upper()
+    if decision not in {"IDENTIFIED", "INSUFFICIENT_EVIDENCE", "CONFLICT"}:
+        return False, "SEMANTIC_DECISION_INVALID"
+    if decision != "IDENTIFIED":
+        return True, "OK"
+    raw_type = safe(data.get("product_type_raw"))
+    if not raw_type:
+        return False, "SEMANTIC_TYPE_EMPTY"
+    power = safe(data.get("power")).upper() or "UNKNOWN"
+    if power not in rules.allowed_powers:
+        return False, "SEMANTIC_POWER_INVALID"
+    refs = data.get("evidence_source_ids", []) or []
+    if not isinstance(refs, list) or not refs:
+        return False, "SEMANTIC_EVIDENCE_REFS_EMPTY"
+    by_id = {s.source_id: s for s in s1.sources}
+    if any((not isinstance(x, int) or x not in by_id) for x in refs):
+        return False, "SEMANTIC_EVIDENCE_REFS_INVALID"
+    min_identity = safe(rules.semantic_policy.get("min_identity", "PROBABLE")).upper() or "PROBABLE"
+    rank = DeterministicEngine.IDENTITY_RANK
+    cited = [by_id[x] for x in refs]
+    if not any(rank.get(src.relevance, 0) >= rank.get(min_identity, 3) for src in cited):
+        return False, "SEMANTIC_IDENTITY_TOO_WEAK"
+    if bool(rules.semantic_policy.get("require_grounded_evidence_phrase", True)):
+        phrase = norm_text(data.get("evidence_phrase"))
+        if len(phrase) < 4:
+            return False, "SEMANTIC_EVIDENCE_PHRASE_EMPTY"
+        grounded = any(phrase in norm_text(src.text) for src in cited)
+        if not grounded:
+            return False, "SEMANTIC_EVIDENCE_PHRASE_NOT_GROUNDED"
+    return True, "OK"
+
+
+def semantic_taxonomy_result(
+    rules: Rules,
+    s1: Stage1Result,
+    canonical_type: str,
+    raw_type: str,
+    power: str,
+    refs: Sequence[int],
+    brand: str,
+    model: str,
+) -> Tuple[str, str, str]:
+    by_id = {s.source_id: s for s in s1.sources}
+    chunks = [by_id[x].text for x in refs if x in by_id and by_id[x].text]
+    # O TYPE_RAW da LLM funciona como ponte semântica para evidence rules,
+    # mas nunca cria Category/FAMILY fora do JSON.
+    chunks.append(f"SEMANTIC_TYPE_RAW: {safe(raw_type)}")
+    evidence = "\n---SOURCE---\n".join(chunks)
+    return rules.map_taxonomy(canonical_type, power or "UNKNOWN", evidence, brand, model)
 
 
 # -----------------------------------------------------------------------------
@@ -5103,6 +5314,265 @@ class OpenAICompatibleClassifier:
         ]
         return out, True
 
+    def _structured_json_call(
+        self,
+        *,
+        cache_scope: str,
+        key: str,
+        raw_hash: str,
+        schema_name: str,
+        schema: Dict[str, Any],
+        messages: List[Dict[str, str]],
+    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
+        """Chamada estruturada reutilizável para o piloto semântico.
+
+        O namespace de cache é separado da classificação legada para impedir
+        colisão entre respostas de prompts com contratos diferentes.
+        """
+        scoped_rules_hash = hashlib.sha256(
+            f"{self.rules.hash}|{cache_scope}".encode("utf-8")
+        ).hexdigest()
+        cached = self.db.get_llm(key, raw_hash, scoped_rules_hash, self.provider, self.model)
+        if cached is not None:
+            data, usage = cached
+            return data, True, usage
+
+        if self.max_calls_per_run and self.api_calls >= self.max_calls_per_run:
+            raise OperationalPause(
+                f"{self.provider.upper()}_RUN_CAP",
+                f"Limite local de {self.max_calls_per_run} chamadas {self.provider.upper()}/run atingido.",
+            )
+        if self.max_total_tokens_per_run and self.total_tokens >= self.max_total_tokens_per_run:
+            raise OperationalPause(
+                f"{self.provider.upper()}_LOCAL_TOKEN_CAP",
+                f"Cap real de {self.max_total_tokens_per_run} tokens/run atingido. Consumidos={self.total_tokens}.",
+            )
+
+        self.api_calls += 1
+        if self.provider in {"groq", "openrouter"}:
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema_name,
+                        "strict": True,
+                        "schema": schema,
+                    },
+                },
+                "temperature": 0,
+                "stream": False,
+            }
+            if self.provider == "groq":
+                payload["reasoning_effort"] = self.reasoning_effort
+                payload["max_completion_tokens"] = self.max_output_tokens
+            else:
+                payload["max_tokens"] = self.max_output_tokens
+        else:
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "response_format": {"type": "json_object"},
+                "temperature": 0,
+                "max_tokens": self.max_output_tokens,
+                "stream": False,
+            }
+            if self.model == "nvidia/nemotron-3.5-lightning-30b-a3b":
+                payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+        parse_max_attempts = 2
+        failed_parse_tokens = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        data: Optional[Dict[str, Any]] = None
+        usage: Optional[Dict[str, Any]] = None
+        last_error: Optional[Exception] = None
+
+        for parse_attempt in range(1, parse_max_attempts + 1):
+            self._wait_provider_limits(payload)
+            resp = self._post(payload)
+            try:
+                envelope = resp.json()
+                raw_usage = envelope.get("usage", {}) or {}
+                current_usage = {
+                    "prompt_tokens": int(raw_usage.get("prompt_tokens", 0) or 0),
+                    "completion_tokens": int(raw_usage.get("completion_tokens", 0) or 0),
+                    "total_tokens": int(raw_usage.get("total_tokens", 0) or 0),
+                }
+                content = safe(envelope["choices"][0]["message"]["content"])
+                data = self._decode_model_json(content)
+                usage = {
+                    **current_usage,
+                    "rate_limit_headers": self._header_snapshot(resp),
+                    "json_parse_retries": parse_attempt - 1,
+                    "failed_parse_tokens": failed_parse_tokens["total_tokens"],
+                }
+                break
+            except Exception as exc:
+                last_error = exc
+                try:
+                    envelope_for_usage = resp.json()
+                    raw_failed = envelope_for_usage.get("usage", {}) or {}
+                    for k in failed_parse_tokens:
+                        failed_parse_tokens[k] += int(raw_failed.get(k, 0) or 0)
+                except Exception:
+                    pass
+                if parse_attempt < parse_max_attempts:
+                    retry_payload = dict(payload)
+                    retry_messages = list(payload.get("messages", []))
+                    retry_messages.append({
+                        "role": "user",
+                        "content": "Return ONLY one syntactically valid JSON object matching the requested schema. No markdown or commentary.",
+                    })
+                    retry_payload["messages"] = retry_messages
+                    payload = retry_payload
+                    self.api_calls += 1
+                    time.sleep(1.0)
+                    continue
+                raise OperationalPause(
+                    f"{self.provider.upper()}_OUTPUT_PARSE",
+                    f"Falha ao interpretar JSON semântico após {parse_max_attempts} tentativa(s): {type(exc).__name__}: {safe(exc)}",
+                ) from exc
+
+        if data is None or usage is None:
+            raise OperationalPause(
+                f"{self.provider.upper()}_OUTPUT_PARSE",
+                f"Resposta semântica sem JSON válido: {safe(last_error)}",
+            )
+
+        self.prompt_tokens += usage["prompt_tokens"] + failed_parse_tokens["prompt_tokens"]
+        self.completion_tokens += usage["completion_tokens"] + failed_parse_tokens["completion_tokens"]
+        self.total_tokens += usage["total_tokens"] + failed_parse_tokens["total_tokens"]
+        self.db.put_llm(
+            key, raw_hash, scoped_rules_hash, self.provider, self.model, data, usage
+        )
+        return data, False, usage
+
+    def semantic_identify(
+        self,
+        key: str,
+        raw_hash: str,
+        brand: str,
+        model: str,
+        s1: Stage1Result,
+    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
+        policy = self.rules.semantic_policy or {}
+        max_sources = max(1, int(policy.get("max_sources", 3) or 3))
+        rank = DeterministicEngine.IDENTITY_RANK
+        sources_ranked = sorted(
+            s1.sources,
+            key=lambda src: (
+                rank.get(src.relevance, 0),
+                src.identity_score,
+                src.source_weight,
+                1 if src.title else 0,
+            ),
+            reverse=True,
+        )[:max_sources]
+        prompt_to_source_id: Dict[int, int] = {}
+        prompt_sources = []
+        for i, src in enumerate(sources_ranked, 1):
+            prompt_to_source_id[i] = src.source_id
+            prompt_sources.append({
+                "id": i,
+                "identity": src.relevance,
+                "model_match": src.model_match,
+                "title": src.title,
+                "content": src.content[: self.evidence_content_chars],
+            })
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "decision": {"type": "string", "enum": ["IDENTIFIED", "INSUFFICIENT_EVIDENCE", "CONFLICT"]},
+                "product_type_raw": {"type": "string"},
+                "product_role": {"type": "string", "enum": ["WHOLE_PRODUCT", "COMPONENT_PART", "ACCESSORY", "ASSEMBLY", "UNKNOWN"]},
+                "domain_hint": {"type": "string", "enum": ["GARDEN_OUTDOOR", "INDUSTRIAL_HVAC", "AUTOMOTIVE", "AGRICULTURAL", "POWER_TOOL", "PUMP_FLUID", "ELECTRONICS", "OTHER", "UNKNOWN"]},
+                "power": {"type": "string", "enum": sorted(set(self.rules.allowed_powers))},
+                "evidence_source_ids": {"type": "array", "items": {"type": "integer"}},
+                "evidence_phrase": {"type": "string"},
+                "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                "reason_short": {"type": "string"},
+            },
+            "required": ["decision", "product_type_raw", "product_role", "domain_hint", "power", "evidence_source_ids", "evidence_phrase", "confidence", "reason_short"],
+            "additionalProperties": False,
+        }
+        system = SEMANTIC_DEFINITION_SYSTEM_PROMPT
+        user = json.dumps({
+            "brand_from_import": brand,
+            "model": model,
+            "sources": prompt_sources,
+        }, ensure_ascii=False)
+        data, hit, usage = self._structured_json_call(
+            cache_scope=SEMANTIC_PROMPT_VERSION,
+            key=key,
+            raw_hash=raw_hash,
+            schema_name="semantic_product_definition",
+            schema=schema,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        )
+        data, refs_ok = self._normalize_evidence_refs(data, prompt_to_source_id)
+        usage = dict(usage or {})
+        usage["evidence_refs_valid"] = refs_ok
+        usage["semantic_prompt_sources"] = prompt_to_source_id
+        return data, hit, usage
+
+    def semantic_map(
+        self,
+        key: str,
+        raw_hash: str,
+        raw_type: str,
+        product_role: str,
+        domain_hint: str,
+        candidates: Sequence[Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
+        allowed = [safe(x.get("type")) for x in candidates if safe(x.get("type")) in self.rules.types]
+        if not allowed:
+            return {"decision": "NONE", "canonical_type": "NONE", "reason_short": "No taxonomy candidates"}, True, {}
+        candidate_rows = []
+        for row in candidates:
+            typ = safe(row.get("type"))
+            if typ not in allowed:
+                continue
+            spec = self.rules.types.get(typ, {}) or {}
+            candidate_rows.append({
+                "canonical_type": typ,
+                "matched_label": safe(row.get("matched_label")),
+                "score": row.get("score"),
+                "aliases": list(spec.get("aliases", []) or [])[:6],
+            })
+        schema = {
+            "type": "object",
+            "properties": {
+                "decision": {"type": "string", "enum": ["MATCH", "NONE"]},
+                "canonical_type": {"type": "string", "enum": sorted(set(allowed) | {"NONE"})},
+                "reason_short": {"type": "string"},
+            },
+            "required": ["decision", "canonical_type", "reason_short"],
+            "additionalProperties": False,
+        }
+        system = (
+            "You map an already-identified physical product type to a controlled taxonomy. "
+            "You may choose ONLY one supplied canonical candidate or NONE. Do not force a match. "
+            "Match physical meaning, not superficial shared words. product_role and domain_hint are supporting context."
+        )
+        user = json.dumps({
+            "product_type_raw": raw_type,
+            "product_role": product_role,
+            "domain_hint": domain_hint,
+            "candidates": candidate_rows,
+        }, ensure_ascii=False)
+        map_key = key + "|SEM_MAP|" + hashlib.sha256(
+            json.dumps([raw_type, product_role, domain_hint, allowed], ensure_ascii=False).encode("utf-8")
+        ).hexdigest()[:16]
+        return self._structured_json_call(
+            cache_scope=SEMANTIC_MAP_PROMPT_VERSION,
+            key=map_key,
+            raw_hash=raw_hash,
+            schema_name="semantic_taxonomy_mapping",
+            schema=schema,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        )
+
     def classify(
         self,
         key: str,
@@ -5517,6 +5987,85 @@ class ProviderCascade:
                     self.active.provider.upper(),
                     self.active.model,
                 )
+
+
+    def _semantic_invoke(self, method_name: str, *args) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
+        while True:
+            current = self.active
+            try:
+                method = getattr(current, method_name)
+                data, cache_hit, usage = method(*args)
+                usage = dict(usage or {})
+                usage["provider"] = current.provider
+                usage["model"] = current.model
+                return data, cache_hit, usage
+            except OperationalPause as exc:
+                nvidia_model_failover = (
+                    current.provider == "nvidia"
+                    and (
+                        exc.code.endswith("_OUTPUT_PARSE")
+                        or exc.code.endswith("_JSON_TOKEN_LIMIT")
+                        or exc.code.endswith("_MODEL_EOL")
+                        or (
+                            not self.switch_only_on_quota_exhaustion
+                            and exc.code.endswith("_TRANSIENT")
+                        )
+                    )
+                )
+                if nvidia_model_failover and current.advance_nvidia_model(exc.code):
+                    continue
+                always_rotate = (
+                    exc.code in self.EXHAUSTION_CODES
+                    or exc.code.endswith("_LOCAL_TOKEN_CAP")
+                    or exc.code.endswith("_RUN_CAP")
+                    or exc.code.endswith("_OUTPUT_PARSE")
+                    or exc.code.endswith("_JSON_TOKEN_LIMIT")
+                )
+                operational_rotate = (
+                    not self.switch_only_on_quota_exhaustion
+                    and (
+                        exc.code.endswith("_TRANSIENT")
+                        or exc.code.endswith("_RATE_LIMIT")
+                        or exc.code.endswith("_MODEL_EOL")
+                    )
+                )
+                if not (always_rotate or operational_rotate):
+                    raise
+                old_provider = current.provider.upper()
+                old_model = current.model
+                self.disabled.add(self.active_index)
+                if not self._advance():
+                    raise
+                LOG.warning(
+                    "%s / %s falhou no piloto semântico (%s). FALLBACK -> %s / %s",
+                    old_provider, old_model, exc.code,
+                    self.active.provider.upper(), self.active.model,
+                )
+
+    def semantic_identify(
+        self,
+        key: str,
+        raw_hash: str,
+        brand: str,
+        model: str,
+        s1: Stage1Result,
+    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
+        return self._semantic_invoke(
+            "semantic_identify", key, raw_hash, brand, model, s1
+        )
+
+    def semantic_map(
+        self,
+        key: str,
+        raw_hash: str,
+        raw_type: str,
+        product_role: str,
+        domain_hint: str,
+        candidates: Sequence[Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
+        return self._semantic_invoke(
+            "semantic_map", key, raw_hash, raw_type, product_role, domain_hint, candidates
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -7659,7 +8208,7 @@ def run_pipeline(
     inventory_path = Path(args.inventory_output or cfg["files"]["inventory_output"])
 
     baseline_pre_stats: Dict[str, int] = {}
-    if args.mode in {"classify", "full", "recover"}:
+    if args.mode in {"classify", "full", "recover", "semantic"}:
         backup_root = Path(cfg.get("files", {}).get("baseline_backup_dir", "Backups_Baseline"))
         backup_folder = _backup_baseline_files(master_path, final_path, backup_root)
         if backup_folder:
@@ -8190,6 +8739,276 @@ def run_pipeline(
         store.close()
 
 
+
+def _semantic_build_llm_cascade(
+    rules: Rules,
+    cfg: Dict[str, Any],
+    db: ClassificationDB,
+) -> ProviderCascade:
+    groq_model = os.getenv("GROQ_MODEL", "").strip() or safe(cfg.get("groq", {}).get("model")) or DEFAULT_MODEL
+    nvidia_model = os.getenv("NVIDIA_MODEL", "").strip() or safe(cfg.get("nvidia", {}).get("model")) or "openai/gpt-oss-20b"
+    openrouter_model = os.getenv("OPENROUTER_MODEL", "").strip() or safe(cfg.get("openrouter", {}).get("model")) or "openai/gpt-oss-120b:free"
+    route_names = [safe(x).casefold() for x in (cfg.get("llm", {}).get("route", []) or []) if safe(x)] or ["nvidia", "groq"]
+    provider_map = {
+        "groq": OpenAICompatibleClassifier(rules, cfg, db, "groq", groq_model),
+        "nvidia": OpenAICompatibleClassifier(rules, cfg, db, "nvidia", nvidia_model),
+        "openrouter": OpenAICompatibleClassifier(rules, cfg, db, "openrouter", openrouter_model),
+    }
+    ordered = [provider_map[x] for x in route_names if x in provider_map]
+    if not ordered:
+        ordered = [provider_map["nvidia"], provider_map["groq"]]
+    cascade = ProviderCascade(
+        ordered,
+        switch_only_on_quota_exhaustion=bool(cfg.get("llm", {}).get("switch_only_on_quota_exhaustion", False)),
+    )
+    preflights = cascade.preflight_all()
+    enabled = [x.get("provider", "").upper() for x in preflights if x.get("enabled")]
+    LOG.info("PRODUCT DEFINITION PILOT LLM ROUTE: %s", " -> ".join(enabled))
+    return cascade
+
+
+def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
+    """Piloto de definição de produto via LLM sem alterar Base Final/Consolidado/checkpoint de classificação."""
+    if not bool((cfg.get("semantic_pilot", {}) or {}).get("enabled", True)):
+        raise RuntimeError("SEMANTIC_PILOT_DISABLED no pipeline_config.json")
+    if args.no_llm:
+        raise RuntimeError("SEMANTIC_PILOT_REQUIRES_LLM: remova --no-llm")
+
+    input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
+    cache_path = Path(args.cache or cfg["files"]["cache"])
+    db_path = Path(args.db or cfg["files"]["classification_db"])
+    output_path = Path(args.output or cfg.get("files", {}).get("semantic_pilot_output", "Piloto_Definicao_LLM_R9_6p8_1.xlsx"))
+    source_rows = read_input_rows(input_path)
+    seen = set()
+    cohort: List[InputProductRow] = []
+    for row in source_rows:
+        if not row.valid or row.key in seen:
+            continue
+        seen.add(row.key)
+        cohort.append(row)
+    default_limit = int((cfg.get("semantic_pilot", {}) or {}).get("default_max_items", 100) or 100)
+    limit = int(args.max_items or default_limit)
+    if limit > 0:
+        cohort = cohort[:limit]
+
+    store = TavilyReadOnlyStore(cache_path)
+    db = ClassificationDB(db_path)
+    engine = DeterministicEngine(rules, cfg)
+    llm = _semantic_build_llm_cascade(rules, cfg, db)
+    rows: List[Dict[str, Any]] = []
+    stats = defaultdict(int)
+
+    try:
+        for idx, item in enumerate(cohort, 1):
+            brand, model, key = item.brand_original, item.model_original, item.key
+            raw = store.get(brand, model)
+            base = {
+                "Marca": brand,
+                "Modelo": model,
+                "Raw State": raw.state,
+                "Pipeline Version": PIPELINE_VERSION,
+                "Processed At": now_iso(),
+            }
+            if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+                rows.append({
+                    **base,
+                    "Produto Definido LLM": "",
+                    "O que é (Tipo)": "REVISAR",
+                    "Alimentação": "UNKNOWN",
+                    "Category General": "",
+                    "FAMILY": "",
+                    "Título Real": "",
+                    "Pilot Decision": "SEM_CACHE_UTIL",
+                    "Review Required": "SIM",
+                    "Reason Code": raw.state,
+                    "Motivo": raw.reason,
+                })
+                stats["sem_cache_util"] += 1
+                continue
+
+            s1 = engine.classify(brand, model, raw.payload or {})
+            ref_title, ref_url, ref_identity, _ = choose_reference_title(raw, brand, model, cfg)
+            rank = DeterministicEngine.IDENTITY_RANK
+            min_identity = safe(rules.semantic_policy.get("min_identity", "PROBABLE")) or "PROBABLE"
+            target_sources = [src for src in s1.sources if rank.get(src.relevance, 0) >= rank.get(min_identity, 3)]
+            if not target_sources:
+                rows.append({
+                    **base,
+                    "Produto Definido LLM": "",
+                    "O que é (Tipo)": "REVISAR",
+                    "Alimentação": "UNKNOWN",
+                    "Category General": "",
+                    "FAMILY": "",
+                    "Título Real": ref_title,
+                    "Fonte URL": ref_url,
+                    "Pilot Decision": "COLLECTION_GAP",
+                    "Review Required": "SIM",
+                    "Reason Code": "NO_PROBABLE_TARGET_EVIDENCE",
+                    "Motivo": "A coleta não entregou fonte target PROBABLE/STRONG suficiente para chamar a LLM semântica.",
+                })
+                stats["collection_gap"] += 1
+                continue
+
+            data, identify_cache, usage = llm.semantic_identify(key, raw.raw_hash, brand, model, s1)
+            if usage.get("evidence_refs_valid") is False:
+                grounded, grounding_reason = False, "SEMANTIC_EVIDENCE_REFS_INVALID"
+            else:
+                grounded, grounding_reason = semantic_grounding_ok(rules, s1, data)
+
+            decision = safe(data.get("decision")).upper()
+            refs = [x for x in (data.get("evidence_source_ids", []) or []) if isinstance(x, int)]
+            title, url = choose_title(s1.sources, refs)
+            raw_type = safe(data.get("product_type_raw")).upper()
+            role = safe(data.get("product_role")).upper()
+            domain = safe(data.get("domain_hint")).upper()
+            power = safe(data.get("power")).upper() or "UNKNOWN"
+
+            if not grounded:
+                rows.append({
+                    **base,
+                    "Produto Definido LLM": raw_type,
+                    "Papel do Produto": role,
+                    "Contexto": domain,
+                    "O que é (Tipo)": "REVISAR",
+                    "Alimentação": "UNKNOWN",
+                    "Category General": "",
+                    "FAMILY": "",
+                    "Título Real": title or ref_title,
+                    "Fonte URL": url or ref_url,
+                    "Pilot Decision": "LLM_REJECTED",
+                    "Review Required": "SIM",
+                    "Reason Code": grounding_reason,
+                    "Motivo": safe(data.get("reason_short")),
+                    "LLM Provider": safe(usage.get("provider")).upper(),
+                    "LLM Model": safe(usage.get("model")),
+                })
+                stats["llm_rejected"] += 1
+                continue
+
+            if decision != "IDENTIFIED":
+                rows.append({
+                    **base,
+                    "Produto Definido LLM": raw_type,
+                    "Papel do Produto": role,
+                    "Contexto": domain,
+                    "O que é (Tipo)": "REVISAR",
+                    "Alimentação": power,
+                    "Category General": "",
+                    "FAMILY": "",
+                    "Título Real": title or ref_title,
+                    "Fonte URL": url or ref_url,
+                    "Pilot Decision": decision or "INSUFFICIENT_EVIDENCE",
+                    "Review Required": "SIM",
+                    "Reason Code": f"SEMANTIC_{decision or 'INSUFFICIENT_EVIDENCE'}",
+                    "Motivo": safe(data.get("reason_short")),
+                    "LLM Provider": safe(usage.get("provider")).upper(),
+                    "LLM Model": safe(usage.get("model")),
+                })
+                stats["semantic_not_identified"] += 1
+                continue
+
+            canonical, candidates, map_reason = semantic_resolve_canonical(rules, raw_type, role)
+            map_cache = False
+            map_usage: Dict[str, Any] = {}
+            if not canonical and candidates:
+                map_data, map_cache, map_usage = llm.semantic_map(
+                    key, raw.raw_hash, raw_type, role, domain, candidates
+                )
+                if safe(map_data.get("decision")).upper() == "MATCH":
+                    proposed = safe(map_data.get("canonical_type"))
+                    if proposed in {safe(x.get("type")) for x in candidates} and proposed in rules.types:
+                        canonical = proposed
+                        map_reason = "LLM_TAXONOMY_VALIDATED"
+                    else:
+                        map_reason = "LLM_TAXONOMY_INVALID_CHOICE"
+                else:
+                    map_reason = "LLM_TAXONOMY_NONE"
+
+            candidate_text = " | ".join(
+                f"{safe(x.get('type'))}:{float(x.get('score',0) or 0):.2f}"
+                for x in candidates
+            )
+            if not canonical:
+                rows.append({
+                    **base,
+                    "Produto Definido LLM": raw_type,
+                    "Papel do Produto": role,
+                    "Contexto": domain,
+                    "O que é (Tipo)": "REVISAR",
+                    "Alimentação": power,
+                    "Category General": "",
+                    "FAMILY": "",
+                    "Título Real": title or ref_title,
+                    "Fonte URL": url or ref_url,
+                    "Taxonomy Candidates": candidate_text,
+                    "Pilot Decision": "TAXONOMY_GAP",
+                    "Review Required": "SIM",
+                    "Reason Code": map_reason,
+                    "Motivo": safe(data.get("reason_short")),
+                    "LLM Provider": safe(usage.get("provider")).upper(),
+                    "LLM Model": safe(usage.get("model")),
+                })
+                stats["taxonomy_gap"] += 1
+                continue
+
+            cg, fam, tax_reason = semantic_taxonomy_result(
+                rules, s1, canonical, raw_type, power, refs, brand, model
+            )
+            valid_pair = (cg, fam) in rules.valid_pairs
+            explicit_oo = (
+                (cg, fam) == ("OTHERS", "OTHERS")
+                and canonical in set(rules.type_policy.get("allow_explicit_others_others_types", []) or [])
+                and tax_reason.startswith("TAXONOMY_EVIDENCE:")
+            )
+            review = (not valid_pair) or ((cg, fam) == ("OTHERS", "OTHERS") and not explicit_oo)
+            rows.append({
+                **base,
+                "Produto Definido LLM": raw_type,
+                "Papel do Produto": role,
+                "Contexto": domain,
+                "O que é (Tipo)": canonical,
+                "Alimentação": power,
+                "Category General": cg if valid_pair else "",
+                "FAMILY": fam if valid_pair else "",
+                "Título Real": title or ref_title,
+                "Fonte URL": url or ref_url,
+                "Evidence Phrase": safe(data.get("evidence_phrase")),
+                "Taxonomy Candidates": candidate_text,
+                "Pilot Decision": "MATCHED" if not review else "MATCHED_REVIEW",
+                "Review Required": "SIM" if review else "NÃO",
+                "Reason Code": map_reason,
+                "Motivo": f"{safe(data.get('reason_short'))} | {tax_reason}",
+                "LLM Provider": safe(usage.get("provider")).upper(),
+                "LLM Model": safe(usage.get("model")),
+                "LLM Identify Cache": "SIM" if identify_cache else "NÃO",
+                "LLM Map Cache": "SIM" if map_cache else "NÃO",
+                "LLM Total Tokens": int(usage.get("total_tokens",0) or 0) + int(map_usage.get("total_tokens",0) or 0),
+            })
+            stats["matched_review" if review else "matched"] += 1
+
+            if idx % 10 == 0 or idx == len(cohort):
+                LOG.info(
+                    "PRODUCT DEFINITION PILOT %d/%d | matched=%d review=%d taxonomy_gap=%d collection_gap=%d llm_calls=%d",
+                    idx, len(cohort), stats["matched"], stats["matched_review"],
+                    stats["taxonomy_gap"], stats["collection_gap"], llm.api_calls,
+                )
+
+        summary = {
+            "Pipeline Version": PIPELINE_VERSION,
+            "Rules Version": rules.version,
+            "Modo": "PRODUCT_DEFINITION_PILOT_NO_BASELINE_WRITE",
+            "Produtos piloto": len(cohort),
+            "LLM API Calls": llm.api_calls,
+            "LLM Total Tokens": llm.total_tokens,
+            **dict(stats),
+        }
+        export_excel(rows, output_path, summary)
+        LOG.info("PILOTO DEFINIÇÃO LLM CONCLUÍDO | arquivo=%s", output_path)
+        LOG.info("BASE FINAL/CONSOLIDADO NÃO FORAM ALTERADOS.")
+    finally:
+        db.close()
+        store.close()
+
 def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
     """Executa regressões sintéticas + cobertura dos casos reais validados.
 
@@ -8317,6 +9136,36 @@ def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
         else:
             real_passed += 1
 
+    semantic_cases = qg.get("SEMANTIC_RECOVERY_CASES", []) or []
+    semantic_passed = 0
+    for i, case in enumerate(semantic_cases, 1):
+        cid = safe(case.get("id")) or f"semantic_{i}"
+        raw_type = safe(case.get("semantic_raw"))
+        role = safe(case.get("role"))
+        power = safe(case.get("power")) or "UNKNOWN"
+        canonical, _, _ = semantic_resolve_canonical(rules, raw_type, role)
+        expected_type = safe(case.get("expect_type"))
+        if canonical != expected_type:
+            errors.append(f"{cid}: semantic canonical={canonical!r}, esperado={expected_type!r}")
+            continue
+        title = safe(case.get("title"))
+        probe = engine.classify(
+            safe(case.get("brand")) or "TEST",
+            safe(case.get("model")) or f"SEM{i}",
+            {"results": [{"title": title, "content": title, "url": "https://example.com/semantic-case"}]},
+        )
+        refs = [probe.sources[0].source_id] if probe.sources else []
+        cg, fam, _ = semantic_taxonomy_result(
+            rules, probe, canonical, raw_type, power, refs,
+            safe(case.get("brand")), safe(case.get("model")),
+        )
+        if cg != safe(case.get("expect_category")) or fam != safe(case.get("expect_family")):
+            errors.append(
+                f"{cid}: semantic taxonomy={cg}|{fam}, esperado={safe(case.get('expect_category'))}|{safe(case.get('expect_family'))}"
+            )
+            continue
+        semantic_passed += 1
+
     if errors:
         raise RuntimeError(
             f"QUALITY_GATE_FAILED: {len(errors)} falha(s). " + " | ".join(errors[:25])
@@ -8330,6 +9179,8 @@ def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
         "real_explicit": real_explicit,
         "real_passed": real_passed,
         "real_reference_only": real_reference_only,
+        "semantic_cases": len(semantic_cases),
+        "semantic_passed": semantic_passed,
     }
 
 
@@ -8342,8 +9193,8 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
     qg = run_quality_gates(rules, cfg)
     LOG.info(
-        "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | reference_only=%d",
-        qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"], qg["real_reference_only"],
+        "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | reference_only=%d | semantic=%d/%d",
+        qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"], qg["real_reference_only"], qg.get("semantic_passed",0), qg.get("semantic_cases",0),
     )
 
     cache = Path(cache_override or cfg["files"]["cache"])
@@ -8360,7 +9211,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v3")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "semantic"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -8424,7 +9275,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
     print("5 - AUDITORIA / REPARO BASE (SEM LLM)")
     print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
-    print("7 - SAIR")
+    print("7 - PILOTO DEFINIÇÃO LLM (NÃO ALTERA BASE)")
+    print("8 - SAIR")
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
@@ -8469,6 +9321,15 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
+    if op == "7":
+        raw = input("Limite do piloto semântico (ENTER = 100): ").strip()
+        limite = 100
+        if raw:
+            if raw.isdigit() and int(raw) > 0:
+                limite = int(raw)
+            else:
+                print("Valor inválido. Será usado 100.")
+        return parser.parse_args(["--mode", "semantic", "--max-items", str(limite)])
     raise SystemExit(0)
 
 
@@ -8561,12 +9422,15 @@ def main() -> int:
     if args.mode == "repair":
         run_baseline_repair(args, cfg, rules)
         return 0
-    if args.mode in {"classify", "full", "recover"}:
+    if args.mode in {"classify", "full", "recover", "semantic"}:
         qg = run_quality_gates(rules, cfg)
         LOG.info(
-            "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | classificação liberada",
-            qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"],
+            "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | semantic=%d/%d | classificação liberada",
+            qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"], qg.get("semantic_passed",0), qg.get("semantic_cases",0),
         )
+    if args.mode == "semantic":
+        run_semantic_pilot(args, cfg, rules)
+        return 0
     if args.mode == "inventory":
         run_pipeline(args, cfg, rules)
         return 0
