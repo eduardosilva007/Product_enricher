@@ -1,6 +1,6 @@
-# R9.6p8.1 Product Definition Pilot — Validation Report
+# R9.6p8.2 Product Definition Pilot — Validation Report
 
-Validation executed locally on 2026-09-29.
+Validation executed locally on 2026-09-30.
 
 ## Results
 
@@ -19,10 +19,17 @@ Baseline export ........................... PASS
 R9.6p6 classification recovery ............ PASS
 R9.6p8 import-noise taxonomy .............. PASS
 R9.6p8.1 Product Definition contract ...... PASS
+R9.6p8.2 pilot telemetry code ............. PASS (py_compile + full regression suite)
 ```
 
-## Prompt contract
+## R9.6p8.2 operational changes
 
-The LLM is instructed to **define the primary product represented by the supplied evidence** using the most specific technical/commercial product name supported by the evidence. It is explicitly forbidden from forcing the answer into the internal taxonomy or from returning only an industry/use/function/generic class when a specific product name is evidenced.
+- Per-item START/END telemetry is emitted for every pilot branch.
+- LLM DEFINE and LLM MAP calls emit START/END with provider/model/cache/duration.
+- Provider pacing waits are visible in the log.
+- Partial pilot workbooks are checkpointed every 5 rows and on interruption/failure.
+- Interactive default pilot size is 10 items.
+- No Search-provider call is introduced by the semantic pilot.
+- Base Final and Consolidado remain read-only in semantic mode.
 
-The pilot remains read-only for Base Final and Consolidado and makes zero Search-provider requests.
+The Product Definition prompt and taxonomy rules are unchanged from R9.6p8.1; this is an operational/telemetry patch.

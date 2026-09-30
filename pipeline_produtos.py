@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p8.1 Product Definition Pilot
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p8.2 Product Definition Pilot
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -58,8 +58,8 @@ PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 SEMANTIC_PROMPT_VERSION = "2026-09-29-v2-product-definition"
 SEMANTIC_MAP_PROMPT_VERSION = "2026-09-29-v1-semantic-taxonomy-mapper"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3.1p8.1 R9.6 Product Definition Pilot"
-COLLECTION_ENGINE_VERSION = "2026-09-29-r9.6p8.1-product-definition-pilot"
+BUILD_LABEL = "v3.9.5-HF3.1p8.2 R9.6 Product Definition Pilot"
+COLLECTION_ENGINE_VERSION = "2026-09-30-r9.6p8.2-product-definition-pilot-telemetry"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
 
@@ -396,12 +396,14 @@ class RateLimiter:
         self.interval = (60.0 / rpm) if rpm > 0 else 0.0
         self._last = 0.0
 
-    def wait(self) -> float:
+    def wait(self, label: str = "") -> float:
         if self.interval <= 0:
             return 0.0
         now = time.monotonic()
         remaining = (self._last + self.interval) - now
         if self._last and remaining > 0:
+            if label:
+                LOG.info("%s PACING | aguardando %.1fs para respeitar %.2f RPM", label, remaining, 60.0 / self.interval)
             time.sleep(remaining)
         self._last = time.monotonic()
         return max(0.0, remaining)
@@ -5263,7 +5265,7 @@ class OpenAICompatibleClassifier:
 
     def _wait_provider_limits(self, payload: Dict[str, Any]) -> None:
         """Aplica pacing RPM e, no Groq, também a janela TPM."""
-        self.limiter.wait()
+        self.limiter.wait(self.provider.upper())
         if self.groq_window_limiter is not None:
             estimated = self._estimate_request_tokens(payload)
             self.groq_window_limiter.wait(estimated)
@@ -8768,8 +8770,12 @@ def _semantic_build_llm_cascade(
 
 
 def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
-    """Piloto de definição de produto via LLM sem alterar Base Final/Consolidado/checkpoint de classificação."""
-    if not bool((cfg.get("semantic_pilot", {}) or {}).get("enabled", True)):
+    """Piloto de definição de produto via LLM sem alterar Base Final/Consolidado/checkpoint de classificação.
+
+    R9.6p8.2: telemetria por item/chamada, pacing visível e snapshot parcial seguro.
+    """
+    pilot_cfg = cfg.get("semantic_pilot", {}) or {}
+    if not bool(pilot_cfg.get("enabled", True)):
         raise RuntimeError("SEMANTIC_PILOT_DISABLED no pipeline_config.json")
     if args.no_llm:
         raise RuntimeError("SEMANTIC_PILOT_REQUIRES_LLM: remova --no-llm")
@@ -8777,7 +8783,7 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
     cache_path = Path(args.cache or cfg["files"]["cache"])
     db_path = Path(args.db or cfg["files"]["classification_db"])
-    output_path = Path(args.output or cfg.get("files", {}).get("semantic_pilot_output", "Piloto_Definicao_LLM_R9_6p8_1.xlsx"))
+    output_path = Path(args.output or cfg.get("files", {}).get("semantic_pilot_output", "Piloto_Definicao_LLM_R9_6p8_2.xlsx"))
     source_rows = read_input_rows(input_path)
     seen = set()
     cohort: List[InputProductRow] = []
@@ -8786,21 +8792,59 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
             continue
         seen.add(row.key)
         cohort.append(row)
-    default_limit = int((cfg.get("semantic_pilot", {}) or {}).get("default_max_items", 100) or 100)
+    default_limit = int(pilot_cfg.get("default_max_items", 10) or 10)
     limit = int(args.max_items or default_limit)
     if limit > 0:
         cohort = cohort[:limit]
 
+    checkpoint_every = max(1, int(pilot_cfg.get("checkpoint_every", 5) or 5))
     store = TavilyReadOnlyStore(cache_path)
     db = ClassificationDB(db_path)
     engine = DeterministicEngine(rules, cfg)
     llm = _semantic_build_llm_cascade(rules, cfg, db)
     rows: List[Dict[str, Any]] = []
     stats = defaultdict(int)
+    pilot_started = time.monotonic()
+
+    def _summary(status: str) -> Dict[str, Any]:
+        return {
+            "Pipeline Version": PIPELINE_VERSION,
+            "Rules Version": rules.version,
+            "Modo": "PRODUCT_DEFINITION_PILOT_NO_BASELINE_WRITE",
+            "Pilot Status": status,
+            "Produtos solicitados": len(cohort),
+            "Produtos registrados": len(rows),
+            "LLM API Calls": llm.api_calls,
+            "LLM Total Tokens": llm.total_tokens,
+            "Elapsed Seconds": round(time.monotonic() - pilot_started, 1),
+            **dict(stats),
+        }
+
+    def _snapshot(status: str) -> None:
+        if not rows:
+            return
+        export_excel(rows, output_path, _summary(status))
+        LOG.info("PILOTO SNAPSHOT | status=%s | linhas=%d | arquivo=%s", status, len(rows), output_path)
+
+    def _finish_item(idx: int, started: float, calls_before: int) -> None:
+        row = rows[-1] if rows else {}
+        elapsed = time.monotonic() - started
+        calls = llm.api_calls - calls_before
+        LOG.info(
+            "PILOTO %03d/%03d | END | decision=%s | definido=%s | type=%s | taxonomy=%s|%s | llm_calls=%d | %.1fs",
+            idx, len(cohort), safe(row.get("Pilot Decision")) or "-",
+            safe(row.get("Produto Definido LLM")) or "-", safe(row.get("O que é (Tipo)")) or "-",
+            safe(row.get("Category General")) or "-", safe(row.get("FAMILY")) or "-", calls, elapsed,
+        )
+        if idx % checkpoint_every == 0 or idx == len(cohort):
+            _snapshot("RUNNING" if idx < len(cohort) else "COMPLETED")
 
     try:
         for idx, item in enumerate(cohort, 1):
+            item_started = time.monotonic()
+            calls_before = llm.api_calls
             brand, model, key = item.brand_original, item.model_original, item.key
+            LOG.info("PILOTO %03d/%03d | START | %s | %s", idx, len(cohort), brand, model)
             raw = store.get(brand, model)
             base = {
                 "Marca": brand,
@@ -8824,6 +8868,7 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                     "Motivo": raw.reason,
                 })
                 stats["sem_cache_util"] += 1
+                _finish_item(idx, item_started, calls_before)
                 continue
 
             s1 = engine.classify(brand, model, raw.payload or {})
@@ -8847,9 +8892,22 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                     "Motivo": "A coleta não entregou fonte target PROBABLE/STRONG suficiente para chamar a LLM semântica.",
                 })
                 stats["collection_gap"] += 1
+                _finish_item(idx, item_started, calls_before)
                 continue
 
+            define_started = time.monotonic()
+            LOG.info(
+                "PILOTO %03d/%03d | LLM DEFINE START | provider=%s | model=%s | target_sources=%d",
+                idx, len(cohort), llm.provider.upper(), llm.model, len(target_sources),
+            )
             data, identify_cache, usage = llm.semantic_identify(key, raw.raw_hash, brand, model, s1)
+            LOG.info(
+                "PILOTO %03d/%03d | LLM DEFINE END | provider=%s | model=%s | cache=%s | decision=%s | raw=%s | %.1fs",
+                idx, len(cohort), safe(usage.get("provider")).upper() or llm.provider.upper(),
+                safe(usage.get("model")) or llm.model, "SIM" if identify_cache else "NÃO",
+                safe(data.get("decision")).upper() or "-", safe(data.get("product_type_raw")).upper() or "-",
+                time.monotonic() - define_started,
+            )
             if usage.get("evidence_refs_valid") is False:
                 grounded, grounding_reason = False, "SEMANTIC_EVIDENCE_REFS_INVALID"
             else:
@@ -8883,6 +8941,7 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                     "LLM Model": safe(usage.get("model")),
                 })
                 stats["llm_rejected"] += 1
+                _finish_item(idx, item_started, calls_before)
                 continue
 
             if decision != "IDENTIFIED":
@@ -8905,14 +8964,27 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                     "LLM Model": safe(usage.get("model")),
                 })
                 stats["semantic_not_identified"] += 1
+                _finish_item(idx, item_started, calls_before)
                 continue
 
             canonical, candidates, map_reason = semantic_resolve_canonical(rules, raw_type, role)
             map_cache = False
             map_usage: Dict[str, Any] = {}
             if not canonical and candidates:
+                map_started = time.monotonic()
+                LOG.info(
+                    "PILOTO %03d/%03d | LLM MAP START | provider=%s | model=%s | raw=%s | candidates=%d",
+                    idx, len(cohort), llm.provider.upper(), llm.model, raw_type or "-", len(candidates),
+                )
                 map_data, map_cache, map_usage = llm.semantic_map(
                     key, raw.raw_hash, raw_type, role, domain, candidates
+                )
+                LOG.info(
+                    "PILOTO %03d/%03d | LLM MAP END | provider=%s | model=%s | cache=%s | decision=%s | canonical=%s | %.1fs",
+                    idx, len(cohort), safe(map_usage.get("provider")).upper() or llm.provider.upper(),
+                    safe(map_usage.get("model")) or llm.model, "SIM" if map_cache else "NÃO",
+                    safe(map_data.get("decision")).upper() or "-", safe(map_data.get("canonical_type")) or "-",
+                    time.monotonic() - map_started,
                 )
                 if safe(map_data.get("decision")).upper() == "MATCH":
                     proposed = safe(map_data.get("canonical_type"))
@@ -8949,6 +9021,7 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                     "LLM Model": safe(usage.get("model")),
                 })
                 stats["taxonomy_gap"] += 1
+                _finish_item(idx, item_started, calls_before)
                 continue
 
             cg, fam, tax_reason = semantic_taxonomy_result(
@@ -8985,26 +9058,24 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                 "LLM Total Tokens": int(usage.get("total_tokens",0) or 0) + int(map_usage.get("total_tokens",0) or 0),
             })
             stats["matched_review" if review else "matched"] += 1
+            _finish_item(idx, item_started, calls_before)
 
-            if idx % 10 == 0 or idx == len(cohort):
-                LOG.info(
-                    "PRODUCT DEFINITION PILOT %d/%d | matched=%d review=%d taxonomy_gap=%d collection_gap=%d llm_calls=%d",
-                    idx, len(cohort), stats["matched"], stats["matched_review"],
-                    stats["taxonomy_gap"], stats["collection_gap"], llm.api_calls,
-                )
-
-        summary = {
-            "Pipeline Version": PIPELINE_VERSION,
-            "Rules Version": rules.version,
-            "Modo": "PRODUCT_DEFINITION_PILOT_NO_BASELINE_WRITE",
-            "Produtos piloto": len(cohort),
-            "LLM API Calls": llm.api_calls,
-            "LLM Total Tokens": llm.total_tokens,
-            **dict(stats),
-        }
-        export_excel(rows, output_path, summary)
-        LOG.info("PILOTO DEFINIÇÃO LLM CONCLUÍDO | arquivo=%s", output_path)
+        _snapshot("COMPLETED")
+        LOG.info(
+            "PILOTO DEFINIÇÃO LLM CONCLUÍDO | itens=%d | llm_calls=%d | %.1fs | arquivo=%s",
+            len(rows), llm.api_calls, time.monotonic() - pilot_started, output_path,
+        )
         LOG.info("BASE FINAL/CONSOLIDADO NÃO FORAM ALTERADOS.")
+    except KeyboardInterrupt:
+        _snapshot("INTERRUPTED")
+        LOG.warning(
+            "PILOTO INTERROMPIDO PELO USUÁRIO | linhas preservadas=%d | cache LLM persistido | arquivo=%s",
+            len(rows), output_path,
+        )
+        raise
+    except BaseException:
+        _snapshot("FAILED_PARTIAL")
+        raise
     finally:
         db.close()
         store.close()
@@ -9322,13 +9393,13 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
     if op == "7":
-        raw = input("Limite do piloto semântico (ENTER = 100): ").strip()
-        limite = 100
+        raw = input("Limite do piloto semântico (ENTER = 10): ").strip()
+        limite = 10
         if raw:
             if raw.isdigit() and int(raw) > 0:
                 limite = int(raw)
             else:
-                print("Valor inválido. Será usado 100.")
+                print("Valor inválido. Será usado 10.")
         return parser.parse_args(["--mode", "semantic", "--max-items", str(limite)])
     raise SystemExit(0)
 
