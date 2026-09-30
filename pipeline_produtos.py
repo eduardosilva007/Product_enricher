@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p8.2 Product Definition Pilot
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p8.3 Product Definition Pilot
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -55,11 +55,11 @@ from urllib.parse import quote, unquote, urlencode, urlparse
 
 PIPELINE_VERSION = "3.9.5-hf3.1"
 PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
-SEMANTIC_PROMPT_VERSION = "2026-09-29-v2-product-definition"
+SEMANTIC_PROMPT_VERSION = "2026-09-30-v3-product-definition-schema-validated"
 SEMANTIC_MAP_PROMPT_VERSION = "2026-09-29-v1-semantic-taxonomy-mapper"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3.1p8.2 R9.6 Product Definition Pilot"
-COLLECTION_ENGINE_VERSION = "2026-09-30-r9.6p8.2-product-definition-pilot-telemetry"
+BUILD_LABEL = "v3.9.5-HF3.1p8.3 R9.6 Product Definition Pilot"
+COLLECTION_ENGINE_VERSION = "2026-09-30-r9.6p8.3-product-definition-pilot-eligible-cohort"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
 
@@ -94,6 +94,67 @@ def safe(v: Any) -> str:
     except Exception:
         pass
     return str(v).strip()
+
+
+def _json_schema_contract_errors(data: Any, schema: Dict[str, Any]) -> List[str]:
+    """Validação mínima do contrato JSON usado pelas chamadas semânticas.
+
+    Não pretende implementar JSON Schema completo; cobre exatamente o contrato
+    utilizado pelo piloto (object/required/additionalProperties/type/enum/array).
+    Isso é necessário porque alguns providers aceitam apenas json_object e podem
+    devolver JSON sintaticamente válido, porém fora do schema solicitado.
+    """
+    errors: List[str] = []
+    if not isinstance(data, dict):
+        return ["ROOT_NOT_OBJECT"]
+
+    properties = schema.get("properties", {}) or {}
+    required = schema.get("required", []) or []
+    for key in required:
+        if key not in data:
+            errors.append(f"MISSING_REQUIRED:{key}")
+
+    if schema.get("additionalProperties") is False:
+        for key in data:
+            if key not in properties:
+                errors.append(f"UNEXPECTED_PROPERTY:{key}")
+
+    def _type_ok(value: Any, expected: str) -> bool:
+        if expected == "string":
+            return isinstance(value, str)
+        if expected == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if expected == "number":
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if expected == "array":
+            return isinstance(value, list)
+        if expected == "object":
+            return isinstance(value, dict)
+        if expected == "boolean":
+            return isinstance(value, bool)
+        return True
+
+    for key, spec in properties.items():
+        if key not in data:
+            continue
+        value = data[key]
+        expected = safe(spec.get("type"))
+        if expected and not _type_ok(value, expected):
+            errors.append(f"TYPE:{key}:{expected}")
+            continue
+        enum = spec.get("enum")
+        if isinstance(enum, list) and value not in enum:
+            errors.append(f"ENUM:{key}:{value}")
+        if expected == "array" and isinstance(value, list):
+            item_spec = spec.get("items", {}) or {}
+            item_type = safe(item_spec.get("type"))
+            item_enum = item_spec.get("enum")
+            for idx, item in enumerate(value):
+                if item_type and not _type_ok(item, item_type):
+                    errors.append(f"ITEM_TYPE:{key}[{idx}]:{item_type}")
+                if isinstance(item_enum, list) and item not in item_enum:
+                    errors.append(f"ITEM_ENUM:{key}[{idx}]:{item}")
+    return errors
 
 
 def read_json(path: Path) -> Dict[str, Any]:
@@ -4188,6 +4249,18 @@ class ClassificationDB:
         except Exception:
             return None
 
+    def delete_llm(
+        self,
+        key: str,
+        raw_hash: str,
+        rules_hash: str,
+        provider: str,
+        model: str,
+    ) -> None:
+        cid = self.llm_cache_id(key, raw_hash, rules_hash, provider, model)
+        self.conn.execute("DELETE FROM llm_cache WHERE cache_id=?", (cid,))
+        self.conn.commit()
+
     def put_llm(
         self,
         key: str,
@@ -5337,7 +5410,14 @@ class OpenAICompatibleClassifier:
         cached = self.db.get_llm(key, raw_hash, scoped_rules_hash, self.provider, self.model)
         if cached is not None:
             data, usage = cached
-            return data, True, usage
+            contract_errors = _json_schema_contract_errors(data, schema)
+            if not contract_errors:
+                return data, True, usage
+            LOG.warning(
+                "%s SEMANTIC CACHE INVALID | schema=%s | errors=%s | descartando e refazendo chamada",
+                self.provider.upper(), schema_name, ",".join(contract_errors[:6]),
+            )
+            self.db.delete_llm(key, raw_hash, scoped_rules_hash, self.provider, self.model)
 
         if self.max_calls_per_run and self.api_calls >= self.max_calls_per_run:
             raise OperationalPause(
@@ -5402,6 +5482,9 @@ class OpenAICompatibleClassifier:
                 }
                 content = safe(envelope["choices"][0]["message"]["content"])
                 data = self._decode_model_json(content)
+                contract_errors = _json_schema_contract_errors(data, schema)
+                if contract_errors:
+                    raise ValueError("SEMANTIC_SCHEMA_INVALID: " + "; ".join(contract_errors[:8]))
                 usage = {
                     **current_usage,
                     "rate_limit_headers": self._header_snapshot(resp),
@@ -5460,8 +5543,13 @@ class OpenAICompatibleClassifier:
         policy = self.rules.semantic_policy or {}
         max_sources = max(1, int(policy.get("max_sources", 3) or 3))
         rank = DeterministicEngine.IDENTITY_RANK
+        min_identity = safe(policy.get("min_identity", "PROBABLE")).upper() or "PROBABLE"
+        eligible_sources = [
+            src for src in s1.sources
+            if rank.get(src.relevance, 0) >= rank.get(min_identity, 3)
+        ]
         sources_ranked = sorted(
-            s1.sources,
+            eligible_sources,
             key=lambda src: (
                 rank.get(src.relevance, 0),
                 src.identity_score,
@@ -8772,7 +8860,7 @@ def _semantic_build_llm_cascade(
 def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
     """Piloto de definição de produto via LLM sem alterar Base Final/Consolidado/checkpoint de classificação.
 
-    R9.6p8.2: telemetria por item/chamada, pacing visível e snapshot parcial seguro.
+    R9.6p8.3: seleciona somente casos elegíveis ao piloto, valida o contrato JSON da LLM e mantém telemetria/checkpoints.
     """
     pilot_cfg = cfg.get("semantic_pilot", {}) or {}
     if not bool(pilot_cfg.get("enabled", True)):
@@ -8783,25 +8871,93 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
     cache_path = Path(args.cache or cfg["files"]["cache"])
     db_path = Path(args.db or cfg["files"]["classification_db"])
-    output_path = Path(args.output or cfg.get("files", {}).get("semantic_pilot_output", "Piloto_Definicao_LLM_R9_6p8_2.xlsx"))
+    output_path = Path(args.output or cfg.get("files", {}).get("semantic_pilot_output", "Piloto_Definicao_LLM_R9_6p8_3.xlsx"))
     source_rows = read_input_rows(input_path)
-    seen = set()
-    cohort: List[InputProductRow] = []
-    for row in source_rows:
-        if not row.valid or row.key in seen:
-            continue
-        seen.add(row.key)
-        cohort.append(row)
     default_limit = int(pilot_cfg.get("default_max_items", 10) or 10)
     limit = int(args.max_items or default_limit)
-    if limit > 0:
-        cohort = cohort[:limit]
-
     checkpoint_every = max(1, int(pilot_cfg.get("checkpoint_every", 5) or 5))
+    target_states = {
+        safe(x).upper() for x in (pilot_cfg.get("target_stage1_states", ["UNRESOLVED", "AMBIGUOUS"]) or [])
+        if safe(x)
+    } or {"UNRESOLVED", "AMBIGUOUS"}
+
     store = TavilyReadOnlyStore(cache_path)
-    db = ClassificationDB(db_path)
     engine = DeterministicEngine(rules, cfg)
-    llm = _semantic_build_llm_cascade(rules, cfg, db)
+    rank = DeterministicEngine.IDENTITY_RANK
+    min_identity = safe(rules.semantic_policy.get("min_identity", "PROBABLE")).upper() or "PROBABLE"
+
+    # p8.3: o limite do piloto passa a significar N CASOS ELEGÍVEIS, não as N
+    # primeiras linhas da base. Assim SEM_CACHE_UTIL/COLLECTION_GAP não consomem
+    # a amostra destinada a validar a LLM Product Definition.
+    seen = set()
+    cohort: List[InputProductRow] = []
+    prepared: Dict[str, Tuple[RawEvidence, Stage1Result]] = {}
+    selection_stats = defaultdict(int)
+    LOG.info(
+        "PILOTO COHORT SCAN START | alvo=%s | states=%s | min_identity=%s",
+        limit if limit > 0 else "ALL", ",".join(sorted(target_states)), min_identity,
+    )
+    for scan_idx, row in enumerate(source_rows, 1):
+        selection_stats["rows_scanned"] += 1
+        if scan_idx % 500 == 0:
+            LOG.info(
+                "PILOTO COHORT SCAN | varridas=%d | elegíveis=%d | selecionados=%d",
+                selection_stats["rows_scanned"], selection_stats["eligible"], len(cohort),
+            )
+        if not row.valid:
+            selection_stats["invalid_input"] += 1
+            continue
+        if row.key in seen:
+            selection_stats["duplicate"] += 1
+            continue
+        seen.add(row.key)
+
+        raw = store.get(row.brand_original, row.model_original)
+        if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+            selection_stats["no_usable_cache"] += 1
+            continue
+
+        s1 = engine.classify(row.brand_original, row.model_original, raw.payload or {})
+        target_sources = [
+            src for src in s1.sources
+            if rank.get(src.relevance, 0) >= rank.get(min_identity, 3)
+        ]
+        if not target_sources:
+            selection_stats["no_target_evidence"] += 1
+            continue
+        if safe(s1.state).upper() not in target_states:
+            selection_stats[f"skip_state_{safe(s1.state).lower() or 'unknown'}"] += 1
+            continue
+
+        selection_stats["eligible"] += 1
+        cohort.append(row)
+        prepared[row.key] = (raw, s1)
+        LOG.info(
+            "PILOTO COHORT +%03d | %s | %s | stage1=%s | target_sources=%d",
+            len(cohort), row.brand_original, row.model_original, s1.state, len(target_sources),
+        )
+        if limit > 0 and len(cohort) >= limit:
+            break
+
+    LOG.info(
+        "PILOTO COHORT READY | varridas=%d | selecionados=%d | sem_cache=%d | sem_target=%d | states=%s",
+        selection_stats["rows_scanned"], len(cohort), selection_stats["no_usable_cache"],
+        selection_stats["no_target_evidence"], ",".join(sorted(target_states)),
+    )
+    if not cohort:
+        store.close()
+        raise RuntimeError(
+            "SEMANTIC_PILOT_NO_ELIGIBLE_ITEMS: nenhum item com cache utilizável + evidência target "
+            f">={min_identity} + Stage1 em {sorted(target_states)}."
+        )
+
+    db = ClassificationDB(db_path)
+    try:
+        llm = _semantic_build_llm_cascade(rules, cfg, db)
+    except BaseException:
+        db.close()
+        store.close()
+        raise
     rows: List[Dict[str, Any]] = []
     stats = defaultdict(int)
     pilot_started = time.monotonic()
@@ -8817,6 +8973,7 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
             "LLM API Calls": llm.api_calls,
             "LLM Total Tokens": llm.total_tokens,
             "Elapsed Seconds": round(time.monotonic() - pilot_started, 1),
+            **{f"Selection::{k}": v for k, v in dict(selection_stats).items()},
             **dict(stats),
         }
 
@@ -8831,10 +8988,11 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
         elapsed = time.monotonic() - started
         calls = llm.api_calls - calls_before
         LOG.info(
-            "PILOTO %03d/%03d | END | decision=%s | definido=%s | type=%s | taxonomy=%s|%s | llm_calls=%d | %.1fs",
+            "PILOTO %03d/%03d | END | decision=%s | definido=%s | type=%s | taxonomy=%s|%s | reason=%s | live_llm_calls=%d | %.1fs",
             idx, len(cohort), safe(row.get("Pilot Decision")) or "-",
             safe(row.get("Produto Definido LLM")) or "-", safe(row.get("O que é (Tipo)")) or "-",
-            safe(row.get("Category General")) or "-", safe(row.get("FAMILY")) or "-", calls, elapsed,
+            safe(row.get("Category General")) or "-", safe(row.get("FAMILY")) or "-",
+            safe(row.get("Reason Code")) or "-", calls, elapsed,
         )
         if idx % checkpoint_every == 0 or idx == len(cohort):
             _snapshot("RUNNING" if idx < len(cohort) else "COMPLETED")
@@ -8845,7 +9003,11 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
             calls_before = llm.api_calls
             brand, model, key = item.brand_original, item.model_original, item.key
             LOG.info("PILOTO %03d/%03d | START | %s | %s", idx, len(cohort), brand, model)
-            raw = store.get(brand, model)
+            prepared_item = prepared.get(key)
+            if prepared_item is not None:
+                raw, s1 = prepared_item
+            else:
+                raw, s1 = store.get(brand, model), None
             base = {
                 "Marca": brand,
                 "Modelo": model,
@@ -8871,10 +9033,9 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                 _finish_item(idx, item_started, calls_before)
                 continue
 
-            s1 = engine.classify(brand, model, raw.payload or {})
+            if s1 is None:
+                s1 = engine.classify(brand, model, raw.payload or {})
             ref_title, ref_url, ref_identity, _ = choose_reference_title(raw, brand, model, cfg)
-            rank = DeterministicEngine.IDENTITY_RANK
-            min_identity = safe(rules.semantic_policy.get("min_identity", "PROBABLE")) or "PROBABLE"
             target_sources = [src for src in s1.sources if rank.get(src.relevance, 0) >= rank.get(min_identity, 3)]
             if not target_sources:
                 rows.append({

@@ -1,4 +1,55 @@
-# Product Enricher — R9.6p7 Import Noise Taxonomy + Strong Identity
+# Product Enricher — R9.6p8.3 Product Definition Pilot
+
+
+## R9.6p8.3 — eligible semantic cohort + validated LLM JSON contract
+
+This patch fixes two issues revealed by the p8.2 pilot log:
+
+1. `--max-items 10` previously meant the first 10 input rows, even when they had no usable cache or no target evidence. In p8.3 it means **10 eligible semantic-recovery items**: usable RAW cache + target evidence at least PROBABLE + Stage1 state UNRESOLVED or AMBIGUOUS.
+2. NVIDIA may return syntactically valid JSON that does not fully respect the requested schema. p8.3 validates required fields/types/enums before accepting or caching the response. Invalid semantic cache entries are discarded and the call is redone.
+
+The semantic LLM receives only PROBABLE/STRONG target sources; WEAK/contextual sources are excluded from the Product Definition prompt. The semantic prompt cache namespace is bumped to `v3` so the pilot starts clean against the corrected contract.
+
+The terminal now prints cohort-selection telemetry before the first LLM call and includes the final `Reason Code` per item.
+
+## R9.6p8.2 — product definition pilot telemetry
+
+This release adds a **pilot-only LLM-first semantic layer** without replacing the current production classification path and without changing the Search cost invariant.
+
+Pilot flow:
+
+```text
+Existing curated evidence
+        ↓
+LLM defines the primary product with the most specific evidence-supported technical/commercial name
+        ↓
+Grounding check: cited source + verbatim evidence phrase
+        ↓
+Role normalization (WHOLE_PRODUCT / COMPONENT_PART / ACCESSORY / ASSEMBLY)
+        ↓
+Local taxonomy retrieval from regras_negocio.json
+        ↓
+Deterministic match OR top candidate set
+        ↓
+LLM validates only the candidate set (or NONE)
+        ↓
+JSON maps Category General + FAMILY
+```
+
+The Product Definition pilot asks the LLM to **define the primary product**, not to pre-classify it: it must return the most specific technical/commercial product name supported by the supplied evidence, without seeing or forcing Category General/FAMILY.
+
+The Product Definition pilot **does not update Base Final or Consolidado**. It writes `Piloto_Definicao_LLM_R9_6p8_3.xlsx` so the behavior can be audited before production adoption.
+
+R9.6p8.2 adds operational telemetry for the pilot: every item logs START/END, every LLM definition/mapping call logs START/END with provider/model/cache/duration, provider pacing waits are visible, and a partial Excel snapshot is persisted every 5 items and on Ctrl+C/failure. The interactive pilot default is now 10 items instead of 100.
+
+Important: R9.6p8.2 does **not** implement Collection Engine V2 yet. It tests whether richer use of the LLM can correctly interpret the evidence already present in cache. Collection V2 remains the next collection-focused step.
+
+Run from the menu with option `7 - PILOTO DEFINIÇÃO LLM (NÃO ALTERA BASE)` or:
+
+```powershell
+python pipeline_produtos.py --mode semantic --max-items 10
+```
+
 
 ## Core invariant
 
@@ -134,7 +185,8 @@ pip install -r requirements.txt
 4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)
 5 - AUDITORIA / REPARO BASE (SEM LLM)
 6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)
-7 - SAIR
+7 - PILOTO DEFINIÇÃO LLM (NÃO ALTERA BASE)
+8 - SAIR
 ```
 
 For current operations, collection and classification should still be evaluated independently when changing providers or collection logic.

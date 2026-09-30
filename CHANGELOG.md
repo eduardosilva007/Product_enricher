@@ -1,3 +1,29 @@
+# R9.6p8.3 — Eligible Semantic Cohort + LLM Contract Validation (2026-09-30)
+
+- Changes semantic-pilot sampling from the first N input rows to the first N **eligible** semantic-recovery rows.
+- Eligibility requires usable RAW cache, target identity >= PROBABLE, and Stage1 state UNRESOLVED or AMBIGUOUS.
+- Adds cohort-scan telemetry so skipped cache/evidence rows no longer consume the pilot sample.
+- Filters Product Definition prompt sources to PROBABLE/STRONG only; WEAK/contextual sources are excluded.
+- Adds runtime validation of required fields, types and enum values for semantic JSON responses.
+- Invalid semantic cache objects are discarded instead of being silently reused.
+- Invalid live semantic JSON is retried under the existing parse-retry policy and is never cached as valid output.
+- Bumps the Product Definition semantic cache namespace to v3.
+- Adds Reason Code to per-item END telemetry and renames the counter to `live_llm_calls`.
+- Keeps Base Final/Consolidado read-only and performs zero Search-provider requests in option 7.
+- Preserves the one-product/one-Search-provider-request invariant.
+
+# R9.6p8.2 — Semantic Pilot Telemetry + Safe Partial Output (2026-09-30)
+
+- Adds START/END logging for every pilot item, including branches that previously exited before the progress log.
+- Adds explicit LLM DEFINE and LLM MAP START/END logs with provider, model, cache hit, decision and elapsed time.
+- Makes provider pacing waits visible instead of silently sleeping between requests.
+- Writes a safe partial pilot Excel snapshot every 5 processed items by default.
+- Writes an INTERRUPTED/FAILED_PARTIAL snapshot on Ctrl+C or runtime failure when rows are available.
+- Keeps completed LLM responses in SQLite and makes restart behavior visible.
+- Changes the interactive semantic-pilot default from 100 to 10 items for architecture validation before scale.
+- Does not change Product Definition prompt semantics, taxonomy, Search policy, Base Final, Consolidado, or Revisão B.I hard locks.
+- Preserves the absolute one-product/one-Search-provider-request invariant.
+
 # R9.6p8.1 — Product Definition Prompt Contract (2026-09-29)
 
 - Reframes the semantic LLM stage from “identify the physical product” to “define the primary product represented by the evidence”.

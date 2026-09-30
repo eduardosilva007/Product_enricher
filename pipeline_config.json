@@ -16,7 +16,7 @@
     "baseline_audit": "Auditoria_Baseline_R9_5.csv",
     "collection_policy": "collection_quality_policy.json",
     "collection_report_cache_rebuild": "Curadoria_Cache_R9_6.xlsx",
-    "semantic_pilot_output": "Piloto_Definicao_LLM_R9_6p8_2.xlsx"
+    "semantic_pilot_output": "Piloto_Definicao_LLM_R9_6p8_3.xlsx"
   },
   "evidence": {
     "max_results": 5,
@@ -234,7 +234,11 @@
     "default_max_items": 10,
     "write_baseline": false,
     "use_checkpoint": false,
-    "description": "Piloto LLM Product Definition p8.2: definição semântica com telemetria por item/chamada, pacing visível e snapshot parcial; nunca altera Base Final/Consolidado.",
-    "checkpoint_every": 5
+    "description": "Piloto LLM Product Definition p8.3: seleciona apenas casos com cache utilizável + evidência target PROBABLE/STRONG + Stage1 UNRESOLVED/AMBIGUOUS; valida contrato JSON e mantém telemetria/checkpoints.",
+    "checkpoint_every": 5,
+    "target_stage1_states": [
+      "UNRESOLVED",
+      "AMBIGUOUS"
+    ]
   }
 }

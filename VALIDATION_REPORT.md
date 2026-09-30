@@ -1,4 +1,4 @@
-# R9.6p8.2 Product Definition Pilot — Validation Report
+# R9.6p8.3 Product Definition Pilot — Validation Report
 
 Validation executed locally on 2026-09-30.
 
@@ -19,7 +19,8 @@ Baseline export ........................... PASS
 R9.6p6 classification recovery ............ PASS
 R9.6p8 import-noise taxonomy .............. PASS
 R9.6p8.1 Product Definition contract ...... PASS
-R9.6p8.2 pilot telemetry code ............. PASS (py_compile + full regression suite)
+R9.6p8.2 pilot telemetry code ............. PASS
+R9.6p8.3 eligible cohort/JSON contract ..... PASS
 ```
 
 ## R9.6p8.2 operational changes
@@ -33,3 +34,13 @@ R9.6p8.2 pilot telemetry code ............. PASS (py_compile + full regression s
 - Base Final and Consolidado remain read-only in semantic mode.
 
 The Product Definition prompt and taxonomy rules are unchanged from R9.6p8.1; this is an operational/telemetry patch.
+
+## R9.6p8.3 validation additions
+
+- Confirms semantic JSON missing `decision` is rejected by the contract validator.
+- Confirms valid semantic JSON passes the contract validator.
+- Confirms Product Definition cache namespace is bumped to v3.
+- Confirms semantic pilot target states are UNRESOLVED/AMBIGUOUS.
+- Confirms Product Definition prompt receives only PROBABLE/STRONG sources.
+- Full prior regression suite remains green.
+
