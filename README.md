@@ -1,223 +1,209 @@
-# Product Enricher — R9.6p8.4 Product Definition Pilot
+# Product Enricher — R9.7 Cache-First Free-Tier
 
+## Objetivo
 
-## R9.6p8.4 — provider resilience + explicit NVIDIA schema
+R9.7 muda o foco para **escala com custo operacional zero no caminho principal**.
+A nova opção reaproveita o `cache_tavily.sqlite` já coletado e não faz nova busca nem chama LLM/API paga.
 
-This patch addresses the failure observed in the semantic pilot where NVIDIA returned an output that could not be accepted and the fallback Groq key then failed with HTTP 401.
-
-Changes:
-
-- Groq preflight now performs a real authenticated `GET /models`; an invalid key is disabled before the first inference.
-- NVIDIA JSON Object Mode now receives the full Product Definition JSON Schema inside the prompt, matching the Python validator contract.
-- Semantic prompt/cache namespace is bumped to `v4-product-definition-explicit-schema`.
-- The semantic pilot can have its own provider/model route without changing normal classification settings.
-- If every usable provider fails during DEFINE or MAP, the pilot writes a partial Excel and stops cleanly instead of raising an uncaught traceback.
-- Search collection remains untouched: option 7 still performs zero Search-provider requests and never writes Base Final/Consolidado.
-
-The p8.3 eligible-cohort behavior remains unchanged: a requested pilot size of 10 means 10 rows with usable cache + target identity >= PROBABLE + Stage1 UNRESOLVED/AMBIGUOUS.
-
-
-## R9.6p8.3 — eligible semantic cohort + validated LLM JSON contract
-
-This patch fixes two issues revealed by the p8.2 pilot log:
-
-1. `--max-items 10` previously meant the first 10 input rows, even when they had no usable cache or no target evidence. In p8.3 it means **10 eligible semantic-recovery items**: usable RAW cache + target evidence at least PROBABLE + Stage1 state UNRESOLVED or AMBIGUOUS.
-2. NVIDIA may return syntactically valid JSON that does not fully respect the requested schema. p8.3 validates required fields/types/enums before accepting or caching the response. Invalid semantic cache entries are discarded and the call is redone.
-
-The semantic LLM receives only PROBABLE/STRONG target sources; WEAK/contextual sources are excluded from the Product Definition prompt. The semantic prompt cache namespace is bumped to `v3` so the pilot starts clean against the corrected contract.
-
-The terminal now prints cohort-selection telemetry before the first LLM call and includes the final `Reason Code` per item.
-
-## R9.6p8.2 — product definition pilot telemetry
-
-This release adds a **pilot-only LLM-first semantic layer** without replacing the current production classification path and without changing the Search cost invariant.
-
-Pilot flow:
+Fluxo novo:
 
 ```text
-Existing curated evidence
+cache_tavily.sqlite
         ↓
-LLM defines the primary product with the most specific evidence-supported technical/commercial name
+Evidence Pack por Marca + Modelo
         ↓
-Grounding check: cited source + verbatim evidence phrase
+Identity Gate + Cross-Brand Gate
         ↓
-Role normalization (WHOLE_PRODUCT / COMPONENT_PART / ACCESSORY / ASSEMBLY)
+Stage 1 determinístico
         ↓
-Local taxonomy retrieval from regras_negocio.json
+Local Taxonomy Retrieval
         ↓
-Deterministic match OR top candidate set
+regras_negocio.json
         ↓
-LLM validates only the candidate set (or NONE)
-        ↓
-JSON maps Category General + FAMILY
+proposta / aceite determinístico / gap
 ```
 
-The Product Definition pilot asks the LLM to **define the primary product**, not to pre-classify it: it must return the most specific technical/commercial product name supported by the supplied evidence, without seeing or forcing Category General/FAMILY.
+## O que muda
 
-The Product Definition pilot **does not update Base Final or Consolidado**. It writes `Piloto_Definicao_LLM_R9_6p8_4.xlsx` so the behavior can be audited before production adoption.
+### 1. Cache-first de verdade
 
-R9.6p8.2 adds operational telemetry for the pilot: every item logs START/END, every LLM definition/mapping call logs START/END with provider/model/cache/duration, provider pacing waits are visible, and a partial Excel snapshot is persisted every 5 items and on Ctrl+C/failure. The interactive pilot default is now 10 items instead of 100.
+A opção 8 lê o cache Tavily existente e usa todos os resultados disponíveis para construir um pacote compacto de evidência por produto. O cache já pago passa a ser a matéria-prima principal.
 
-Important: R9.6p8.2 does **not** implement Collection Engine V2 yet. It tests whether richer use of the LLM can correctly interpret the evidence already present in cache. Collection V2 remains the next collection-focused step.
+### 2. Bloqueio de fonte contaminada por outra marca
 
-Run from the menu with option `7 - PILOTO DEFINIÇÃO LLM (NÃO ALTERA BASE)` or:
+Se o alvo for `HYUNDAI | 42004 000104` e o título da fonte trouxer explicitamente `TCL ... 42004-000104`, a fonte é marcada como `CROSS_BRAND` e não pode sustentar aceite automático.
+
+Ela pode permanecer como `CONTEXT_ONLY` para revisão, mas não vira prova de identidade.
+
+### 3. Título genérico não vira Título Real
+
+Títulos como:
+
+```text
+www.XYtronic-USA.com
+Home
+Official Website
+Products
+```
+
+são identificados como genéricos. Quando houver conteúdo útil no cache, o relatório usa um trecho target-aware da evidência no lugar do domínio.
+
+### 4. Recuperação taxonômica local
+
+Ordem de backend:
+
+1. `sentence-transformers` local, se o pacote e o modelo já estiverem instalados;
+2. `scikit-learn` TF-IDF local;
+3. fallback lexical em Python puro.
+
+Nenhum deles exige API paga.
+
+Modelo recomendado para embeddings locais:
+
+```text
+sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+```
+
+O pipeline usa `local_only=true` por padrão para não iniciar download silencioso em notebook corporativo.
+
+### 5. Acceptance policy
+
+Por padrão, **similaridade semântica sozinha não autoaprova** (`auto_accept=false`).
+
+Existe uma exceção determinística segura:
+
+```text
+IDENTITY = STRONG
++ sem conflito de marca
++ alias específico da taxonomia aparece literalmente na evidência
++ taxonomia válida
+= LOCAL_EXACT_ALIAS_ACCEPTED
+```
+
+Isso permite ganhar escala sem transformar embeddings em fonte de verdade.
+
+### 6. Checkpoint local
+
+Os resultados são persistidos em `pipeline_v3.sqlite`, tabela `cache_first_results`, usando:
+
+```text
+business_key + raw_hash + rules_hash + retriever_signature
+```
+
+Se o processo for interrompido, resultados compatíveis podem ser reutilizados.
+
+### 7. Evidence Packs reutilizáveis
+
+Também é criado:
+
+```text
+Cache_Evidence_Packs_R9_7.jsonl
+```
+
+Cada linha contém Marca, Modelo, identidade, fontes, trechos de evidência e flags. Esse JSONL pode futuramente alimentar LangExtract, uma LLM em batch ou outro modelo sem reler o SQLite inteiro.
+
+## Taxonomias adicionadas
+
+R9.7 acrescenta gaps observados no piloto:
+
+- `CROSS FLOW FAN` → `OTHERS | CROSS FLOW FAN`
+- `PROPELLER FAN` → `OTHERS | PROPELLER FAN`
+- `SOLDERING STATION` → `OTHERS | SOLDERING STATION`
+- `WINDSCREEN WASHER RESERVOIR` → `OTHERS | WINDSCREEN WASHER RESERVOIR`
+
+Também bloqueia `washer fluid reservoir` de ser interpretado como `WINDSCREEN WASHER PUMP`.
+
+## Como instalar
+
+Caminho mínimo, totalmente local:
 
 ```powershell
-python pipeline_produtos.py --mode semantic --max-items 10
-```
-
-
-## Core invariant
-
-**One product = at most one Search API request.**
-
-The collection layer fails closed if any provider path attempts a second Search request. Search retry, second query, provider failover, Tavily `/extract`, and Tavily `advanced` are not part of the active collection path.
-
-## Current collection architecture
-
-```text
-Brand + Original Model
-        ↓
-Search Model (original values remain untouched)
-        ↓
-ONE Search provider
-Tavily | Serper | Bright Data
-        ↓
-Query Integrity Gate
-(Bright Data: general.query / detected_query / spelling)
-        ↓
-Source Sieve
-Identity STRONG/PROBABLE + source-purpose checks
-        ↓
-Only approved sources may be enriched
-        ↓
-Evidence Enrichment
-├─ Tavily: raw_content returned by the SAME basic Search
-└─ Serper/Bright Data: local HTTP fetch + Trafilatura
-        ↓
-Target Isolation
-        ↓
-Collection Quality
-READY / PARTIAL / LOW / NO_TARGET
-        ↓
-Cache
-        ↓
-Classification
-```
-
-## Search providers
-
-### Tavily
-
-- `search_depth=basic` is hardcoded in the executor.
-- `auto_parameters=false`.
-- `include_usage=true`.
-- `include_raw_content="text"` is requested inside the same Search call.
-- If Tavily reports `usage.credits > 1`, collection aborts with a cost-policy violation.
-- No `/extract`, Advanced Search, second query, automatic retry, or provider failover.
-
-### Serper
-
-- One `POST /search` per product.
-- Only `organic[]` is normalized.
-- `title`, `link`, and `snippet` become the common search-result contract.
-- If a source passes Source Sieve and the snippet is insufficient, local enrichment may fetch the approved URL without another Search API request.
-
-### Bright Data
-
-- **Only Google Light JSON is supported: `format=json` + `data_format=parsed_light`.**
-- Raw HTML (`format=raw`), Full JSON, Parsed Bing, Markdown, and Screenshot are intentionally not supported in this pipeline.
-- Only `organic[]` feeds source candidates.
-- `general.query`, `general.detected_query`, and `spelling` are audited before Source Sieve.
-- Unsafe query drift blocks the SERP before any URL enrichment.
-
-## Source Sieve
-
-A search result cannot be enriched just because it has a high provider score. It must first prove target identity.
-
-Accepted for enrichment:
-- `STRONG`
-- `PROBABLE`
-
-Rejected before enrichment:
-- weak/contextual target identity
-- compatibility-only pages
-- related/similar-product context
-- Bright Data query identity drift
-
-Provider rank is only a secondary ordering signal.
-
-## Evidence enrichment
-
-### Tavily one-step evidence
-
-Tavily raw content is returned by the same Search request and is used only after the result passes Source Sieve. Full raw content is not persisted to SQLite; only the isolated target evidence and a boolean availability marker are stored.
-
-### Local HTML enrichment
-
-For Serper/Bright Data, approved sources may be downloaded locally. This does not call a Search provider.
-
-Default behavior:
-- max 2 approved URLs per product
-- one local GET attempt per URL
-- no local retry
-- HTML/text only
-- response size cap
-- Trafilatura preferred for main-content extraction
-- stdlib HTML text extraction fallback if Trafilatura is unavailable
-- browser/JavaScript crawler fallback disabled
-
-Crawl4AI was evaluated but is not enabled in the default production path because it adds Chromium/browser operational complexity. It remains a future option for a measured residual set of JS-only sources.
-
-## GitHub patterns incorporated
-
-- Provider adapters follow the same simple normalization principle seen in Haystack and Qwen-Agent Serper integrations: provider-specific `organic` rows become one internal search-result shape.
-- Trafilatura is used as the preferred local content extractor because its main extractor is designed to isolate useful page text and offers a precision-oriented mode.
-- Search-provider behavior remains separate from product identity and taxonomy logic.
-
-## Required environment variables
-
-```text
-TAVILY_API_KEY=
-SERPER_API_KEY=
-BRIGHTDATA_API_KEY=
-BRIGHTDATA_ZONE=
-```
-
-Only the selected Search provider needs to be configured for a collection run.
-
-## Install
-
-```bash
 pip install -r requirements.txt
 ```
 
-## Main menu
+Isso inclui `scikit-learn` e já permite rodar o novo piloto.
 
-```text
-1 - COLETA / EXTRAÇÃO R9.6
-2 - CLASSIFICAÇÃO
-3 - PROCESSO COMPLETO
-4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)
-5 - AUDITORIA / REPARO BASE (SEM LLM)
-6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)
-7 - PILOTO DEFINIÇÃO LLM (NÃO ALTERA BASE)
-8 - SAIR
+### Embeddings multilíngues locais — opcional
+
+```powershell
+pip install -r requirements_embeddings_optional.txt
 ```
 
-For current operations, collection and classification should still be evaluated independently when changing providers or collection logic.
+O pipeline **não baixa o modelo automaticamente**. Para baixar uma única vez quando a rede permitir:
 
-## R9.6p6 classification recovery
+```powershell
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')"
+```
 
-R9.6p6 separates model representations by purpose: the original model is never changed, identity keeps structural SKU syntax, and the Search query receives a punctuation-clean model with separators converted to spaces. It also adds deterministic TYPE recovery from existing taxonomy-evidence rules, explicit `POWER TOOL COMBO KIT` handling, and title preservation for unresolved items. The Base Final shows only `Título Real`; detailed title-reference metadata remains available in the consolidated/audit output.
+Depois disso, com o modelo no cache local, a opção 8 passa a preferi-lo automaticamente.
 
+Se a instalação/modelo não estiver disponível, o pipeline continua normalmente com TF-IDF.
 
-## R9.6p7 import-noise taxonomy and approval gate
+## Como rodar
 
-R9.6p7 hardens the classification stage for noisy import datasets. A classification can only become `AUTO_APROVADO` when the supporting source has `STRONG` identity: target Brand + structural Model must be anchored in the source TITLE/URL. Exact model matches without the target brand may still be retained for review, but cannot auto-approve.
+Primeiro:
 
-Fan/cooler/industrial-blower noise is explicitly routed away from garden-equipment categories and into `OTHERS` with a physical family such as `AXIAL FAN`, `COOLING FAN`, `FAN BLADE`, `FAN MODULE`, `FAN MOTOR`, `SUCTION FAN`, `INDUSTRIAL BLOWER`, `VENTURI BLOWER`, or `COOLER`. Generic `BLOWER` is now garden/power-tool specific.
+```powershell
+python pipeline_produtos.py --mode validate
+```
 
-Non-water pump phrases such as windscreen/windshield washer pump, ink pump, fuel pump, oil pump, vacuum pump, and condensate pump are blocked from `WATERPUMP` and use dedicated `OTHERS` families when target identity is strong.
+Depois:
 
-Resolved rows always export `Próxima Ação = CONCLUIDO`. `Título Real` is the title of the STRONG source that actually supported the resolved TYPE; unresolved rows retain the best reference title only for manual review.
+```powershell
+python pipeline_produtos.py
+```
+
+Escolha:
+
+```text
+8 - CACHE-FIRST FREE-TIER LOCAL (0 BUSCA / 0 LLM / NÃO ALTERA BASE)
+```
+
+Para o primeiro comparativo use `100` itens.
+
+## Saídas
+
+```text
+Piloto_Cache_First_Free_Tier_R9_7.xlsx
+Cache_Evidence_Packs_R9_7.jsonl
+```
+
+O Excel mostra, entre outros:
+
+- Marca / Modelo
+- Stage1 State
+- Best Identity
+- fontes trusted/context
+- cross-brand count
+- backend local
+- Suggested Type
+- Matched Taxonomy Phrase
+- Similarity Score / Margin
+- Suggested Category General / FAMILY
+- Título Real
+- Evidence Extract / URL
+- Decision
+- Review Required
+
+## Decisions
+
+- `LOCAL_EXACT_ALIAS_ACCEPTED`: identidade STRONG + alias específico explícito; aceite determinístico local.
+- `LOCAL_SEMANTIC_PROPOSAL`: candidato local útil, ainda requer validação.
+- `LOCAL_LOW_SIGNAL`: cache tem evidência, mas a taxonomia local não encontrou sinal suficiente.
+- `CACHE_IDENTITY_GAP`: existe conteúdo, mas ele não prova com segurança o Marca+Modelo alvo.
+- `CACHE_INSUFFICIENT`: cache não possui texto suficiente para interpretar o produto.
+
+## O que NÃO mudou
+
+- 1 produto = no máximo 1 Search-provider request nos modos de coleta.
+- Sem retry automático de Search.
+- Sem segunda query automática.
+- Sem provider failover na coleta.
+- Sem Tavily Extract / Advanced.
+- `Revisão B.I = OK` continua HARD LOCK.
+- A opção 8 não grava Base Final nem Consolidado.
+- Category General e FAMILY continuam controladas pelo `regras_negocio.json`.
+
+## LangExtract
+
+LangExtract continua interessante para uma segunda camada de extração grounded, mas **não foi colocado no caminho crítico da R9.7**. A opção 8 precisa funcionar sem Ollama, sem navegador, sem LLM e sem nova API. O `Cache_Evidence_Packs_R9_7.jsonl` já prepara os dados para um futuro adaptador LangExtract sem novo Search.

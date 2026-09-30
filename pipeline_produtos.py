@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.6p8.4 Product Definition Pilot
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1 / Collection R9.7 Cache-First Free-Tier
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -38,6 +38,7 @@ import csv
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -58,8 +59,8 @@ PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
 SEMANTIC_PROMPT_VERSION = "2026-09-30-v4-product-definition-explicit-schema"
 SEMANTIC_MAP_PROMPT_VERSION = "2026-09-29-v1-semantic-taxonomy-mapper"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3.1p8.4 R9.6 Product Definition Pilot"
-COLLECTION_ENGINE_VERSION = "2026-09-30-r9.6p8.4-product-definition-provider-resilience"
+BUILD_LABEL = "v3.9.5-HF3.1p9 R9.7 Cache-First Free-Tier"
+COLLECTION_ENGINE_VERSION = "2026-09-30-r9.7-cache-first-free-tier-v1"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
 
@@ -5546,6 +5547,11 @@ class OpenAICompatibleClassifier:
                 "max_tokens": self.max_output_tokens,
                 "stream": False,
             }
+            # NVIDIA GPT-OSS expõe reasoning_effort no endpoint de Chat Completions.
+            # Manter LOW reduz raciocínio residual e reserva o orçamento de saída
+            # para o JSON final do contrato semântico.
+            if self.model.startswith("openai/gpt-oss-"):
+                payload["reasoning_effort"] = self.reasoning_effort
             if self.model == "nvidia/nemotron-3.5-lightning-30b-a3b":
                 payload["chat_template_kwargs"] = {"enable_thinking": False}
 
@@ -5617,6 +5623,108 @@ class OpenAICompatibleClassifier:
             key, raw_hash, scoped_rules_hash, self.provider, self.model, data, usage
         )
         return data, False, usage
+
+    def semantic_contract_smoke(self) -> Dict[str, Any]:
+        """Executa UMA inferência real antes do piloto para provar o contrato JSON.
+
+        Diferente de GET /models, este teste valida o caminho que de fato falhou
+        no p8.3: autenticação + inferência + JSON parse + aderência ao schema.
+        Em NVIDIA, testa os candidatos servidos em ordem e fixa o primeiro que
+        cumprir o contrato. Nenhum resultado do smoke permanece no cache.
+        """
+        schema = {
+            "type": "object",
+            "properties": {
+                "decision": {"type": "string", "enum": ["IDENTIFIED", "INSUFFICIENT_EVIDENCE", "CONFLICT"]},
+                "product_type_raw": {"type": "string"},
+                "product_role": {"type": "string", "enum": ["WHOLE_PRODUCT", "COMPONENT_PART", "ACCESSORY", "ASSEMBLY", "UNKNOWN"]},
+                "domain_hint": {"type": "string", "enum": ["GARDEN_OUTDOOR", "INDUSTRIAL_HVAC", "AUTOMOTIVE", "AGRICULTURAL", "POWER_TOOL", "PUMP_FLUID", "ELECTRONICS", "OTHER", "UNKNOWN"]},
+                "power": {"type": "string", "enum": sorted(set(self.rules.allowed_powers))},
+                "evidence_source_ids": {"type": "array", "items": {"type": "integer"}},
+                "evidence_phrase": {"type": "string"},
+                "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                "reason_short": {"type": "string"},
+            },
+            "required": ["decision", "product_type_raw", "product_role", "domain_hint", "power", "evidence_source_ids", "evidence_phrase", "confidence", "reason_short"],
+            "additionalProperties": False,
+        }
+        expected_phrase = "TEST PRODUCT"
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Provider contract smoke test. Return only the requested JSON object. "
+                    "Do not explain or add markdown."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Return a valid contract object for the literal evidence TEST PRODUCT. "
+                    "Use decision=IDENTIFIED, product_type_raw=TEST PRODUCT, "
+                    "product_role=WHOLE_PRODUCT, domain_hint=OTHER, power=UNKNOWN, "
+                    "evidence_source_ids=[1], evidence_phrase=TEST PRODUCT, "
+                    "confidence=HIGH, reason_short=provider contract smoke."
+                ),
+            },
+        ]
+
+        original_model = self.model
+        candidates = [self.model]
+        if self.provider == "nvidia":
+            candidates = list(getattr(self, "available_model_candidates", []) or self.model_candidates or [self.model])
+
+        errors: List[str] = []
+        for candidate in candidates:
+            self.model = candidate
+            smoke_scope = SEMANTIC_PROMPT_VERSION + "-live-provider-smoke"
+            smoke_key = "__SEMANTIC_PROVIDER_SMOKE__"
+            smoke_raw_hash = hashlib.sha256((self.provider + "|" + candidate + "|" + expected_phrase).encode("utf-8")).hexdigest()
+            scoped_rules_hash = hashlib.sha256(
+                f"{self.rules.hash}|{smoke_scope}".encode("utf-8")
+            ).hexdigest()
+            # Força inferência AO VIVO em toda execução; cache não pode mascarar provider quebrado.
+            self.db.delete_llm(smoke_key, smoke_raw_hash, scoped_rules_hash, self.provider, candidate)
+            started = time.monotonic()
+            try:
+                data, _hit, usage = self._structured_json_call(
+                    cache_scope=smoke_scope,
+                    key=smoke_key,
+                    raw_hash=smoke_raw_hash,
+                    schema_name="semantic_provider_contract_smoke",
+                    schema=schema,
+                    messages=messages,
+                )
+                if safe(data.get("decision")).upper() != "IDENTIFIED":
+                    raise OperationalPause(
+                        f"{self.provider.upper()}_STRUCTURED_SMOKE_INVALID",
+                        f"Smoke respondeu decision={safe(data.get('decision'))!r}.",
+                    )
+                if safe(data.get("product_type_raw")).upper() != expected_phrase:
+                    raise OperationalPause(
+                        f"{self.provider.upper()}_STRUCTURED_SMOKE_INVALID",
+                        f"Smoke respondeu product_type_raw={safe(data.get('product_type_raw'))!r}.",
+                    )
+                return {
+                    "provider": self.provider,
+                    "model": self.model,
+                    "elapsed_seconds": round(time.monotonic() - started, 2),
+                    "total_tokens": int((usage or {}).get("total_tokens", 0) or 0),
+                }
+            except OperationalPause as exc:
+                errors.append(f"{candidate}:{exc.code}")
+                LOG.warning(
+                    "LLM LIVE SMOKE FAIL | provider=%s | model=%s | code=%s | %s",
+                    self.provider.upper(), candidate, exc.code, safe(exc),
+                )
+            finally:
+                self.db.delete_llm(smoke_key, smoke_raw_hash, scoped_rules_hash, self.provider, candidate)
+
+        self.model = original_model
+        raise OperationalPause(
+            f"{self.provider.upper()}_STRUCTURED_SMOKE_FAILED",
+            "Nenhum modelo do provider completou uma inferência JSON válida. " + " | ".join(errors),
+        )
 
     def semantic_identify(
         self,
@@ -6074,6 +6182,58 @@ class ProviderCascade:
                 f"Nenhum provider passou no preflight. {details}",
             )
 
+        self.active_index = enabled_indexes[0]
+        return results
+
+    def semantic_live_smoke_all(self) -> List[Dict[str, Any]]:
+        """Prova inferência estruturada real e desabilita providers incompatíveis.
+
+        Só é usado no Product Definition Pilot. Se todos falharem, o piloto
+        encerra ANTES do primeiro produto em vez de descobrir o problema no lote.
+        """
+        results: List[Dict[str, Any]] = []
+        enabled_indexes: List[int] = []
+        for idx, provider in enumerate(self.providers):
+            if idx in self.disabled:
+                continue
+            LOG.info(
+                "LLM LIVE SMOKE START | provider=%s | model=%s",
+                provider.provider.upper(), provider.model,
+            )
+            try:
+                result = dict(provider.semantic_contract_smoke() or {})
+                result["enabled"] = True
+                result["error_code"] = ""
+                results.append(result)
+                enabled_indexes.append(idx)
+                LOG.info(
+                    "LLM LIVE SMOKE PASS | provider=%s | model=%s | %.1fs",
+                    provider.provider.upper(), provider.model, float(result.get("elapsed_seconds", 0.0) or 0.0),
+                )
+            except OperationalPause as exc:
+                self.disabled.add(idx)
+                results.append({
+                    "provider": provider.provider,
+                    "model": provider.model,
+                    "enabled": False,
+                    "error_code": exc.code,
+                    "error_detail": safe(exc),
+                })
+                LOG.warning(
+                    "LLM LIVE SMOKE SKIP | provider=%s | model=%s | code=%s | %s",
+                    provider.provider.upper(), provider.model, exc.code, safe(exc),
+                )
+
+        if not enabled_indexes:
+            details = " | ".join(
+                f"{x.get('provider')}={x.get('error_code')}" for x in results
+            )
+            raise OperationalPause(
+                "LLM_NO_STRUCTURED_PROVIDER_AVAILABLE",
+                "Nenhum provider concluiu o live structured-output smoke. " + details,
+            )
+
+        # Se o primeiro provider foi desabilitado no smoke, reposiciona a rota.
         self.active_index = enabled_indexes[0]
         return results
 
@@ -8384,7 +8544,7 @@ def run_pipeline(
     inventory_path = Path(args.inventory_output or cfg["files"]["inventory_output"])
 
     baseline_pre_stats: Dict[str, int] = {}
-    if args.mode in {"classify", "full", "recover", "semantic"}:
+    if args.mode in {"classify", "full", "recover", "semantic", "cachefirst"}:
         backup_root = Path(cfg.get("files", {}).get("baseline_backup_dir", "Backups_Baseline"))
         backup_folder = _backup_baseline_files(master_path, final_path, backup_root)
         if backup_folder:
@@ -8922,7 +9082,7 @@ def _semantic_build_llm_cascade(
     db: ClassificationDB,
 ) -> ProviderCascade:
     pilot_cfg = cfg.get("semantic_pilot", {}) or {}
-    # p8.4: o piloto pode usar um modelo/rota próprios sem alterar a classificação
+    # p8.5: o piloto pode usar um modelo/rota próprios sem alterar a classificação
     # normal. O preflight valida credencial/modelo antes da primeira inferência.
     groq_model = safe(pilot_cfg.get("groq_model")) or os.getenv("GROQ_MODEL", "").strip() or safe(cfg.get("groq", {}).get("model")) or DEFAULT_MODEL
     nvidia_model = safe(pilot_cfg.get("nvidia_model")) or os.getenv("NVIDIA_MODEL", "").strip() or safe(cfg.get("nvidia", {}).get("model")) or "openai/gpt-oss-20b"
@@ -8942,24 +9102,34 @@ def _semantic_build_llm_cascade(
         switch_only_on_quota_exhaustion=bool(cfg.get("llm", {}).get("switch_only_on_quota_exhaustion", False)),
     )
     preflights = cascade.preflight_all()
-    enabled = [
-        f"{safe(x.get('provider')).upper()}[{safe(x.get('model'))}]"
-        for x in preflights if x.get("enabled")
-    ]
-    disabled = [
+    disabled_preflight = [
         f"{safe(x.get('provider')).upper()}={safe(x.get('error_code'))}"
         for x in preflights if not x.get("enabled")
     ]
-    LOG.info("PRODUCT DEFINITION PILOT LLM ROUTE: %s", " -> ".join(enabled))
-    if disabled:
-        LOG.warning("PRODUCT DEFINITION PILOT PROVIDERS DESABILITADOS NO PREFLIGHT: %s", " | ".join(disabled))
+    if disabled_preflight:
+        LOG.warning("PRODUCT DEFINITION PILOT PROVIDERS DESABILITADOS NO PREFLIGHT: %s", " | ".join(disabled_preflight))
+
+    # p8.5: GET /models não basta. Antes de tocar em qualquer produto, executa
+    # uma inferência estruturada real com o MESMO parser/schema usado pelo piloto.
+    smoke_results = cascade.semantic_live_smoke_all()
+    enabled = [
+        f"{p.provider.upper()}[{p.model}]"
+        for idx, p in enumerate(cascade.providers) if idx not in cascade.disabled
+    ]
+    disabled_smoke = [
+        f"{safe(x.get('provider')).upper()}={safe(x.get('error_code'))}"
+        for x in smoke_results if not x.get("enabled")
+    ]
+    LOG.info("PRODUCT DEFINITION PILOT LLM ROUTE VALIDADA AO VIVO: %s", " -> ".join(enabled))
+    if disabled_smoke:
+        LOG.warning("PRODUCT DEFINITION PILOT PROVIDERS DESABILITADOS NO LIVE SMOKE: %s", " | ".join(disabled_smoke))
     return cascade
 
 
 def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
     """Piloto de definição de produto via LLM sem alterar Base Final/Consolidado/checkpoint de classificação.
 
-    R9.6p8.4: mantém coorte elegível, valida credenciais/modelos dos providers antes do piloto e encerra de forma segura em falhas de LLM.
+    R9.6p8.5: mantém coorte elegível e exige live structured-output smoke antes do primeiro produto; falhas encerram de forma segura.
     """
     pilot_cfg = cfg.get("semantic_pilot", {}) or {}
     if not bool(pilot_cfg.get("enabled", True)):
@@ -8985,7 +9155,7 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     rank = DeterministicEngine.IDENTITY_RANK
     min_identity = safe(rules.semantic_policy.get("min_identity", "PROBABLE")).upper() or "PROBABLE"
 
-    # p8.4 preserva: o limite do piloto significa N CASOS ELEGÍVEIS, não as N
+    # p8.5 preserva: o limite do piloto significa N CASOS ELEGÍVEIS, não as N
     # primeiras linhas da base. Assim SEM_CACHE_UTIL/COLLECTION_GAP não consomem
     # a amostra destinada a validar a LLM Product Definition.
     seen = set()
@@ -9053,10 +9223,27 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     db = ClassificationDB(db_path)
     try:
         llm = _semantic_build_llm_cascade(rules, cfg, db)
-    except BaseException:
+    except OperationalPause as exc:
+        LOG.error(
+            "PILOTO NÃO INICIADO | code=%s | %s",
+            exc.code, safe(exc),
+        )
+        LOG.error(
+            "Nenhum produto foi enviado à LLM. Base Final/Consolidado permanecem intactos. "
+            "Corrija somente a credencial/provider indicado antes de tentar novamente."
+        )
         db.close()
         store.close()
-        raise
+        return
+    except Exception as exc:
+        LOG.error(
+            "PILOTO NÃO INICIADO | erro de integração LLM=%s | %s",
+            type(exc).__name__, safe(exc),
+        )
+        LOG.error("Nenhum produto foi processado; Base Final/Consolidado permanecem intactos.")
+        db.close()
+        store.close()
+        return
     rows: List[Dict[str, Any]] = []
     stats = defaultdict(int)
     pilot_started = time.monotonic()
@@ -9423,6 +9610,784 @@ def run_semantic_pilot(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
         db.close()
         store.close()
 
+# -----------------------------------------------------------------------------
+# R9.7 - Cache-First Free-Tier / Local Taxonomy Retrieval
+# -----------------------------------------------------------------------------
+@dataclass
+class CacheEvidenceItem:
+    source_id: int
+    title: str
+    url: str
+    snippet: str
+    raw_excerpt: str
+    identity: str
+    identity_score: int
+    model_match: str
+    model_match_field: str
+    generic_title: bool
+    cross_brand_conflicts: List[str]
+    tavily_score: float
+    trusted: bool
+    reason: str
+
+    @property
+    def evidence_text(self) -> str:
+        parts = [self.title, self.snippet, self.raw_excerpt]
+        return "\n".join(x for x in parts if safe(x)).strip()
+
+
+@dataclass
+class CacheEvidencePack:
+    brand: str
+    model: str
+    business_key: str
+    raw_state: str
+    raw_hash: str
+    items: List[CacheEvidenceItem]
+    query_text: str
+    best_identity: str
+    trusted_count: int
+    context_count: int
+    cross_brand_count: int
+
+    @property
+    def trusted_items(self) -> List[CacheEvidenceItem]:
+        return [x for x in self.items if x.trusted]
+
+    @property
+    def best_item(self) -> Optional[CacheEvidenceItem]:
+        rank = {"WEAK": 0, "CONTEXTUAL": 1, "PROBABLE": 2, "STRONG": 3}
+        candidates = [x for x in self.items if x.trusted and not x.generic_title]
+        if not candidates:
+            candidates = [x for x in self.items if x.trusted]
+        if not candidates:
+            candidates = [x for x in self.items if not x.generic_title]
+        if not candidates:
+            candidates = list(self.items)
+        if not candidates:
+            return None
+        return sorted(
+            candidates,
+            key=lambda x: (rank.get(x.identity, 0), int(not x.generic_title), x.tavily_score),
+            reverse=True,
+        )[0]
+
+
+class KnownBrandIndex:
+    """Índice local de marcas conhecidas no próprio cache.
+
+    Serve apenas para detectar conflito explícito no título/URL (ex.: alvo HYUNDAI,
+    fonte intitulada TCL ...). Não cria identidade positiva e não usa fuzzy.
+    """
+    def __init__(self, brands: Sequence[str]):
+        self.variant_to_brands: Dict[str, set] = defaultdict(set)
+        self.max_tokens = 1
+        for brand in brands:
+            b = safe(brand)
+            if not b:
+                continue
+            for variant in _brand_identity_variants(b):
+                v = compact(variant)
+                if len(v) < 3:
+                    continue
+                self.variant_to_brands[v].add(canonical_display(b))
+            toks = [t for t in norm_text(b).split() if t]
+            self.max_tokens = max(self.max_tokens, min(5, len(toks)))
+
+    def conflicts(self, target_brand: str, title: str, url: str) -> List[str]:
+        primary = norm_text(f"{title} {url}")
+        if not primary:
+            return []
+        target_variants = {compact(x) for x in _brand_identity_variants(target_brand)}
+        tokens = [x for x in re.split(r"[^a-z0-9]+", primary) if x]
+        found: set = set()
+        nmax = min(self.max_tokens, 5)
+        for n in range(1, nmax + 1):
+            for i in range(0, max(0, len(tokens) - n + 1)):
+                key = compact(" ".join(tokens[i:i+n]))
+                if key in target_variants:
+                    continue
+                for brand in self.variant_to_brands.get(key, set()):
+                    if canonical_display(brand) != canonical_display(target_brand):
+                        found.add(brand)
+        return sorted(found)
+
+
+def _looks_generic_search_title(title: str, url: str = "") -> bool:
+    raw = safe(title).strip()
+    if not raw:
+        return True
+    folded = norm_text(raw)
+    if not folded:
+        return True
+    generic_words = {
+        "home", "homepage", "official", "official website", "website", "products",
+        "product", "catalog", "catalogue", "support", "downloads", "download",
+        "welcome", "shop", "store", "online store", "company", "manufacturer",
+    }
+    if folded in generic_words:
+        return True
+    # Título que é essencialmente um domínio (www.XYtronic-USA.com).
+    domainish = re.sub(r"^https?://", "", raw, flags=re.I).strip().strip("/")
+    if re.fullmatch(r"(?:www\.)?[a-z0-9][a-z0-9._-]*\.[a-z]{2,}(?:/.*)?", domainish, flags=re.I):
+        return True
+    host = safe(urlparse(url).hostname).casefold().removeprefix("www.")
+    if host:
+        label = host.split(".")[0]
+        if compact(raw) in {compact(host), compact(label), compact("www." + host)}:
+            return True
+    if len(folded.split()) <= 3 and any(x in folded for x in ["official site", "official website"]):
+        return True
+    return False
+
+
+def _model_windows_for_cache(text: str, model: str, cfg: Dict[str, Any], before: int, after: int, max_windows: int = 2) -> str:
+    raw = safe(text)
+    if not raw:
+        return ""
+    spans = _target_spans(raw, model, cfg)
+    if not spans:
+        return raw[: max(500, min(len(raw), before + after))]
+    chunks: List[str] = []
+    used: List[Tuple[int, int]] = []
+    for start, end in spans[:max_windows]:
+        lo = max(0, start - before)
+        hi = min(len(raw), end + after)
+        if any(lo >= a and hi <= b for a, b in used):
+            continue
+        used.append((lo, hi))
+        chunks.append(raw[lo:hi].strip())
+    return "\n...\n".join(x for x in chunks if x)
+
+
+def build_cache_evidence_pack(
+    raw: RawEvidence,
+    cfg: Dict[str, Any],
+    brand_index: KnownBrandIndex,
+) -> CacheEvidencePack:
+    ccfg = cfg.get("cache_first_free_tier", {}) or {}
+    max_sources = max(1, int(ccfg.get("max_sources", 5) or 5))
+    before = max(100, int(ccfg.get("model_window_before", 450) or 450))
+    after = max(300, int(ccfg.get("model_window_after", 1200) or 1200))
+    max_query_chars = max(1000, int(ccfg.get("max_query_chars", 6000) or 6000))
+    include_cross = bool(ccfg.get("include_cross_brand_as_context", True))
+    rank = {"WEAK": 0, "CONTEXTUAL": 1, "PROBABLE": 2, "STRONG": 3}
+
+    payload = raw.payload or {}
+    rows = [x for x in (payload.get("results", []) or []) if isinstance(x, dict)]
+    items: List[CacheEvidenceItem] = []
+    identity_model = derive_search_model(raw.brand, raw.model, cfg)
+    for i, res in enumerate(rows, 1):
+        title = safe(res.get("title"))
+        url = safe(res.get("url"))
+        snippet = safe(res.get("content"))
+        raw_content = res.get("raw_content")
+        if not isinstance(raw_content, str):
+            raw_content = ""
+        body_for_identity = "\n".join(x for x in [snippet, raw_content[:5000]] if x)
+        meta = _source_identity_for_result(raw.brand, identity_model, {
+            "title": title, "url": url, "content": body_for_identity,
+        }, cfg)
+        conflicts = brand_index.conflicts(raw.brand, title, url)
+        generic = _looks_generic_search_title(title, url)
+        excerpt_source = raw_content or snippet
+        excerpt = _model_windows_for_cache(excerpt_source, identity_model, cfg, before, after)
+        level = safe(meta.get("level")) or "WEAK"
+        # Fonte trusted exige identidade >= PROBABLE e nenhuma marca concorrente
+        # explícita no campo primário. PROBABLE com marca concorrente ainda pode
+        # ser mantida apenas como contexto manual, nunca como base de auto-aceite.
+        trusted = rank.get(level, 0) >= rank["PROBABLE"] and not conflicts
+        if generic and not excerpt:
+            trusted = False
+        try:
+            tavily_score = float(res.get("score", 0) or 0)
+        except Exception:
+            tavily_score = 0.0
+        reason_parts = [f"IDENTITY={level}"]
+        if conflicts:
+            reason_parts.append("CROSS_BRAND=" + ",".join(conflicts[:4]))
+        if generic:
+            reason_parts.append("GENERIC_TITLE")
+        if trusted:
+            reason_parts.append("TRUSTED")
+        elif include_cross and rank.get(level, 0) >= rank["PROBABLE"]:
+            reason_parts.append("CONTEXT_ONLY")
+        items.append(CacheEvidenceItem(
+            source_id=i,
+            title=title,
+            url=url,
+            snippet=snippet,
+            raw_excerpt=excerpt,
+            identity=level,
+            identity_score=int(meta.get("score", 0) or 0),
+            model_match=safe(meta.get("model_match")),
+            model_match_field=safe(meta.get("model_match_field")),
+            generic_title=generic,
+            cross_brand_conflicts=conflicts,
+            tavily_score=tavily_score,
+            trusted=trusted,
+            reason=" | ".join(reason_parts),
+        ))
+
+    def order_key(x: CacheEvidenceItem) -> Tuple[int, int, int, float]:
+        return (
+            int(x.trusted),
+            rank.get(x.identity, 0),
+            int(not x.generic_title),
+            x.tavily_score,
+        )
+
+    items.sort(key=order_key, reverse=True)
+    items = items[:max_sources]
+    chunks: List[str] = []
+    for item in items:
+        if not item.trusted and not include_cross:
+            continue
+        label = "TRUSTED" if item.trusted else "CONTEXT_ONLY"
+        text = item.evidence_text
+        if not text:
+            continue
+        chunks.append(f"[{label} SOURCE {item.source_id}]\n{text}")
+    query_text = "\n---\n".join(chunks)[:max_query_chars]
+    trusted = [x for x in items if x.trusted]
+    best_identity = max((x.identity for x in trusted), key=lambda v: rank.get(v, 0), default="WEAK")
+    return CacheEvidencePack(
+        brand=raw.brand,
+        model=raw.model,
+        business_key=business_key(raw.brand, raw.model),
+        raw_state=raw.state,
+        raw_hash=raw.raw_hash,
+        items=items,
+        query_text=query_text,
+        best_identity=best_identity,
+        trusted_count=len(trusted),
+        context_count=len(items) - len(trusted),
+        cross_brand_count=sum(1 for x in items if x.cross_brand_conflicts),
+    )
+
+
+class LocalTaxonomyRetriever:
+    """Recuperador local de TYPEs da taxonomia sem API paga.
+
+    Ordem de backend:
+      1) sentence-transformers local (se pacote + modelo já estiverem disponíveis)
+      2) scikit-learn TF-IDF char n-gram
+      3) similaridade lexical pura (stdlib)
+
+    O backend local nunca escreve Category/FAMILY por conta própria. Ele apenas
+    propõe PRODUCT_TYPE canônico; o mapeamento final continua em regras_negocio.json.
+    """
+    def __init__(self, rules: Rules, cfg: Dict[str, Any]):
+        self.rules = rules
+        self.cfg = cfg
+        self.ccfg = cfg.get("cache_first_free_tier", {}) or {}
+        self.backend_requested = safe(self.ccfg.get("backend", "auto")).casefold() or "auto"
+        self.model_id = safe(self.ccfg.get(
+            "sentence_transformers_model",
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        ))
+        self.entries: List[Tuple[str, str, str]] = []
+        self._build_entries()
+        self.backend = "lexical"
+        self.signature = "lexical-v1"
+        self._st_model = None
+        self._st_matrix = None
+        self._tfidf = None
+        self._tfidf_matrix = None
+        self._init_backend()
+
+    def _build_entries(self) -> None:
+        seen = set()
+        def add(typ: str, phrase: str, origin: str) -> None:
+            t, p = safe(typ), safe(phrase)
+            if t not in self.rules.types or not p:
+                return
+            key = (t, norm_text(p))
+            if not key[1] or key in seen:
+                return
+            seen.add(key)
+            self.entries.append((t, p, origin))
+
+        for typ, data in self.rules.types.items():
+            add(typ, typ.replace("_", " "), "TYPE")
+            for alias in (data.get("aliases", []) or []):
+                add(typ, alias, "ALIAS")
+            fp = data.get("fallback_pair")
+            if isinstance(fp, list) and len(fp) == 2:
+                add(typ, safe(fp[1]), "FAMILY")
+        for row in self.rules.taxonomy_rules:
+            typ = safe(row.get("primary_type"))
+            add(typ, safe(row.get("family")), "TAXONOMY_FAMILY")
+            add(typ, safe(row.get("category_general")), "TAXONOMY_CATEGORY")
+        for row in self.rules.taxonomy_evidence_rules:
+            typ = safe(row.get("primary_type"))
+            add(typ, safe(row.get("family")), "EVIDENCE_FAMILY")
+            for alias in (row.get("aliases", []) or []):
+                add(typ, alias, "EVIDENCE_ALIAS")
+        for phrase, typ in (self.rules.semantic_policy.get("raw_type_alias_to_canonical", {}) or {}).items():
+            add(safe(typ), safe(phrase), "SEMANTIC_BRIDGE")
+
+    def _init_backend(self) -> None:
+        wanted = self.backend_requested
+        allow_st = wanted in {"auto", "sentence_transformers", "sentence-transformers", "st"}
+        if allow_st:
+            try:
+                from sentence_transformers import SentenceTransformer
+                local_only = bool(self.ccfg.get("sentence_transformers_local_only", True))
+                kwargs: Dict[str, Any] = {}
+                if local_only:
+                    kwargs["local_files_only"] = True
+                self._st_model = SentenceTransformer(self.model_id, **kwargs)
+                phrases = [p for _, p, _ in self.entries]
+                self._st_matrix = self._st_model.encode(
+                    phrases,
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                    show_progress_bar=False,
+                )
+                self.backend = "sentence_transformers"
+                self.signature = f"sentence_transformers:{self.model_id}"
+                LOG.info("CACHE-FIRST LOCAL BACKEND | sentence-transformers | model=%s | entries=%d", self.model_id, len(self.entries))
+                return
+            except Exception as exc:
+                LOG.warning(
+                    "CACHE-FIRST sentence-transformers indisponível (%s: %s). Fallback local -> TF-IDF.",
+                    type(exc).__name__, safe(exc)[:300],
+                )
+                self._st_model = None
+                self._st_matrix = None
+                if wanted not in {"auto", "sentence_transformers", "sentence-transformers", "st"}:
+                    raise
+
+        if wanted in {"auto", "tfidf", "sklearn", "sentence_transformers", "sentence-transformers", "st"}:
+            try:
+                from sklearn.feature_extraction.text import TfidfVectorizer
+                self._tfidf = TfidfVectorizer(
+                    analyzer="char_wb",
+                    ngram_range=(3, 5),
+                    lowercase=True,
+                    strip_accents="unicode",
+                    sublinear_tf=True,
+                )
+                self._tfidf_matrix = self._tfidf.fit_transform([p for _, p, _ in self.entries])
+                self.backend = "sklearn_tfidf"
+                self.signature = "sklearn_tfidf:char_wb_3_5:v1"
+                LOG.info("CACHE-FIRST LOCAL BACKEND | scikit-learn TF-IDF | entries=%d", len(self.entries))
+                return
+            except Exception as exc:
+                LOG.warning("CACHE-FIRST TF-IDF indisponível (%s: %s). Fallback -> lexical stdlib.", type(exc).__name__, safe(exc)[:300])
+
+        self.backend = "lexical"
+        self.signature = "lexical:jaccard-sequencematcher:v1"
+        LOG.info("CACHE-FIRST LOCAL BACKEND | lexical stdlib | entries=%d", len(self.entries))
+
+    def _aggregate(self, scores: Sequence[float], top_k: int) -> List[Dict[str, Any]]:
+        best: Dict[str, Dict[str, Any]] = {}
+        for idx, raw_score in enumerate(scores):
+            try:
+                score = float(raw_score)
+            except Exception:
+                continue
+            typ, phrase, origin = self.entries[idx]
+            prev = best.get(typ)
+            if prev is None or score > float(prev["score"]):
+                best[typ] = {"type": typ, "score": score, "matched_phrase": phrase, "origin": origin}
+        rows = sorted(best.values(), key=lambda x: (-float(x["score"]), safe(x["type"])))
+        return rows[:max(1, top_k)]
+
+    @staticmethod
+    def _meaningful_tokens(value: str) -> List[str]:
+        stop = {
+            "a", "an", "the", "of", "for", "with", "and", "or", "to", "de", "da", "do", "das", "dos",
+            "el", "la", "los", "las", "y", "con", "para", "product", "products", "tool", "tools", "machine",
+            "electric", "electrical", "battery", "corded", "cordless", "petrol", "gas", "part", "parts", "spare",
+        }
+        return [t for t in norm_text(value).split() if len(t) >= 3 and t not in stop]
+
+    def _rerank_local_lexical_support(self, rows: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+        """Conservador para TF-IDF/lexical: sem âncora lexical, não força match.
+
+        Char n-gram sozinho pode confundir 'air conditioner' com 'mower conditioner'.
+        A recuperação local só sobe candidatos que compartilhem palavras/bigramas
+        informativos com a evidência. Sentence-transformers não usa este redutor.
+        """
+        if self.backend == "sentence_transformers":
+            return rows
+        qtokens = self._meaningful_tokens(query)
+        qset = set(qtokens)
+        qbigrams = set(zip(qtokens, qtokens[1:]))
+        out: List[Dict[str, Any]] = []
+        qfold = norm_text(query)
+        for row in rows:
+            typ = safe(row.get("type"))
+            phrase = safe(row.get("matched_phrase"))
+            ptokens = self._meaningful_tokens(phrase)
+            pset = set(ptokens)
+            if not pset:
+                continue
+            overlap = len(pset & qset) / max(1, len(pset))
+            pbigrams = set(zip(ptokens, ptokens[1:]))
+            bigram_overlap = len(pbigrams & qbigrams) / max(1, len(pbigrams)) if pbigrams else 0.0
+            exact = 1.0 if norm_text(phrase) and norm_text(phrase) in qfold else 0.0
+            # Bloqueia candidatos cuja própria taxonomia declara contexto negativo.
+            negatives = (self.rules.types.get(typ, {}) or {}).get("negative_aliases", []) or []
+            negative_hit = next((x for x in negatives if safe(x) and contains_alias_prepared(qfold, x)), "")
+            if negative_hit:
+                continue
+            base = float(row.get("score", 0.0) or 0.0)
+            support_multiplier = 0.30 + (0.40 * overlap) + (0.20 * bigram_overlap) + (0.10 * exact)
+            adjusted = base * support_multiplier
+            # Sem qualquer palavra informativa compartilhada, TF-IDF char-ngram é
+            # tratado como ruído, salvo match quase-exato excepcional.
+            if overlap <= 0.0 and exact <= 0.0 and base < 0.80:
+                continue
+            row = dict(row)
+            row["base_score"] = base
+            row["lexical_overlap"] = overlap
+            row["bigram_overlap"] = bigram_overlap
+            row["score"] = adjusted
+            out.append(row)
+        out.sort(key=lambda x: (-float(x.get("score", 0.0) or 0.0), safe(x.get("type"))))
+        return out
+
+    def retrieve(self, text: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        query = safe(text)
+        if not query:
+            return []
+        # Embedding models têm contexto limitado; o início privilegia título e
+        # primeiras janelas target, que o EvidencePack ordena por qualidade.
+        query = query[:8000]
+        if self.backend == "sentence_transformers" and self._st_model is not None and self._st_matrix is not None:
+            q = self._st_model.encode([query], normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)[0]
+            scores = self._st_matrix @ q
+            return self._aggregate(scores, top_k)
+        if self.backend == "sklearn_tfidf" and self._tfidf is not None and self._tfidf_matrix is not None:
+            from sklearn.metrics.pairwise import cosine_similarity
+            q = self._tfidf.transform([query])
+            scores = cosine_similarity(q, self._tfidf_matrix).ravel()
+            raw_rows = self._aggregate(scores, max(top_k * 6, 30))
+            return self._rerank_local_lexical_support(raw_rows, query)[:max(1, top_k)]
+
+        qnorm = norm_text(query)
+        qtokens = set(qnorm.split())
+        vals: List[float] = []
+        for _, phrase, _ in self.entries:
+            pnorm = norm_text(phrase)
+            ptokens = set(pnorm.split())
+            inter = len(qtokens & ptokens)
+            union = len(qtokens | ptokens) or 1
+            jaccard = inter / union
+            seq = SequenceMatcher(None, pnorm, qnorm[: max(len(pnorm) * 4, 120)]).ratio()
+            contains = 1.0 if pnorm and pnorm in qnorm else 0.0
+            vals.append(max(contains, 0.65 * jaccard + 0.35 * seq))
+        raw_rows = self._aggregate(vals, max(top_k * 6, 30))
+        return self._rerank_local_lexical_support(raw_rows, query)[:max(1, top_k)]
+
+
+class CacheFirstResultStore:
+    def __init__(self, path: Path):
+        self.path = path
+        self.conn = sqlite3.connect(path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute(
+            """CREATE TABLE IF NOT EXISTS cache_first_results (
+                result_id TEXT PRIMARY KEY,
+                business_key TEXT NOT NULL,
+                raw_hash TEXT NOT NULL,
+                rules_hash TEXT NOT NULL,
+                retriever_signature TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        self.conn.commit()
+
+    @staticmethod
+    def make_id(key: str, raw_hash: str, rules_hash: str, signature: str) -> str:
+        return hashlib.sha256(f"{key}|{raw_hash}|{rules_hash}|{signature}".encode("utf-8")).hexdigest()
+
+    def get(self, key: str, raw_hash: str, rules_hash: str, signature: str) -> Optional[Dict[str, Any]]:
+        rid = self.make_id(key, raw_hash, rules_hash, signature)
+        row = self.conn.execute("SELECT result_json FROM cache_first_results WHERE result_id=?", (rid,)).fetchone()
+        if not row:
+            return None
+        try:
+            data = json.loads(row["result_json"])
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def put(self, key: str, raw_hash: str, rules_hash: str, signature: str, result: Dict[str, Any]) -> None:
+        rid = self.make_id(key, raw_hash, rules_hash, signature)
+        self.conn.execute(
+            """INSERT INTO cache_first_results(result_id,business_key,raw_hash,rules_hash,retriever_signature,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?)
+               ON CONFLICT(result_id) DO UPDATE SET result_json=excluded.result_json, created_at=excluded.created_at""",
+            (rid, key, raw_hash, rules_hash, signature, json.dumps(result, ensure_ascii=False, default=str), now_iso()),
+        )
+        self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.commit()
+        self.conn.close()
+
+
+def _cache_first_stage1_payload(pack: CacheEvidencePack) -> Dict[str, Any]:
+    rows: List[Dict[str, Any]] = []
+    for item in pack.trusted_items:
+        rows.append({
+            "title": item.title,
+            "content": "\n".join(x for x in [item.snippet, item.raw_excerpt] if x),
+            "url": item.url,
+            "score": item.tavily_score,
+        })
+    return {"results": rows}
+
+
+def _cache_first_candidate_taxonomy(rules: Rules, candidate: Dict[str, Any], power: str, pack: CacheEvidencePack) -> Tuple[str, str, str]:
+    typ = safe(candidate.get("type"))
+    if typ not in rules.types:
+        return "", "", "TYPE_OUTSIDE_TAXONOMY"
+    return rules.map_taxonomy(typ, power or "UNKNOWN", pack.query_text, pack.brand, pack.model)
+
+
+def _cache_first_product_title(item: Optional[CacheEvidenceItem], model: str) -> str:
+    """Nunca devolve domínio/homepage como Título Real.
+
+    Quando o SERP title é genérico, usa um trecho curto da evidência local que
+    contenha o modelo; isso atende o requisito de levar informação de produto à
+    base de revisão sem fingir que o domínio é título do anúncio.
+    """
+    if item is None:
+        return ""
+    if item.title and not item.generic_title:
+        return item.title[:300]
+    candidates = [item.raw_excerpt, item.snippet]
+    model_compact = compact(model)
+    for text in candidates:
+        raw = safe(text).replace("\r", " ").replace("\n", " ")
+        if not raw:
+            continue
+        pieces = [x.strip() for x in re.split(r"(?<=[.!?])\s+|\s{2,}", raw) if x.strip()]
+        for piece in pieces:
+            if model_compact and model_compact in compact(piece):
+                return piece[:300]
+        return raw[:300]
+    return ""
+
+
+def _cache_first_snapshot(rows: List[Dict[str, Any]], output_path: Path, status: str) -> None:
+    import pandas as pd
+    df = pd.DataFrame(rows)
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Cache First")
+        summary = pd.DataFrame([
+            {"Status": status, "Linhas": len(rows), "Gerado em": now_iso()},
+        ])
+        summary.to_excel(writer, index=False, sheet_name="Resumo")
+
+
+def run_cache_first_free_tier(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
+    """Piloto escalável, 0 Search e 0 LLM/API paga.
+
+    Reaproveita todo o cache Tavily, reconstrói evidência por Marca+Modelo,
+    bloqueia conflito explícito de marca e usa recuperação taxonômica local.
+    Nunca altera Base Final/Consolidado.
+    """
+    ccfg = cfg.get("cache_first_free_tier", {}) or {}
+    cache_path = Path(args.cache or cfg["files"]["cache"])
+    output_path = Path(args.output or cfg["files"].get("cache_first_output", "Piloto_Cache_First_Free_Tier_R9_7.xlsx"))
+    evidence_path = Path(cfg["files"].get("cache_first_evidence_jsonl", "Cache_Evidence_Packs_R9_7.jsonl"))
+    db_path = Path(args.db or cfg["files"].get("classification_db", "pipeline_v3.sqlite"))
+    target_states = {safe(x) for x in (ccfg.get("target_stage1_states", ["UNRESOLVED", "AMBIGUOUS"]) or []) if safe(x)}
+    max_items = int(args.max_items or ccfg.get("default_max_items", 100) or 100)
+    checkpoint_every = max(1, int(ccfg.get("checkpoint_every", 25) or 25))
+    top_k = max(1, int(ccfg.get("top_k", 5) or 5))
+    auto_accept = bool(ccfg.get("auto_accept", False))
+    auto_margin = float(ccfg.get("auto_accept_margin", 0.10) or 0.10)
+
+    store = TavilyReadOnlyStore(cache_path)
+    result_store = CacheFirstResultStore(db_path)
+    try:
+        catalog = store.catalog()
+        brands = sorted({b for b, _, _ in catalog if safe(b)})
+        brand_index = KnownBrandIndex(brands)
+        retriever = LocalTaxonomyRetriever(rules, cfg)
+        engine = DeterministicEngine(rules, cfg)
+        LOG.info(
+            "CACHE-FIRST START | cache=%d produtos | brands=%d | backend=%s | alvo=%d | 0 Search | 0 LLM",
+            len(catalog), len(brands), retriever.backend, max_items,
+        )
+
+        # Primeiro monta coorte local inteira e faz sampling estável por hash.
+        cohort: List[Tuple[str, RawEvidence, CacheEvidencePack, Stage1Result]] = []
+        scan_stats = defaultdict(int)
+        for brand, model, key in catalog:
+            raw = store.get(brand, model)
+            if raw.state not in {"RAW_OK", "RAW_OK_MERGED"} or not raw.payload:
+                scan_stats["raw_unusable"] += 1
+                continue
+            pack = build_cache_evidence_pack(raw, cfg, brand_index)
+            s1 = engine.classify(brand, model, _cache_first_stage1_payload(pack))
+            scan_stats[f"stage1_{s1.state}"] += 1
+            if target_states and s1.state not in target_states:
+                continue
+            if not pack.query_text:
+                scan_stats["no_query"] += 1
+            cohort.append((key, raw, pack, s1))
+
+        cohort.sort(key=lambda x: hashlib.sha256(x[0].encode("utf-8")).hexdigest())
+        if max_items > 0:
+            cohort = cohort[:max_items]
+        LOG.info(
+            "CACHE-FIRST COHORT READY | selecionados=%d | scanned=%d | unresolved=%d | ambiguous=%d | resolved_rule=%d",
+            len(cohort), len(catalog), scan_stats.get("stage1_UNRESOLVED", 0), scan_stats.get("stage1_AMBIGUOUS", 0), scan_stats.get("stage1_RESOLVED_RULE", 0),
+        )
+
+        rows: List[Dict[str, Any]] = []
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        with evidence_path.open("w", encoding="utf-8") as evf:
+            for idx, (key, raw, pack, s1) in enumerate(cohort, 1):
+                cached = result_store.get(key, raw.raw_hash, rules.hash, retriever.signature)
+                if cached is not None:
+                    result = dict(cached)
+                    result["Checkpoint Cache"] = "SIM"
+                    LOG.info("CACHE-FIRST %03d/%03d | CACHE HIT | %s | %s | decision=%s", idx, len(cohort), pack.brand, pack.model, safe(result.get("Decision")))
+                else:
+                    LOG.info(
+                        "CACHE-FIRST %03d/%03d | START | %s | %s | trusted=%d | context=%d | identity=%s",
+                        idx, len(cohort), pack.brand, pack.model, pack.trusted_count, pack.context_count, pack.best_identity,
+                    )
+                    candidates = retriever.retrieve(pack.query_text, top_k=top_k) if pack.query_text else []
+                    top = candidates[0] if candidates else {}
+                    second = candidates[1] if len(candidates) > 1 else {}
+                    top_score = float(top.get("score", 0.0) or 0.0)
+                    second_score = float(second.get("score", 0.0) or 0.0)
+                    margin = top_score - second_score
+                    power = safe(s1.power) or "UNKNOWN"
+                    best_item = pack.best_item
+                    top_cg = top_fam = top_tax_reason = ""
+                    if top:
+                        top_cg, top_fam, top_tax_reason = _cache_first_candidate_taxonomy(rules, top, power, pack)
+
+                    thresholds = ccfg.get("proposal_thresholds", {}) or {}
+                    proposal_threshold = float(thresholds.get(retriever.backend, thresholds.get("default", 0.20)) or 0.20)
+                    accept_thresholds = ccfg.get("auto_accept_thresholds", {}) or {}
+                    accept_threshold = float(accept_thresholds.get(retriever.backend, accept_thresholds.get("default", 0.80)) or 0.80)
+                    no_conflict = pack.cross_brand_count == 0
+                    strong = pack.best_identity == "STRONG"
+
+                    exact_alias_auto = bool(ccfg.get("exact_alias_auto_accept", True))
+                    matched_phrase = safe(top.get("matched_phrase"))
+                    exact_phrase = bool(matched_phrase and contains_alias(pack.query_text, matched_phrase))
+                    exact_phrase_specific = len(LocalTaxonomyRetriever._meaningful_tokens(matched_phrase)) >= 2
+
+                    if pack.trusted_count == 0:
+                        decision = "CACHE_IDENTITY_GAP"
+                        review = "SIM"
+                    elif not pack.query_text:
+                        decision = "CACHE_INSUFFICIENT"
+                        review = "SIM"
+                    elif not top or top_score < proposal_threshold:
+                        decision = "LOCAL_LOW_SIGNAL"
+                        review = "SIM"
+                    elif exact_alias_auto and strong and no_conflict and exact_phrase and exact_phrase_specific and (top_cg, top_fam) in rules.valid_pairs and (top_cg, top_fam) != ("OTHERS", "OTHERS"):
+                        decision = "LOCAL_EXACT_ALIAS_ACCEPTED"
+                        review = "NÃO"
+                    elif auto_accept and strong and no_conflict and top_score >= accept_threshold and margin >= auto_margin and (top_cg, top_fam) in rules.valid_pairs and (top_cg, top_fam) != ("OTHERS", "OTHERS"):
+                        decision = "LOCAL_SEMANTIC_ACCEPTED"
+                        review = "NÃO"
+                    else:
+                        decision = "LOCAL_SEMANTIC_PROPOSAL"
+                        review = "SIM"
+
+                    cand_text_parts = []
+                    for cand in candidates:
+                        cg, fam, _ = _cache_first_candidate_taxonomy(rules, cand, power, pack)
+                        cand_text_parts.append(f"{safe(cand.get('type'))}:{float(cand.get('score',0) or 0):.3f}->{cg}|{fam} [{safe(cand.get('matched_phrase'))}]")
+
+                    result = {
+                        "Marca": pack.brand,
+                        "Modelo": pack.model,
+                        "Raw State": pack.raw_state,
+                        "Pipeline Version": PIPELINE_VERSION,
+                        "Build": BUILD_LABEL,
+                        "Processed At": now_iso(),
+                        "Stage1 State": s1.state,
+                        "Stage1 Type": safe(s1.product_type),
+                        "Stage1 Power": power,
+                        "Best Identity": pack.best_identity,
+                        "Trusted Sources": pack.trusted_count,
+                        "Context Sources": pack.context_count,
+                        "Cross Brand Sources": pack.cross_brand_count,
+                        "Local Backend": retriever.backend,
+                        "Local Model": retriever.model_id if retriever.backend == "sentence_transformers" else retriever.signature,
+                        "Suggested Type": safe(top.get("type")),
+                        "Matched Taxonomy Phrase": safe(top.get("matched_phrase")),
+                        "Similarity Score": round(top_score, 6),
+                        "Similarity Margin": round(margin, 6),
+                        "Suggested Category General": top_cg,
+                        "Suggested FAMILY": top_fam,
+                        "Taxonomy Reason": top_tax_reason,
+                        "Top Candidates": " ; ".join(cand_text_parts),
+                        "Título Real": _cache_first_product_title(best_item, pack.model),
+                        "Fonte URL": best_item.url if best_item else "",
+                        "Evidence Extract": (best_item.evidence_text[:2200] if best_item else ""),
+                        "Evidence Reason": best_item.reason if best_item else "",
+                        "Decision": decision,
+                        "Review Required": review,
+                        "Checkpoint Cache": "NÃO",
+                    }
+                    result_store.put(key, raw.raw_hash, rules.hash, retriever.signature, result)
+                    LOG.info(
+                        "CACHE-FIRST %03d/%03d | END | decision=%s | suggested=%s | score=%.3f | margin=%.3f | taxonomy=%s|%s",
+                        idx, len(cohort), decision, safe(top.get("type")) or "-", top_score, margin, top_cg or "-", top_fam or "-",
+                    )
+
+                rows.append(result)
+                evidence_payload = {
+                    "brand": pack.brand,
+                    "model": pack.model,
+                    "business_key": pack.business_key,
+                    "raw_hash": pack.raw_hash,
+                    "best_identity": pack.best_identity,
+                    "query_text": pack.query_text,
+                    "sources": [
+                        {
+                            "source_id": x.source_id,
+                            "title": x.title,
+                            "url": x.url,
+                            "identity": x.identity,
+                            "generic_title": x.generic_title,
+                            "cross_brand_conflicts": x.cross_brand_conflicts,
+                            "trusted": x.trusted,
+                            "reason": x.reason,
+                            "evidence_text": x.evidence_text,
+                        }
+                        for x in pack.items
+                    ],
+                }
+                evf.write(json.dumps(evidence_payload, ensure_ascii=False, default=str) + "\n")
+
+                if idx % checkpoint_every == 0:
+                    _cache_first_snapshot(rows, output_path, "RUNNING")
+                    LOG.info("CACHE-FIRST SNAPSHOT | linhas=%d | arquivo=%s", len(rows), output_path)
+
+        _cache_first_snapshot(rows, output_path, "COMPLETED")
+        counts: Dict[str, int] = defaultdict(int)
+        for row in rows:
+            counts[safe(row.get("Decision"))] += 1
+        LOG.info(
+            "CACHE-FIRST CONCLUÍDO | itens=%d | backend=%s | decisions=%s | arquivo=%s | evidence_jsonl=%s",
+            len(rows), retriever.backend, dict(counts), output_path, evidence_path,
+        )
+        LOG.info("BASE FINAL/CONSOLIDADO NÃO FORAM ALTERADOS | Search=0 | LLM/API=0")
+    finally:
+        result_store.close()
+        store.close()
+
+
 def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
     """Executa regressões sintéticas + cobertura dos casos reais validados.
 
@@ -9625,7 +10590,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v3")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "semantic"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "semantic", "cachefirst"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -9679,7 +10644,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     parser = build_parser()
     print("=" * 86)
     print(f" PIPELINE ENRIQUECEDOR DE PRODUTOS {PIPELINE_VERSION} | {BUILD_LABEL}")
-    print(" Search Provider -> Identity -> Target Isolation -> Curated Evidence -> Stage 1 -> Funnel -> NVIDIA/Groq")
+    print(" Search/Cache -> Identity -> Evidence Pack -> Stage 1 -> Local Taxonomy Retrieval -> optional LLM")
     print(" COLLECTION HARD RULE: 1 produto = no máximo 1 request | sem retry/fallback/extract/advanced")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 86)
@@ -9689,8 +10654,9 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
     print("5 - AUDITORIA / REPARO BASE (SEM LLM)")
     print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
-    print("7 - PILOTO DEFINIÇÃO LLM (NÃO ALTERA BASE)")
-    print("8 - SAIR")
+    print("7 - PILOTO DEFINIÇÃO LLM LEGADO/EXPERIMENTAL (NÃO ALTERA BASE)")
+    print("8 - CACHE-FIRST FREE-TIER LOCAL (0 BUSCA / 0 LLM / NÃO ALTERA BASE)")
+    print("9 - SAIR")
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
@@ -9736,14 +10702,23 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
     if op == "7":
-        raw = input("Limite do piloto semântico (ENTER = 10): ").strip()
-        limite = 10
+        raw = input("Limite do piloto LLM legado (ENTER = 5): ").strip()
+        limite = 5
         if raw:
             if raw.isdigit() and int(raw) > 0:
                 limite = int(raw)
             else:
-                print("Valor inválido. Será usado 10.")
+                print("Valor inválido. Será usado 5.")
         return parser.parse_args(["--mode", "semantic", "--max-items", str(limite)])
+    if op == "8":
+        raw = input("Limite do piloto Cache-First local (ENTER = 100): ").strip()
+        limite = 100
+        if raw:
+            if raw.isdigit() and int(raw) > 0:
+                limite = int(raw)
+            else:
+                print("Valor inválido. Será usado 100.")
+        return parser.parse_args(["--mode", "cachefirst", "--max-items", str(limite)])
     raise SystemExit(0)
 
 
@@ -9836,7 +10811,7 @@ def main() -> int:
     if args.mode == "repair":
         run_baseline_repair(args, cfg, rules)
         return 0
-    if args.mode in {"classify", "full", "recover", "semantic"}:
+    if args.mode in {"classify", "full", "recover", "semantic", "cachefirst"}:
         qg = run_quality_gates(rules, cfg)
         LOG.info(
             "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | semantic=%d/%d | classificação liberada",
@@ -9844,6 +10819,9 @@ def main() -> int:
         )
     if args.mode == "semantic":
         run_semantic_pilot(args, cfg, rules)
+        return 0
+    if args.mode == "cachefirst":
+        run_cache_first_free_tier(args, cfg, rules)
         return 0
     if args.mode == "inventory":
         run_pipeline(args, cfg, rules)

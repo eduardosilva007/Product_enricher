@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-29-v3.0.11-r9.6p8.1-product-definition-pilot",
+  "VERSION": "2026-09-30-v3.0.12-r9.7-cache-first-free-tier",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -794,6 +794,22 @@
     {
       "category_general": "OTHERS",
       "family": "OTHERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CROSS FLOW FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PROPELLER FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SOLDERING STATION"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WINDSCREEN WASHER RESERVOIR"
     }
   ],
   "PRODUCT_TYPES": {
@@ -2576,7 +2592,13 @@
         "cooler fan",
         "mist blower",
         "leaf blower",
-        "garden blower"
+        "garden blower",
+        "cross flow fan",
+        "cross-flow fan",
+        "crossflow fan",
+        "tangential fan",
+        "propeller fan",
+        "fan propeller"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -3124,7 +3146,15 @@
         "windshield fluid pump",
         "windscreen fluid pump"
       ],
-      "negative_aliases": [],
+      "negative_aliases": [
+        "windscreen washer reservoir",
+        "windshield washer reservoir",
+        "washer fluid reservoir",
+        "windscreen fluid reservoir",
+        "windshield fluid reservoir",
+        "washer reservoir",
+        "washer fluid tank"
+      ],
       "fallback_pair": [
         "OTHERS",
         "WINDSCREEN WASHER PUMP"
@@ -3226,6 +3256,79 @@
       "fallback_pair": [
         "OTHERS",
         "MIXER"
+      ]
+    },
+    "CROSS FLOW FAN": {
+      "aliases": [
+        "cross flow fan",
+        "cross-flow fan",
+        "crossflow fan",
+        "tangential fan",
+        "ventilador tangencial",
+        "ventilador de flujo cruzado",
+        "ventilador de fluxo cruzado"
+      ],
+      "negative_aliases": [
+        "fan blade",
+        "propeller fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CROSS FLOW FAN"
+      ]
+    },
+    "PROPELLER FAN": {
+      "aliases": [
+        "propeller fan",
+        "fan propeller",
+        "propeller type fan",
+        "ventilador de hélice",
+        "ventilador de helice"
+      ],
+      "negative_aliases": [
+        "fan blade",
+        "propeller blade"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PROPELLER FAN"
+      ]
+    },
+    "SOLDERING STATION": {
+      "aliases": [
+        "soldering station",
+        "temperature controlled soldering station",
+        "digital soldering station",
+        "estação de solda",
+        "estacao de solda",
+        "estación de soldadura",
+        "estacion de soldadura"
+      ],
+      "negative_aliases": [
+        "welding station"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SOLDERING STATION"
+      ]
+    },
+    "WINDSCREEN WASHER RESERVOIR": {
+      "aliases": [
+        "windscreen washer reservoir",
+        "windshield washer reservoir",
+        "washer fluid reservoir",
+        "windscreen fluid reservoir",
+        "windshield fluid reservoir",
+        "washer reservoir",
+        "washer fluid tank"
+      ],
+      "negative_aliases": [
+        "washer pump",
+        "washer nozzle"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WINDSCREEN WASHER RESERVOIR"
       ]
     }
   },
@@ -6396,6 +6499,62 @@
           "power": "UNKNOWN",
           "category_general": "TILLERS",
           "family": "TILLERS"
+        }
+      },
+      {
+        "id": "R97_CROSS_FLOW_FAN",
+        "brand": "TCL",
+        "model": "CF123",
+        "title": "TCL CF123 Cross Flow Fan",
+        "content": "Tangential fan for air conditioner",
+        "url": "https://example.com/TCL-CF123",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "CROSS FLOW FAN",
+          "category_general": "OTHERS",
+          "family": "CROSS FLOW FAN"
+        }
+      },
+      {
+        "id": "R97_PROPELLER_FAN",
+        "brand": "TCL",
+        "model": "PF123",
+        "title": "TCL PF123 Propeller Fan",
+        "content": "Propeller fan assembly",
+        "url": "https://example.com/TCL-PF123",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "PROPELLER FAN",
+          "category_general": "OTHERS",
+          "family": "PROPELLER FAN"
+        }
+      },
+      {
+        "id": "R97_SOLDERING_STATION",
+        "brand": "XYTRONIC",
+        "model": "XY17982",
+        "title": "XYtronic XY17982 Temperature Controlled Soldering Station",
+        "content": "Digital soldering station 60W",
+        "url": "https://example.com/XY17982",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "SOLDERING STATION",
+          "category_general": "OTHERS",
+          "family": "SOLDERING STATION"
+        }
+      },
+      {
+        "id": "R97_WASHER_RESERVOIR",
+        "brand": "RENAULT",
+        "model": "289100774R",
+        "title": "Renault 289100774R Washer Fluid Reservoir",
+        "content": "Windshield washer reservoir with motor",
+        "url": "https://example.com/289100774R",
+        "expect": {
+          "state": "RESOLVED_RULE",
+          "product_type": "WINDSCREEN WASHER RESERVOIR",
+          "category_general": "OTHERS",
+          "family": "WINDSCREEN WASHER RESERVOIR"
         }
       }
     ],
