@@ -1,12 +1,12 @@
 {
-  "VERSION": "2026-09-29-v3.0.10-r9.6p7-import-noise-taxonomy",
+  "VERSION": "2026-10-05-v3.0.11-clef-funnel",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
-    "LLM é somente desempate restrito quando existe candidato determinístico de TYPE; sem candidato de TYPE o item vai para REVISAR sem chamada LLM.",
-    "LLM nunca cria candidato: PRODUCT_TYPE deve pertencer aos candidatos do Stage 1; POWER deve pertencer aos candidatos de power do Stage 1 ou ser UNKNOWN.",
+    "Clef é somente árbitro restrito: candidatos podem vir do Stage 1 determinístico ou do funil semântico BGE sobre labels já existentes no JSON; sem identidade target suficiente o item permanece em REVIEW.",
+    "Nenhum provider cria candidato: PRODUCT_TYPE e Category|FAMILY enviados ao Clef pertencem ao JSON e são reduzidos localmente antes da chamada.",
     "RESOLVED via LLM exige evidência citada que sustente o TYPE e fonte com identidade STRONG (Marca+Modelo no campo primário); source_id sozinho não é prova.",
-    "Category General e FAMILY são sempre determinísticos por TAXONOMY_RULES/fallback_pair; nenhum provider decide taxonomia.",
+    "Category General e FAMILY continuam sob autoridade exclusiva do JSON: o Clef pode apenas arbitrar entre TAXONOMY_PAIRS válidos recuperados pelo funil, nunca criar Category/FAMILY fora da taxonomia.",
     "O que é (Tipo) final só pode ser um PRODUCT_TYPE canônico deste JSON ou REVISAR.",
     "O que é (Tipo) representa o PRIMARY PRODUCT TYPE curto, específico, em inglês e UPPERCASE; não traduzir nem generalizar o tipo identificado.",
     "Tipo, alimentação e taxonomia são etapas independentes; bateria/carregador de kit não substituem o produto principal.",

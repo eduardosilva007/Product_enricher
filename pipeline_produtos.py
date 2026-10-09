@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v3.9.5-hf3.1p7.1 / Collection R9.6p7.1
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.0-clef / Collection R9.6p7
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -9,18 +9,18 @@ Arquitetura:
     Stage 0C - Evidence Enrichment: Tavily raw_content na mesma Search ou fetch local
     Stage 0D - Target Isolation + Collection Quality Gate
     Stage 1 - Regras determinísticas do JSON
-    Stage 1.5 - Candidate Funnel determinístico
-    Stage 2 - NVIDIA (model failover) -> Groq somente para ambiguidade real
-    Stage 3 - Validação estrita e simétrica da saída LLM
-    Stage 4 - Taxonomia determinística do JSON
+    Stage 1.5 - Funil híbrido: regras/aliases + BGE-M3 + BGE reranker
+    Stage 2 - Cloudflare Clef: decisão estruturada de TYPE/POWER/TAXONOMY
+    Stage 3 - Gate local de consistência, confiança e identidade STRONG
+    Stage 4 - AUTO_APROVADO ou REVIEW com rastreabilidade
 
 Princípios:
 - Search RAW do provider selecionado descobre fontes; somente fontes aprovadas no Source Sieve podem ser aprofundadas.
 - regras_negocio.json é a fonte única semântica: regras + quality gates.
 - Stage 1 usa o comportamento comprovado do R5: aliases JSON formam candidatos; resolução automática exige evidência explícita/repetida.
-- O LLM recebe contexto relevante extraído do JSON por produto.
-- O LLM escolhe apenas PRODUCT_TYPE e POWER dentro do contrato fechado.
-- Category General e FAMILY sempre vêm do JSON, nunca do LLM.
+- O funil semântico recupera apenas PRODUCT_TYPEs e pares TAXONOMY_PAIRS já existentes no JSON.
+- Clef escolhe TYPE, POWER e um par Category General|FAMILY dentro do contrato fechado.
+- Clef nunca inventa Category/FAMILY: somente arbitra entre pares válidos do JSON.
 - Status=Manual/Revisão=MANUAL são FULL LOCK.
 - Revisão B.I=OK é HARD LOCK absoluto e vence inclusive --reprocess.
 - Cache/checkpoint são separados por provider/model/prompt/rules/raw_hash.
@@ -51,11 +51,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
 
-PIPELINE_VERSION = "3.9.5-hf3.1p7.1a"
-PROMPT_VERSION = "2026-09-11-v15-evidence-arbiter-funnel"
+PIPELINE_VERSION = "4.0.0-clef"
+PROMPT_VERSION = "2026-10-05-v16-bge-reranker-clef-taxonomy"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-BUILD_LABEL = "v3.9.5-HF3.1p7.1a R9.6 Evidence Retention + Safe Semantic Hints"
-COLLECTION_ENGINE_VERSION = "2026-09-30-r9.6p7.1a-evidence-retention-safe-hints"
+DEFAULT_CLEF_MODEL = "clef"
+BUILD_LABEL = "v4.0 Clef + BGE Funnel + Strong Identity"
+COLLECTION_ENGINE_VERSION = "2026-09-29-r9.6p7-import-noise-taxonomy"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
 
@@ -1393,100 +1394,6 @@ def _target_spans(text: str, model: str, cfg: Dict[str, Any]) -> List[Tuple[int,
     return dedup
 
 
-def _usable_brand_identity_variants(brand: str) -> List[str]:
-    variants: List[str] = []
-    for value in _brand_identity_variants(brand):
-        short_alnum = bool(re.search(r"[a-z]", value) and re.search(r"\d", value))
-        if len(value) >= (2 if short_alnum else 3):
-            variants.append(value)
-    return list(dict.fromkeys(variants))
-
-
-def _brand_near_model_in_text(
-    text: str, brand: str, model: str, suffixes: Sequence[str], radius: int = 420
-) -> bool:
-    """Exige co-localização Marca+Modelo no BODY; evita catálogo multi-marca virar identidade."""
-    hay = strip_accents(unquote(safe(text))).casefold()
-    if not hay:
-        return False
-    brand_variants = _usable_brand_identity_variants(brand)
-    if not brand_variants:
-        return False
-    for compact_variant, _ in _model_identity_variants(model, suffixes):
-        if not compact_variant:
-            continue
-        pat = _model_exact_pattern(compact_variant)
-        for match in pat.finditer(hay):
-            local = hay[max(0, match.start() - radius): min(len(hay), match.end() + radius)]
-            local_c = compact(local)
-            if any(v in local_c for v in brand_variants):
-                return True
-    return False
-
-
-def _target_evidence_window(
-    brand: str, model: str, text: str, cfg: Dict[str, Any], max_chars: int = 5000
-) -> Tuple[str, Dict[str, Any]]:
-    """Retém somente uma janela auditável em torno do SKU, priorizando Marca+Modelo próximos."""
-    raw = safe(text)
-    spans = _target_spans(raw, model, cfg)
-    meta: Dict[str, Any] = {
-        "target_occurrences": len(spans),
-        "brand_near_anchor": False,
-        "window_chars": 0,
-        "anchor_model": safe(model),
-    }
-    if not raw or not spans:
-        return "", meta
-    max_chars = max(1000, int(max_chars or 5000))
-    brand_variants = _usable_brand_identity_variants(brand)
-    best: Optional[Tuple[int, int, str, bool]] = None
-    radius = min(600, max(220, max_chars // 6))
-    for a, b in spans:
-        near = raw[max(0, a - radius): min(len(raw), b + radius)]
-        near_c = compact(near)
-        brand_near = any(v in near_c for v in brand_variants) if brand_variants else False
-        half = max_chars // 2
-        left = max(0, a - half)
-        right = min(len(raw), left + max_chars)
-        left = max(0, right - max_chars)
-        window = raw[left:right].strip()
-        score = 1 if brand_near else 0
-        candidate = (score, -a, window, brand_near)
-        if best is None or candidate[:2] > best[:2]:
-            best = candidate
-    if best is None:
-        return "", meta
-    window = best[2]
-    meta["brand_near_anchor"] = bool(best[3])
-    meta["window_chars"] = len(window)
-    return window, meta
-
-
-def _body_identity_rescue_for_result(
-    brand: str, model: str, row: Dict[str, Any], cfg: Dict[str, Any], policy: Dict[str, Any]
-) -> Tuple[Optional[Dict[str, Any]], str, Dict[str, Any]]:
-    """Resgata somente BODY target-anchored com Marca+Modelo próximos; nunca modelo sozinho."""
-    rcfg = policy.get("body_identity_rescue", {}) or {}
-    if not bool(rcfg.get("enabled", True)):
-        return None, "BODY_RESCUE_DISABLED", {}
-    raw_content = safe(row.get("raw_content")) or safe(row.get("_target_evidence_window"))
-    if not raw_content:
-        return None, "BODY_RESCUE_NO_RAW_CONTENT", {}
-    window_chars = max(1000, int(rcfg.get("identity_window_chars", 2400) or 2400))
-    window, meta = _target_evidence_window(brand, model, raw_content, cfg, window_chars)
-    if not window:
-        return None, "BODY_RESCUE_TARGET_NOT_FOUND", meta
-    if bool(rcfg.get("require_brand_near_model", True)) and not bool(meta.get("brand_near_anchor")):
-        return None, "BODY_RESCUE_BRAND_NOT_NEAR_MODEL", meta
-    probe = dict(row)
-    probe["content"] = window
-    identity = _source_identity_for_result(brand, model, probe, cfg)
-    if identity.get("level") not in {"STRONG", "PROBABLE"}:
-        return None, f"BODY_RESCUE_IDENTITY_{identity.get('level', 'WEAK')}", meta
-    return identity, "BODY_RESCUE_ACCEPTED", meta
-
-
 def _looks_like_other_sku_token(token: str, start: int, text: str, model: str, policy: Dict[str, Any]) -> bool:
     raw = safe(token).upper().strip(".,:;()[]{}")
     compact_token = compact(raw)
@@ -2022,65 +1929,36 @@ def _source_sieve(
     for row in rows:
         if not isinstance(row, dict):
             continue
-        identity_initial = _source_identity_for_result(brand, search_model, row, cfg)
-        identity = dict(identity_initial)
+        identity = _source_identity_for_result(brand, search_model, row, cfg)
         title = safe(row.get("title"))
         snippet = safe(row.get("content"))
         url = safe(row.get("url"))
         search_text = f"{title}\n{snippet}".strip()
-        purpose_text = search_text
         flags: List[str] = []
-        rescue_reason = ""
-        rescue_meta: Dict[str, Any] = {}
-        identity_basis = "PRIMARY_SEARCH_FIELDS"
 
-        if identity["level"] not in {"STRONG", "PROBABLE"}:
-            rescued, rescue_reason, rescue_meta = _body_identity_rescue_for_result(
-                brand, search_model, row, cfg, policy
-            )
-            if rescued is not None:
-                identity = rescued
-                identity_basis = "RAW_TARGET_WINDOW_BRAND_MODEL"
-                raw_text = safe(row.get("raw_content")) or safe(row.get("_target_evidence_window"))
-                body_window, _ = _target_evidence_window(
-                    brand, search_model, raw_text, cfg,
-                    int((policy.get("body_identity_rescue", {}) or {}).get("identity_window_chars", 2400) or 2400),
-                )
-                purpose_text = f"{title}\n{snippet}\n{body_window}".strip()
-                flags.append("BODY_IDENTITY_RESCUE")
-
-        decision = "ACCEPT_SOURCE_SIEVE_BODY_RESCUE" if identity_basis == "RAW_TARGET_WINDOW_BRAND_MODEL" else "ACCEPT_SOURCE_SIEVE"
-        reason = (
-            "Identidade target PROBABLE resgatada no BODY com Marca+Modelo próximos"
-            if identity_basis == "RAW_TARGET_WINDOW_BRAND_MODEL"
-            else "Identidade target STRONG/PROBABLE e sem propósito negativo detectado"
-        )
+        decision = "ACCEPT_SOURCE_SIEVE"
+        reason = "Identidade target STRONG/PROBABLE e sem propósito negativo detectado"
         if identity["level"] not in {"STRONG", "PROBABLE"}:
             decision = "REJECT_WEAK_IDENTITY"
-            reason = f"Identity={identity['level']} abaixo de PROBABLE; {rescue_reason or 'sem body rescue'}"
-        elif _target_context_has_only_relation(purpose_text, search_model, cfg, compatibility, window=180):
+            reason = f"Identity={identity['level']} abaixo de PROBABLE"
+        elif _target_context_has_only_relation(search_text, search_model, cfg, compatibility, window=180):
             decision = "REJECT_COMPATIBILITY_ONLY"
             reason = "Marca/Modelo aparecem em contexto de compatibilidade/substituição"
             flags.append("COMPATIBILITY_ONLY")
-        elif _target_context_has_only_relation(purpose_text, search_model, cfg, related, window=180):
+        elif _target_context_has_only_relation(search_text, search_model, cfg, related, window=180):
             decision = "REJECT_RELATED_ONLY"
             reason = "Marca/Modelo aparecem em contexto de related/similar products"
             flags.append("RELATED_ONLY")
 
-        if _term_present(f"{title}\n{url}\n{snippet}\n{purpose_text[:1200]}", generic):
+        if _term_present(f"{title}\n{url}\n{snippet}", generic):
             flags.append("GENERIC_PAGE_SIGNAL")
 
         audit = {
             "url": url,
             "title": title,
             "tavily_score": row.get("score"),
-            "identity_before": identity_initial["level"],
-            "model_match_field_before": identity_initial["model_match_field"],
-            "identity_after_sieve": identity["level"],
-            "identity_basis": identity_basis,
-            "body_identity_rescue_reason": rescue_reason,
-            "body_identity_rescue_brand_near": bool(rescue_meta.get("brand_near_anchor")),
-            "body_identity_rescue_occurrences": int(rescue_meta.get("target_occurrences", 0) or 0),
+            "identity_before": identity["level"],
+            "model_match_field_before": identity["model_match_field"],
             "sieve_decision": decision,
             "sieve_reason": reason,
             "decision": decision,
@@ -2099,7 +1977,6 @@ def _source_sieve(
         if decision.startswith("ACCEPT_"):
             row2 = dict(row)
             row2["_collection_identity"] = identity["level"]
-            row2["_collection_identity_basis"] = identity_basis
             row2["_sieve_audit_index"] = len(audits) - 1
             accepted.append(row2)
 
@@ -2269,29 +2146,6 @@ def _curate_after_source_sieve(
             evidence_text = snippet
 
         evidence_text = _cap_evidence_text(evidence_text, search_model, cfg)
-
-        # R9.6p7.1: preserve a bounded target-anchored window from ANY enriched
-        # evidence (including Serper/Bright Data local fetch). This survives even
-        # when Target Isolation later rejects the source, allowing option 6/rule
-        # changes to re-evaluate the evidence without another Search request.
-        if evidence_text and evidence_mode != "SEARCH_SNIPPET":
-            persistence_cfg = policy.get("persistence", {}) or {}
-            keep_chars = max(1000, int(persistence_cfg.get("target_evidence_window_chars", 5000) or 5000))
-            remembered_window, remembered_meta = _target_evidence_window(
-                brand, search_model, evidence_text, cfg, keep_chars
-            )
-            if remembered_window:
-                original_key = _url_key(res.get("url", ""))
-                for original in search_results:
-                    if not isinstance(original, dict):
-                        continue
-                    if _url_key(original.get("url", "")) != original_key:
-                        continue
-                    original["_target_evidence_window"] = remembered_window
-                    original["_target_evidence_meta"] = remembered_meta
-                    original["_target_evidence_source"] = evidence_mode
-                    break
-
         isolation = _isolate_target_block(
             brand, search_model, safe(res.get("title")), safe(res.get("url")),
             evidence_text if evidence_mode != "SEARCH_SNIPPET" else "",
@@ -2314,7 +2168,6 @@ def _curate_after_source_sieve(
         if decision.startswith("ACCEPT_"):
             row = _make_curated_result(res, isolation, evidence_mode, evidence_mode)
             row["_collection_identity"] = safe(res.get("_collection_identity"))
-            row["_collection_identity_basis"] = safe(res.get("_collection_identity_basis"))
             row["raw_content"] = None
             curated.append(row)
 
@@ -2572,42 +2425,13 @@ def search_product_once(
         "raw_content_requested": bool(usage.get("raw_content_requested")),
     }]
 
-    # Não persistimos raw_content integral, mas preservamos uma janela auditável
-    # target-anchored para que mudanças futuras de regra possam reavaliar a fonte
-    # sem gastar nova Search. O conteúdo integral continua descartado.
-    persistence_cfg = policy.get("persistence", {}) or {}
-    persist_window = bool(persistence_cfg.get("persist_target_evidence_window", True))
-    target_window_chars = max(1000, int(persistence_cfg.get("target_evidence_window_chars", 5000) or 5000))
+    # Não persistir raw_content integral da Tavily no RAW cache: ele pode ser muito
+    # grande. O trecho target-isolado já está em curated_results e é suficiente para
+    # classificação/auditoria. Mantemos apenas o indicador de disponibilidade.
     persisted_results: List[Dict[str, Any]] = []
     for row in normalized:
         r = dict(row)
-        raw_text = safe(r.get("raw_content"))
-        r["_raw_content_available"] = bool(raw_text)
-
-        # A janela pode ter vindo do raw_content da Tavily OU de enriquecimento
-        # local de Serper/Bright Data. Nunca apaga uma janela já lembrada.
-        target_window = safe(r.get("_target_evidence_window"))
-        target_meta = r.get("_target_evidence_meta") if isinstance(r.get("_target_evidence_meta"), dict) else {}
-        target_source = safe(r.get("_target_evidence_source"))
-        if not target_meta:
-            target_meta = {
-                "target_occurrences": 0, "brand_near_anchor": False, "window_chars": len(target_window),
-                "anchor_model": search_model,
-            }
-        if persist_window and raw_text:
-            raw_window, raw_meta = _target_evidence_window(
-                brand, search_model, raw_text, cfg, target_window_chars
-            )
-            if raw_window:
-                target_window, target_meta = raw_window, raw_meta
-                target_source = "TAVILY_SEARCH_RAW_CONTENT"
-        r["_target_evidence_window"] = target_window
-        r["_target_evidence_meta"] = target_meta
-        r["_target_evidence_source"] = target_source
-        r["_raw_persistence_state"] = (
-            "TARGET_WINDOW_PERSISTED" if target_window
-            else ("RAW_AVAILABLE_NO_TARGET_WINDOW" if raw_text else "RAW_NOT_AVAILABLE")
-        )
+        r["_raw_content_available"] = bool(safe(r.get("raw_content")))
         r["raw_content"] = None
         persisted_results.append(r)
 
@@ -2687,34 +2511,22 @@ def _curate_existing_payload(brand: str, model: str, payload: Dict[str, Any], cf
     for res in raw_results:
         identity = _source_identity_for_result(brand, search_model, res, cfg)
         raw_content = safe(res.get("raw_content"))
-        stored_window = safe(res.get("_target_evidence_window"))
-        evidence_body = raw_content or stored_window
-        if raw_content:
-            cache_depth = "CACHE_RAW"
-        elif stored_window:
-            cache_depth = "CACHE_TARGET_WINDOW"
-        else:
-            cache_depth = "CACHE_SNIPPET_ONLY"
         isolation = _isolate_target_block(
             brand, search_model, safe(res.get("title")), safe(res.get("url")),
-            evidence_body, safe(res.get("content")), cfg, policy,
+            raw_content, safe(res.get("content")), cfg, policy,
         )
         decision = safe(isolation.get("decision"))
         if decision.startswith("ACCEPT_"):
-            row = _make_curated_result(res, isolation, cache_depth, "CACHE_REBUILD_NO_TAVILY")
+            row = _make_curated_result(res, isolation, "CACHE_RAW", "CACHE_REBUILD_NO_TAVILY")
             row["_collection_identity"] = _source_identity_for_result(brand, search_model, row, cfg)["level"]
-            row["_collection_identity_basis"] = (
-                "PERSISTED_TARGET_WINDOW" if stored_window and not raw_content else "CACHE_REBUILD"
-            )
             curated.append(row)
         audit.append({
             "url": safe(res.get("url")), "title": safe(res.get("title")), "tavily_score": res.get("score"),
             "identity_before": identity["level"], "model_match_field_before": identity["model_match_field"],
             "decision": decision, "reason": safe(isolation.get("reason")),
             "quality_flags": list(isolation.get("flags", []) or []), "other_skus": list(isolation.get("other_skus", []) or []),
-            "isolated_chars": len(safe(isolation.get("content"))), "extract_depth": cache_depth,
+            "isolated_chars": len(safe(isolation.get("content"))), "extract_depth": "CACHE_RAW",
             "source_mode": "CACHE_REBUILD_NO_TAVILY",
-            "raw_persistence_state": safe(res.get("_raw_persistence_state")),
         })
     curated = _dedupe_curated(curated)
     curated.sort(key=lambda x: (safe(x.get("_collection_identity")) != "STRONG", -float(x.get("score", 0) or 0)))
@@ -3147,9 +2959,6 @@ class Stage1Result:
     best_source_score: int = 0
     identity_best: str = "WEAK"
     conflict_count: int = 0
-    # Informational hints are deliberately outside AUTO/LLM identity gates.
-    review_type_hints: List[str] = field(default_factory=list)
-    review_hint_evidence: Dict[str, List[str]] = field(default_factory=dict)
 
 
 def _weighted_stats(scores: Dict[str, float]) -> Tuple[str, float, float, str]:
@@ -3353,9 +3162,6 @@ def _source_identity_baseline(
 
     primary_model = model_field in {"TITLE", "URL"}
     body_model = model_field == "BODY"
-    brand_near_body_model = bool(
-        body_model and _brand_near_model_in_text(content, brand, model, suffixes, radius=420)
-    )
     core_model = compact(_model_identity_norm(model))
     numeric_short = bool(core_model.isdigit() and len(core_model) <= 5)
     short_ambiguous = bool(core_model and len(core_model) <= max(1, int(short_model_requires_brand_length or 5)))
@@ -3368,10 +3174,6 @@ def _source_identity_baseline(
         level, score, weight = "PROBABLE", 85, 0.80
     elif body_model and brand_primary:
         level, score, weight = "PROBABLE", 78, 0.72
-    elif body_model and brand_near_body_model:
-        # R9.6p7.1: raw/body só sobe quando Marca+Modelo estão co-localizados.
-        # Continua PROBABLE (não STRONG), portanto nunca vence o hard gate de AUTO.
-        level, score, weight = "PROBABLE", 76, 0.70
     elif body_model and brand_any:
         level, score, weight = "CONTEXTUAL", 60, 0.45
     elif brand_primary:
@@ -3513,89 +3315,6 @@ class DeterministicEngine:
                 collection_source_mode=safe(res.get("_collection_source_mode")),
             ))
         return out
-
-    def _review_type_hints(self, brand: str, model: str, payload: Dict[str, Any]) -> Dict[str, List[str]]:
-        """Extract TYPE hints from MODEL and raw Search TITLES without granting identity.
-
-        These hints exist to avoid throwing away obvious lexical information such
-        as "INK PUMP", "CYCLON MINI FAN" or "Centrifugal Pumps". They may
-        populate review candidates/taxonomy, but never satisfy STRONG identity and
-        therefore cannot auto-approve or pass the final LLM resolution gate alone.
-        """
-        hints: Dict[str, List[str]] = defaultdict(list)
-        collection = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
-        hard_rejects = {
-            "REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY",
-            "REJECT_QUERY_IDENTITY_DRIFT",
-        }
-        audit_by_url: Dict[str, str] = {}
-        for row in (collection.get("source_audit", []) or []):
-            if not isinstance(row, dict):
-                continue
-            key = _url_key(row.get("url", ""))
-            if key:
-                audit_by_url[key] = safe(row.get("decision"))
-
-        def collect(label: str, text: str) -> None:
-            value = safe(text)
-            if not value:
-                return
-            probe = Source(
-                source_id=0, title=value, content="", url="", relevance="WEAK",
-                quality_flags=[], identity_score=0, model_match="NONE",
-                model_match_field="NONE", source_weight=0.0,
-                collection_decision="REVIEW_HINT_ONLY",
-            )
-            hits, fields = self._type_hits_for_source(probe, brand, model)
-
-            # Review-only plural tolerance. Production aliases remain untouched;
-            # this only catches obvious title morphology such as
-            # "centrifugal pumps" when the JSON alias is "centrifugal pump".
-            folded_value = norm_text(value)
-            for typ, data in self.rules.types.items():
-                if typ in hits:
-                    continue
-                for alias in (data.get("aliases", []) or []):
-                    alias_n = norm_text(alias)
-                    parts = alias_n.split()
-                    if not parts:
-                        continue
-                    last = parts[-1]
-                    variants: List[str] = []
-                    if len(last) >= 3 and not last.endswith("s"):
-                        variants.append(" ".join(parts[:-1] + [last + "s"]))
-                        if last.endswith(("ch", "sh", "x", "z")):
-                            variants.append(" ".join(parts[:-1] + [last + "es"]))
-                        if len(last) > 3 and last.endswith("y") and len(last) >= 2 and last[-2] not in "aeiou":
-                            variants.append(" ".join(parts[:-1] + [last[:-1] + "ies"]))
-                    if any(contains_alias_prepared(folded_value, v) for v in variants):
-                        if not self._collision_allows(typ, alias):
-                            continue
-                        hits.setdefault(typ, []).append(f"[REVIEW_PLURAL:{alias}]")
-                        fields.setdefault(typ, []).append("TITLE")
-                        break
-
-            for typ in hits:
-                # MODEL/TITLE hints are lexical suggestions only.
-                if "TITLE" not in set(fields.get(typ, []) or []) and "MODEL_RULE" not in set(fields.get(typ, []) or []):
-                    continue
-                evidence = f"{label}:{value[:240]}"
-                if evidence not in hints[typ]:
-                    hints[typ].append(evidence)
-
-        collect("MODEL", model)
-        for res in (payload.get("results", []) or []):
-            if not isinstance(res, dict):
-                continue
-            title = safe(res.get("title"))
-            if not title:
-                continue
-            decision = audit_by_url.get(_url_key(res.get("url", "")), "")
-            if decision in hard_rejects:
-                continue
-            collect("TITLE", title)
-
-        return dict(hints)
 
     def _collision_allows(self, typ: str, alias: str) -> bool:
         normalized = norm_text(alias)
@@ -3822,12 +3541,7 @@ class DeterministicEngine:
             for power in anchored_powers:
                 all_power_hits[power].append(src.source_id)
 
-        # Core Stage 1 candidates remain based ONLY on target-anchored evidence.
-        # MODEL/TITLE hints are kept on a separate review track so they cannot
-        # create ambiguity, resolve TYPE, or enter the LLM funnel.
         type_candidates = self._apply_specificity(all_type_hits.keys())
-        review_hint_evidence = self._review_type_hints(brand, model, payload)
-        review_type_hints = self._apply_specificity(review_hint_evidence.keys())
         power_candidates = sorted(all_power_hits.keys())
         # Após especificidade, métricas só consideram candidatos sobreviventes.
         type_support = {t: len(set(all_type_hits.get(t, []))) for t in type_candidates}
@@ -3843,8 +3557,6 @@ class DeterministicEngine:
         }
         _, power_share, power_margin, _ = _weighted_stats(power_scores)
         reasons: List[str] = []
-        if review_type_hints:
-            reasons.append("REVIEW_TYPE_HINTS:" + ",".join(review_type_hints))
 
         product_type: Optional[str] = None
         if len(type_candidates) == 1:
@@ -3930,8 +3642,6 @@ class DeterministicEngine:
             best_source_score=best_source_score,
             identity_best=identity_best,
             conflict_count=0,
-            review_type_hints=review_type_hints,
-            review_hint_evidence=review_hint_evidence,
         )
 
 
@@ -4352,6 +4062,823 @@ class DualWindowLimiter:
             )
             time.sleep(wait_for)
 
+
+
+# -----------------------------------------------------------------------------
+# Stage 1.5 semântico + Stage 2 Cloudflare Clef
+# -----------------------------------------------------------------------------
+
+def _unit_score(value: Any) -> float:
+    """Normaliza probability/confidence para [0, 1], tolerando APIs que retornem %."""
+    try:
+        x = float(value)
+    except Exception:
+        return 0.0
+    if x > 1.0 and x <= 100.0:
+        x /= 100.0
+    return max(0.0, min(1.0, x))
+
+
+def _taxonomy_pairs_for_type(rules: Rules, product_type: str) -> set:
+    """Todos os pares Category|FAMILY declarados pelo JSON para um PRODUCT_TYPE."""
+    typ = safe(product_type)
+    pairs = set()
+    for row in rules.taxonomy_rules:
+        if safe(row.get("primary_type")) != typ:
+            continue
+        pair = (safe(row.get("category_general")), safe(row.get("family")))
+        if pair in rules.valid_pairs:
+            pairs.add(pair)
+    for row in rules.taxonomy_evidence_rules:
+        if safe(row.get("primary_type")) != typ:
+            continue
+        pair = (safe(row.get("category_general")), safe(row.get("family")))
+        if pair in rules.valid_pairs:
+            pairs.add(pair)
+    fb = (rules.types.get(typ, {}) or {}).get("fallback_pair")
+    if isinstance(fb, list) and len(fb) >= 2:
+        pair = (safe(fb[0]), safe(fb[1]))
+        if pair in rules.valid_pairs:
+            pairs.add(pair)
+    return pairs
+
+
+def _pair_label(pair: Tuple[str, str]) -> str:
+    return f"{safe(pair[0])} | {safe(pair[1])}"
+
+
+def _split_pair_label(value: str) -> Tuple[str, str]:
+    raw = safe(value)
+    if "|" not in raw:
+        return "", ""
+    a, b = raw.split("|", 1)
+    return safe(a), safe(b)
+
+
+def _clef_preflight_rejection_reason(rules: Rules, s1: Stage1Result) -> str:
+    """Clef pode recuperar candidatos sem alias, mas não pode superar falta de identidade."""
+    rank = DeterministicEngine.IDENTITY_RANK
+    target_sources = [
+        src for src in s1.sources
+        if rank.get(src.relevance, 0) >= rank.get("PROBABLE", 3)
+    ]
+    if not target_sources:
+        return "LOW_TARGET_EVIDENCE"
+    if multi_product_target_detected(rules, s1):
+        return "MULTI_PRODUCT_TARGET"
+    return ""
+
+
+class ClefFunnelClassifier:
+    """Funil semântico local + decisão estruturada Cloudflare Clef.
+
+    Função de cada camada:
+    - Stage 1 existente: aliases/regras exatas do JSON;
+    - BGE-M3: amplia recall de candidatos sem criar labels fora do JSON;
+    - BGE reranker: reduz ruído para poucos candidatos plausíveis;
+    - Clef: escolhe TYPE, POWER e Category|FAMILY entre opções fechadas.
+
+    O GOLD nunca participa de candidate generation ou decisão.
+    """
+
+    provider = "clef"
+
+    def __init__(
+        self,
+        rules: Rules,
+        cfg: Dict[str, Any],
+        db: ClassificationDB,
+        provider: str = "clef",
+        model: str = DEFAULT_CLEF_MODEL,
+    ):
+        self.rules = rules
+        self.cfg = cfg
+        self.db = db
+        self.provider = "clef"
+        self.model = safe(model) or DEFAULT_CLEF_MODEL
+        self.ccfg = cfg.get("clef", {}) or {}
+        self.fcfg = cfg.get("semantic_funnel", {}) or {}
+
+        self.account_id_env = safe(self.ccfg.get("account_id_env")) or "CLOUDFLARE_ACCOUNT_ID"
+        self.api_key_env = safe(self.ccfg.get("api_token_env")) or "CLOUDFLARE_API_TOKEN"
+        self.operational_requests_per_minute = float(
+            self.ccfg.get("operational_requests_per_minute", 10.0) or 10.0
+        )
+        self.limiter = RateLimiter(self.operational_requests_per_minute)
+        self.timeout_seconds = int(self.ccfg.get("timeout_seconds", 90) or 90)
+        self.retry_attempts = max(1, int(self.ccfg.get("retry_attempts", 3) or 3))
+        self.retry_backoff_seconds = [
+            float(x) for x in (self.ccfg.get("retry_backoff_seconds", [2, 5, 10]) or [2, 5, 10])
+        ]
+        self.max_calls_per_run = max(0, int(self.ccfg.get("max_api_calls_per_run", 0) or 0))
+        self.max_total_tokens_per_run = max(0, int(self.ccfg.get("max_total_tokens_per_run", 0) or 0))
+
+        # Atributos mantidos para compatibilidade com logs do ProviderCascade.
+        self.max_output_tokens = 0
+        self.json_retry_max_completion_tokens = 0
+        self.account_requests_per_minute = 0
+        self.account_tokens_per_minute = 0
+        self.requests_per_day = 0
+        self.tokens_per_day = 0
+
+        self.embedding_model_name = safe(self.fcfg.get("embedding_model")) or "BAAI/bge-m3"
+        self.reranker_model_name = safe(self.fcfg.get("reranker_model")) or "BAAI/bge-reranker-v2-m3"
+        self.embedding_batch_size = max(1, int(self.fcfg.get("embedding_batch_size", 16) or 16))
+        self.rerank_batch_size = max(1, int(self.fcfg.get("rerank_batch_size", 4) or 4))
+        self.type_dense_k = max(4, int(self.fcfg.get("type_dense_k", 20) or 20))
+        self.type_pool_k = max(self.type_dense_k, int(self.fcfg.get("type_pool_k", 24) or 24))
+        self.type_top_k = max(3, int(self.fcfg.get("type_top_k", 8) or 8))
+        self.taxonomy_dense_k = max(4, int(self.fcfg.get("taxonomy_dense_k", 20) or 20))
+        self.taxonomy_pool_k = max(self.taxonomy_dense_k, int(self.fcfg.get("taxonomy_pool_k", 30) or 30))
+        self.taxonomy_top_k = max(3, int(self.fcfg.get("taxonomy_top_k", 8) or 8))
+        self.max_sources = max(1, int(self.fcfg.get("max_sources", 5) or 5))
+        self.source_chars = max(200, int(self.fcfg.get("source_chars", 900) or 900))
+        self.max_evidence_chars = max(1200, int(self.fcfg.get("max_evidence_chars", 6000) or 6000))
+        self.embedding_device_cfg = safe(self.fcfg.get("embedding_device")) or "cpu"
+        self.reranker_device_cfg = safe(self.fcfg.get("reranker_device")) or "auto"
+
+        self.api_calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+
+        self._torch = None
+        self._embedder = None
+        self._reranker_tokenizer = None
+        self._reranker = None
+        self._type_doc_embeddings = None
+        self._taxonomy_doc_embeddings = None
+
+        self.type_labels = sorted(self.rules.types.keys())
+        self.type_docs = {typ: self._type_document(typ) for typ in self.type_labels}
+        self.taxonomy_profiles = self._build_taxonomy_profiles()
+        self.taxonomy_labels = sorted(self.taxonomy_profiles.keys())
+        self.taxonomy_docs = {
+            label: self._taxonomy_document(label) for label in self.taxonomy_labels
+        }
+        self.cache_model_id = (
+            f"{self.model}|{self.embedding_model_name}|{self.reranker_model_name}"
+            f"|type{self.type_top_k}|tax{self.taxonomy_top_k}"
+        )
+
+        account_id = os.getenv(self.account_id_env, "").strip()
+        slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
+        self.base_url = (
+            f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
+            if account_id else
+            f"https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/{slug}"
+        )
+
+    def route_identity_fragment(self) -> str:
+        return (
+            f"clef:{self.model}+embed:{self.embedding_model_name}"
+            f"+rerank:{self.reranker_model_name}"
+        )
+
+    def preflight(self) -> Dict[str, Any]:
+        missing = []
+        for mod in ["requests", "torch", "sentence_transformers", "transformers"]:
+            try:
+                __import__(mod)
+            except ImportError:
+                missing.append(mod)
+        if missing:
+            raise OperationalPause(
+                "CLEF_FUNNEL_DEPENDENCY_MISSING",
+                "Dependências ausentes: " + ", ".join(missing),
+            )
+        if not os.getenv(self.account_id_env, "").strip():
+            raise OperationalPause(
+                "CLEF_ACCOUNT_ID_MISSING",
+                f"{self.account_id_env} não configurada no .env.",
+            )
+        if not os.getenv(self.api_key_env, "").strip():
+            # Compatibilidade com o nome legado já usado nos testes.
+            fallback = os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
+            if not fallback:
+                raise OperationalPause(
+                    "CLEF_API_TOKEN_MISSING",
+                    f"{self.api_key_env} não configurada no .env.",
+                )
+        account_id = os.getenv(self.account_id_env, "").strip()
+        slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
+        self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "base_url": self.base_url,
+            "operational_rpm": self.operational_requests_per_minute,
+            "account_rpm": 0,
+            "account_tpm": 0,
+            "requests_per_day": 0,
+            "tokens_per_day": 0,
+            "run_cap": self.max_calls_per_run,
+            "token_cap": self.max_total_tokens_per_run,
+            "model_discovery": None,
+        }
+
+    @staticmethod
+    def _resolve_device(requested: str, torch_module) -> str:
+        req = safe(requested).casefold()
+        if req in {"cpu", "cuda"}:
+            if req == "cuda" and not torch_module.cuda.is_available():
+                return "cpu"
+            return req
+        return "cuda" if torch_module.cuda.is_available() else "cpu"
+
+    def _type_document(self, typ: str) -> str:
+        meta = self.rules.types.get(typ, {}) or {}
+        aliases = [safe(x) for x in (meta.get("aliases", []) or []) if safe(x)][:20]
+        pair_names = sorted(_pair_label(x) for x in _taxonomy_pairs_for_type(self.rules, typ))
+        chunks = [f"Canonical physical product type: {typ}."]
+        if aliases:
+            chunks.append("Known names and aliases: " + "; ".join(aliases) + ".")
+        if pair_names:
+            chunks.append("Business taxonomy mappings: " + "; ".join(pair_names) + ".")
+        return " ".join(chunks)
+
+    def _build_taxonomy_profiles(self) -> Dict[str, Dict[str, Any]]:
+        profiles: Dict[str, Dict[str, Any]] = {}
+        for pair in sorted(self.rules.valid_pairs):
+            if not pair[0] or not pair[1] or pair == ("OTHERS", "OTHERS"):
+                continue
+            label = _pair_label(pair)
+            profiles[label] = {
+                "category": pair[0], "family": pair[1],
+                "types": set(), "aliases": set(), "evidence_aliases": set(),
+                "negative_aliases": set(), "powers": set(),
+            }
+
+        for row in self.rules.taxonomy_rules:
+            pair = (safe(row.get("category_general")), safe(row.get("family")))
+            label = _pair_label(pair)
+            if label not in profiles:
+                continue
+            typ = safe(row.get("primary_type"))
+            power = safe(row.get("power"))
+            if typ:
+                profiles[label]["types"].add(typ)
+            if power and power != "*":
+                profiles[label]["powers"].add(power)
+
+        for typ, meta in self.rules.types.items():
+            for pair in _taxonomy_pairs_for_type(self.rules, typ):
+                label = _pair_label(pair)
+                if label not in profiles:
+                    continue
+                profiles[label]["types"].add(typ)
+                for a in (meta.get("aliases", []) or []):
+                    if safe(a):
+                        profiles[label]["aliases"].add(safe(a))
+                for a in (meta.get("negative_aliases", []) or []):
+                    if safe(a):
+                        profiles[label]["negative_aliases"].add(safe(a))
+
+        for row in self.rules.taxonomy_evidence_rules:
+            pair = (safe(row.get("category_general")), safe(row.get("family")))
+            label = _pair_label(pair)
+            if label not in profiles:
+                continue
+            typ = safe(row.get("primary_type"))
+            if typ:
+                profiles[label]["types"].add(typ)
+            for a in (row.get("aliases", []) or []):
+                if safe(a):
+                    profiles[label]["evidence_aliases"].add(safe(a))
+            for a in (row.get("negative_aliases", []) or []):
+                if safe(a):
+                    profiles[label]["negative_aliases"].add(safe(a))
+        return profiles
+
+    def _taxonomy_document(self, label: str) -> str:
+        p = self.taxonomy_profiles[label]
+        chunks = [
+            f"Category General: {p['category']}.",
+            f"FAMILY: {p['family']}.",
+        ]
+        if p["types"]:
+            chunks.append("Mapped physical product types: " + "; ".join(sorted(p["types"])) + ".")
+        aliases = sorted(p["aliases"], key=lambda x: (-len(norm_text(x).split()), x))[:24]
+        if aliases:
+            chunks.append("Aliases: " + "; ".join(aliases) + ".")
+        evid = sorted(p["evidence_aliases"], key=lambda x: (-len(norm_text(x).split()), x))[:20]
+        if evid:
+            chunks.append("Subtype evidence terms: " + "; ".join(evid) + ".")
+        if p["powers"]:
+            chunks.append("Power mappings: " + "; ".join(sorted(p["powers"])) + ".")
+        return " ".join(chunks)
+
+    def _evidence_text(self, brand: str, model: str, s1: Stage1Result) -> Tuple[str, List[int]]:
+        rank = DeterministicEngine.IDENTITY_RANK
+        ordered = sorted(
+            s1.sources,
+            key=lambda src: (
+                rank.get(src.relevance, 0),
+                src.identity_score,
+                src.source_weight,
+                float(src.tavily_score or 0.0),
+            ),
+            reverse=True,
+        )[: self.max_sources]
+        chunks = [f"TARGET BRAND: {brand}", f"TARGET MODEL: {model}"]
+        refs: List[int] = []
+        for src in ordered:
+            refs.append(src.source_id)
+            content = safe(src.content)[: self.source_chars]
+            chunks.append(
+                f"SOURCE {src.source_id} [identity={src.relevance}; model_field={src.model_match_field}; "
+                f"collection={src.collection_decision or src.collection_source_mode}]: "
+                f"TITLE={safe(src.title)}\nCONTENT={content}"
+            )
+        raw = "\n\n".join(chunks)
+        return raw[: self.max_evidence_chars], refs
+
+    @staticmethod
+    def _phrase_score(text_folded: str, phrase: str, strong: float) -> float:
+        phrase = safe(phrase)
+        if not phrase:
+            return 0.0
+        if contains_alias_prepared(text_folded, phrase):
+            return strong + min(5, len(norm_text(phrase).split())) * 4.0
+        p_tokens = set(norm_text(phrase).split())
+        t_tokens = set(norm_text(text_folded).split())
+        if not p_tokens:
+            return 0.0
+        cov = len(p_tokens & t_tokens) / len(p_tokens)
+        if len(p_tokens) == 1 and cov == 1:
+            return strong * 0.28
+        if cov >= 1.0:
+            return strong * 0.55
+        if cov >= 0.75:
+            return strong * 0.32
+        if cov >= 0.50:
+            return strong * 0.15
+        return 0.0
+
+    def _lexical_type_scores(self, evidence: str, s1: Stage1Result) -> Dict[str, float]:
+        folded = strip_accents(evidence).casefold()
+        out: Dict[str, float] = {}
+        for typ, meta in self.rules.types.items():
+            score = 0.0
+            score += self._phrase_score(folded, typ, 115.0)
+            hits = []
+            for a in (meta.get("aliases", []) or []):
+                val = self._phrase_score(folded, a, 100.0)
+                if val:
+                    hits.append(val)
+            score += sum(sorted(hits, reverse=True)[:4])
+            negatives = sum(
+                1 for a in (meta.get("negative_aliases", []) or [])
+                if safe(a) and contains_alias_prepared(folded, a)
+            )
+            score -= min(3, negatives) * 120.0
+            if typ in s1.type_candidates:
+                # Stage 1 é sinal forte e deve sobreviver à união.
+                score += 180.0 + 25.0 * float(s1.type_scores.get(typ, 0.0) or 0.0)
+            out[typ] = score
+        return out
+
+    def _lexical_taxonomy_scores(self, evidence: str, type_candidates: Sequence[str]) -> Dict[str, float]:
+        folded = strip_accents(evidence).casefold()
+        top_types = set(type_candidates)
+        out: Dict[str, float] = {}
+        for label, p in self.taxonomy_profiles.items():
+            score = self._phrase_score(folded, p["family"], 130.0)
+            ev_hits = [
+                self._phrase_score(folded, a, 150.0)
+                for a in p["evidence_aliases"]
+            ]
+            score += sum(sorted((x for x in ev_hits if x), reverse=True)[:4])
+            alias_hits = [
+                self._phrase_score(folded, a, 90.0)
+                for a in p["aliases"]
+            ]
+            score += sum(sorted((x for x in alias_hits if x), reverse=True)[:4])
+            if p["types"] & top_types:
+                score += 150.0
+            negatives = sum(
+                1 for a in p["negative_aliases"]
+                if safe(a) and contains_alias_prepared(folded, a)
+            )
+            score -= min(3, negatives) * 130.0
+            out[label] = score
+        return out
+
+    def _ensure_models(self) -> None:
+        if self._embedder is not None and self._reranker is not None:
+            return
+        import torch
+        from sentence_transformers import SentenceTransformer
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+        self._torch = torch
+        embed_device = self._resolve_device(self.embedding_device_cfg, torch)
+        rerank_device = self._resolve_device(self.reranker_device_cfg, torch)
+        LOG.info(
+            "SEMANTIC FUNNEL loading | embedding=%s (%s) | reranker=%s (%s)",
+            self.embedding_model_name, embed_device,
+            self.reranker_model_name, rerank_device,
+        )
+        self._embedder = SentenceTransformer(self.embedding_model_name, device=embed_device)
+        type_docs = [self.type_docs[x] for x in self.type_labels]
+        tax_docs = [self.taxonomy_docs[x] for x in self.taxonomy_labels]
+        self._type_doc_embeddings = self._embedder.encode(
+            type_docs,
+            batch_size=self.embedding_batch_size,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+        self._taxonomy_doc_embeddings = self._embedder.encode(
+            tax_docs,
+            batch_size=self.embedding_batch_size,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+        self._reranker_tokenizer = AutoTokenizer.from_pretrained(self.reranker_model_name)
+        self._reranker = AutoModelForSequenceClassification.from_pretrained(self.reranker_model_name)
+        self._reranker.to(rerank_device)
+        self._reranker.eval()
+        self._reranker_device = rerank_device
+
+    def _dense_scores(self, query: str, labels: Sequence[str], doc_embeddings) -> Dict[str, float]:
+        q = self._embedder.encode(
+            [query],
+            batch_size=1,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )[0]
+        sims = doc_embeddings @ q
+        return {label: float(sims[i]) for i, label in enumerate(labels)}
+
+    @staticmethod
+    def _rrf(rank: Optional[int], k: int = 60) -> float:
+        return 0.0 if rank is None else 1.0 / (k + rank)
+
+    def _merge_pool(
+        self,
+        lexical: Dict[str, float],
+        dense: Dict[str, float],
+        required: Iterable[str],
+        dense_k: int,
+        pool_k: int,
+    ) -> List[str]:
+        lex_ranked = [x[0] for x in sorted(lexical.items(), key=lambda kv: (-kv[1], kv[0]))]
+        den_ranked = [x[0] for x in sorted(dense.items(), key=lambda kv: (-kv[1], kv[0]))]
+        lex_pos = {x: i for i, x in enumerate(lex_ranked, 1)}
+        den_pos = {x: i for i, x in enumerate(den_ranked, 1)}
+        pool = set(lex_ranked[:dense_k]) | set(den_ranked[:dense_k]) | {safe(x) for x in required if safe(x)}
+        score = {
+            x: self._rrf(lex_pos.get(x)) + self._rrf(den_pos.get(x))
+            for x in pool
+        }
+        return sorted(
+            pool,
+            key=lambda x: (-score.get(x, 0.0), -lexical.get(x, 0.0), -dense.get(x, -9.0), x),
+        )[:pool_k]
+
+    def _rerank_labels(self, query: str, labels: Sequence[str], docs: Dict[str, str], top_k: int) -> Tuple[List[str], Dict[str, float]]:
+        if not labels:
+            return [], {}
+        torch = self._torch
+        scores: List[float] = []
+        for start in range(0, len(labels), self.rerank_batch_size):
+            batch = list(labels[start:start + self.rerank_batch_size])
+            enc = self._reranker_tokenizer(
+                [query] * len(batch),
+                [docs[x] for x in batch],
+                padding=True,
+                truncation=True,
+                max_length=512,
+                return_tensors="pt",
+            )
+            enc = {k: v.to(self._reranker_device) for k, v in enc.items()}
+            with torch.no_grad():
+                logits = self._reranker(**enc, return_dict=True).logits
+                if logits.ndim == 2 and logits.shape[1] > 1:
+                    vals = logits[:, -1].float().view(-1)
+                else:
+                    vals = logits.float().view(-1)
+            scores.extend(vals.detach().cpu().numpy().astype(float).tolist())
+        ranked = sorted(zip(labels, scores), key=lambda kv: (-kv[1], kv[0]))
+        return [x[0] for x in ranked[:top_k]], {x[0]: float(x[1]) for x in ranked}
+
+    def _semantic_candidates(self, brand: str, model: str, s1: Stage1Result) -> Dict[str, Any]:
+        self._ensure_models()
+        evidence, refs = self._evidence_text(brand, model, s1)
+
+        type_lex = self._lexical_type_scores(evidence, s1)
+        type_dense = self._dense_scores(evidence, self.type_labels, self._type_doc_embeddings)
+        type_pool = self._merge_pool(
+            type_lex, type_dense, s1.type_candidates,
+            self.type_dense_k, self.type_pool_k,
+        )
+        type_top, type_rerank = self._rerank_labels(
+            evidence, type_pool, self.type_docs, self.type_top_k
+        )
+        # Nunca deixa um candidato determinístico forte desaparecer apenas por
+        # reranking semântico. Preserva até 4 TYPEs Stage 1 de maior score.
+        deterministic_keep = [
+            typ for typ, _ in sorted(
+                [(t, float(s1.type_scores.get(t, 0.0) or 0.0)) for t in s1.type_candidates],
+                key=lambda kv: (-kv[1], kv[0]),
+            )[:4]
+            if typ in self.rules.types
+        ]
+        for typ in deterministic_keep:
+            if typ not in type_top:
+                type_top.append(typ)
+
+        # Taxonomia recebe obrigatoriamente os pares mapeados dos TYPEs finais,
+        # mas também usa dense/lexical para recuperar subtipo que Stage 1 não viu.
+        mapped_required = []
+        for typ in type_top:
+            mapped_required.extend(_pair_label(x) for x in _taxonomy_pairs_for_type(self.rules, typ))
+        tax_lex = self._lexical_taxonomy_scores(evidence, type_top)
+        tax_dense = self._dense_scores(evidence, self.taxonomy_labels, self._taxonomy_doc_embeddings)
+        tax_pool = self._merge_pool(
+            tax_lex, tax_dense, mapped_required,
+            self.taxonomy_dense_k, self.taxonomy_pool_k,
+        )
+        tax_top, tax_rerank = self._rerank_labels(
+            evidence, tax_pool, self.taxonomy_docs, self.taxonomy_top_k
+        )
+        # Preserva os pares diretamente mapeados dos TYPEs determinísticos que
+        # sobreviveram, evitando que o reranker elimine uma opção sustentada pelo JSON.
+        deterministic_pairs = []
+        for typ in deterministic_keep:
+            deterministic_pairs.extend(
+                _pair_label(pair) for pair in _taxonomy_pairs_for_type(self.rules, typ)
+            )
+        for label in deterministic_pairs:
+            if label in self.taxonomy_profiles and label not in tax_top:
+                tax_top.append(label)
+        return {
+            "evidence": evidence,
+            "refs": refs,
+            "type_candidates": type_top,
+            "taxonomy_candidates": tax_top,
+            "type_rerank_scores": type_rerank,
+            "taxonomy_rerank_scores": tax_rerank,
+        }
+
+    @staticmethod
+    def _choice_criteria_type(typ: str, rules: Rules) -> str:
+        meta = rules.types.get(typ, {}) or {}
+        aliases = [safe(x) for x in (meta.get("aliases", []) or []) if safe(x)][:4]
+        txt = f"Canonical physical product type: {typ}."
+        if aliases:
+            txt += " Common aliases: " + "; ".join(aliases) + "."
+        return txt
+
+    def _choice_criteria_taxonomy(self, label: str) -> str:
+        p = self.taxonomy_profiles[label]
+        txt = f"Valid business taxonomy pair. Category General={p['category']}; FAMILY={p['family']}."
+        if p["types"]:
+            txt += " Mapped types: " + "; ".join(sorted(p["types"])) + "."
+        ev = sorted(p["evidence_aliases"], key=lambda x: (-len(norm_text(x).split()), x))[:6]
+        if ev:
+            txt += " Subtype evidence: " + "; ".join(ev) + "."
+        return txt
+
+    @staticmethod
+    def _parse_choice(answers: Dict[str, Any], question_id: str) -> Dict[str, Any]:
+        ans = answers.get(question_id) or {}
+        probs_raw = ans.get("probabilities") or {}
+        probs: Dict[str, float] = {}
+        for k, v in probs_raw.items():
+            try:
+                probs[safe(k)] = _unit_score(v)
+            except Exception:
+                continue
+        ranked = sorted(probs.items(), key=lambda kv: (-kv[1], kv[0]))
+        choice = safe(ans.get("choice")) or (ranked[0][0] if ranked else "")
+        top1 = next((v for k, v in ranked if norm_text(k) == norm_text(choice)), ranked[0][1] if ranked else 0.0)
+        top2_label, top2 = "", 0.0
+        for k, v in ranked:
+            if norm_text(k) != norm_text(choice):
+                top2_label, top2 = k, v
+                break
+        return {
+            "choice": choice,
+            "probability": _unit_score(top1),
+            "confidence": _unit_score(ans.get("confidence")),
+            "top2": top2_label,
+            "top2_probability": _unit_score(top2),
+            "margin": max(0.0, _unit_score(top1) - _unit_score(top2)),
+            "probabilities": probs,
+        }
+
+    def classify(
+        self,
+        key: str,
+        raw_hash: str,
+        brand: str,
+        model: str,
+        s1: Stage1Result,
+    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
+        cached = self.db.get_llm(
+            key, raw_hash, self.rules.hash, self.provider, self.cache_model_id
+        )
+        if cached is not None:
+            data, usage = cached
+            return data, True, usage
+
+        if self.max_calls_per_run and self.api_calls >= self.max_calls_per_run:
+            raise OperationalPause("CLEF_RUN_CAP", f"Limite local de {self.max_calls_per_run} chamadas Clef/run atingido.")
+        if self.max_total_tokens_per_run and self.total_tokens >= self.max_total_tokens_per_run:
+            raise OperationalPause("CLEF_LOCAL_TOKEN_CAP", f"Cap local de {self.max_total_tokens_per_run} tokens/run atingido.")
+
+        sem = self._semantic_candidates(brand, model, s1)
+        type_candidates = sem["type_candidates"]
+        tax_candidates = sem["taxonomy_candidates"]
+        if not type_candidates or not tax_candidates:
+            raise OperationalPause(
+                "CLEF_SEMANTIC_FUNNEL_EMPTY",
+                "Funil BGE/reranker não produziu candidatos fechados.",
+            )
+
+        power_candidates = list(dict.fromkeys(
+            [safe(x) for x in s1.power_candidates if safe(x)]
+            + ([safe(s1.power)] if safe(s1.power) else [])
+            + list(self.rules.allowed_powers)
+        ))
+        power_candidates = [x for x in power_candidates if x]
+        if "UNKNOWN" not in power_candidates:
+            power_candidates.append("UNKNOWN")
+
+        type_criteria = {
+            typ: self._choice_criteria_type(typ, self.rules)
+            for typ in type_candidates
+        }
+        type_criteria["OTHER"] = "The physical product is identifiable, but none of the listed canonical PRODUCT_TYPE options is correct."
+        type_criteria["INSUFFICIENT"] = "The supplied target evidence is not sufficient to identify the physical product type reliably."
+
+        power_criteria = {x: f"Primary power-source classification: {x}." for x in power_candidates}
+        if "UNKNOWN" in power_criteria:
+            power_criteria["UNKNOWN"] = "The supplied evidence does not establish the primary power source reliably."
+
+        tax_criteria = {
+            label: self._choice_criteria_taxonomy(label)
+            for label in tax_candidates
+        }
+        tax_criteria["OTHER"] = "The product is identifiable, but none of the listed valid Category General | FAMILY pairs fits it."
+        tax_criteria["INSUFFICIENT"] = "The evidence is insufficient to choose a business taxonomy pair reliably."
+
+        payload = {
+            "model": self.model,
+            "state": {
+                "brand": brand,
+                "model": model,
+                "target_evidence": sem["evidence"],
+            },
+            "questions": {
+                "product_type": {
+                    "type": "choice",
+                    "instructions": (
+                        "Identify the actual physical target product. Choose the most appropriate canonical PRODUCT_TYPE. "
+                        "Do not confuse power source, voltage, accessories, replacement parts, compatible products, merchant wording, "
+                        "or a secondary bundled item with the main target product. Use OTHER only if no listed type fits; "
+                        "use INSUFFICIENT when the target evidence is too weak."
+                    ),
+                    "criteria": type_criteria,
+                },
+                "power_source": {
+                    "type": "choice",
+                    "instructions": (
+                        "Choose the primary power source of the target product. Output voltage is not proof of BATTERY or CORDED. "
+                        "Use UNKNOWN when the evidence does not establish the input power source."
+                    ),
+                    "criteria": power_criteria,
+                },
+                "taxonomy_pair": {
+                    "type": "choice",
+                    "instructions": (
+                        "Choose the single valid business Category General | FAMILY pair that best classifies the target product. "
+                        "Use the physical product function and supported subtype evidence. Do not choose a more specific FAMILY without evidence. "
+                        "Never invent a pair outside the options. Use OTHER if none fits and INSUFFICIENT when evidence is too weak."
+                    ),
+                    "criteria": tax_criteria,
+                },
+            },
+        }
+
+        try:
+            import truststore
+            truststore.inject_into_ssl()
+        except ImportError:
+            pass
+        import requests
+
+        token = os.getenv(self.api_key_env, "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
+        account_id = os.getenv(self.account_id_env, "").strip()
+        slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
+        url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
+        transient = {429, 500, 502, 503, 504}
+        body: Dict[str, Any] = {}
+        last_detail = ""
+        self.api_calls += 1
+        for attempt in range(self.retry_attempts):
+            self.limiter.wait()
+            try:
+                resp = requests.post(
+                    url,
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=self.timeout_seconds,
+                )
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = {"raw": resp.text}
+                if resp.status_code in transient and attempt < self.retry_attempts - 1:
+                    time.sleep(self.retry_backoff_seconds[min(attempt, len(self.retry_backoff_seconds) - 1)])
+                    continue
+                if not resp.ok:
+                    code = "CLEF_RATE_LIMIT" if resp.status_code == 429 else ("CLEF_TRANSIENT" if resp.status_code in transient else "CLEF_HTTP_ERROR")
+                    raise OperationalPause(code, f"Cloudflare HTTP {resp.status_code}: {json.dumps(body, ensure_ascii=False)[:1200]}")
+                if body.get("success") is False:
+                    raise OperationalPause("CLEF_API_ERROR", json.dumps(body, ensure_ascii=False)[:1200])
+                break
+            except requests.RequestException as exc:
+                last_detail = safe(exc)
+                if attempt < self.retry_attempts - 1:
+                    time.sleep(self.retry_backoff_seconds[min(attempt, len(self.retry_backoff_seconds) - 1)])
+                    continue
+                raise OperationalPause("CLEF_TRANSIENT", last_detail) from exc
+        else:
+            raise OperationalPause("CLEF_TRANSIENT", last_detail or "Falha desconhecida Clef")
+
+        result = body.get("result") or {}
+        answers = result.get("answers") or {}
+        type_ans = self._parse_choice(answers, "product_type")
+        power_ans = self._parse_choice(answers, "power_source")
+        tax_ans = self._parse_choice(answers, "taxonomy_pair")
+        cg, fam = _split_pair_label(tax_ans["choice"])
+
+        type_choice = safe(type_ans["choice"])
+        tax_choice = safe(tax_ans["choice"])
+        valid_type = type_choice in self.rules.types and type_choice in type_candidates
+        valid_pair = (cg, fam) in self.rules.valid_pairs and tax_choice in tax_candidates
+        decision = "RESOLVED" if valid_type and valid_pair else "INSUFFICIENT_EVIDENCE"
+        if type_choice in {"OTHER", "INSUFFICIENT"} or tax_choice in {"OTHER", "INSUFFICIENT"}:
+            decision = "INSUFFICIENT_EVIDENCE"
+
+        data = {
+            "decision": decision,
+            "product_type": type_choice if valid_type else "REVISAR",
+            "power": safe(power_ans["choice"]) if safe(power_ans["choice"]) in self.rules.allowed_powers else "UNKNOWN",
+            "taxonomy_pair": tax_choice,
+            "category_general": cg if valid_pair else "",
+            "family": fam if valid_pair else "",
+            "evidence_source_ids": sem["refs"],
+            "reason_short": (
+                f"Clef structured choice; type={type_choice or 'NONE'}; taxonomy={tax_choice or 'NONE'}"
+            ),
+        }
+
+        usage_raw = result.get("usage") or {}
+        input_tokens = int(usage_raw.get("input_tokens") or 0)
+        output_tokens = int(usage_raw.get("output_tokens") or 0)
+        self.prompt_tokens += input_tokens
+        self.completion_tokens += output_tokens
+        self.total_tokens += input_tokens + output_tokens
+
+        usage = {
+            "provider": self.provider,
+            "model": self.model,
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "json_parse_retries": 0,
+            "failed_parse_tokens": 0,
+            "evidence_refs_valid": True,
+            "context_types": type_candidates,
+            "rate_limit_headers": {},
+            "semantic_type_candidates": type_candidates,
+            "semantic_taxonomy_candidates": tax_candidates,
+            "semantic_type_rerank_scores": sem["type_rerank_scores"],
+            "semantic_taxonomy_rerank_scores": sem["taxonomy_rerank_scores"],
+            "clef_type_probability": type_ans["probability"],
+            "clef_type_confidence": type_ans["confidence"],
+            "clef_type_top2": type_ans["top2"],
+            "clef_type_top2_probability": type_ans["top2_probability"],
+            "clef_type_margin": type_ans["margin"],
+            "clef_power_probability": power_ans["probability"],
+            "clef_power_confidence": power_ans["confidence"],
+            "clef_taxonomy_probability": tax_ans["probability"],
+            "clef_taxonomy_confidence": tax_ans["confidence"],
+            "clef_taxonomy_top2": tax_ans["top2"],
+            "clef_taxonomy_top2_probability": tax_ans["top2_probability"],
+            "clef_taxonomy_margin": tax_ans["margin"],
+        }
+        self.db.put_llm(
+            key, raw_hash, self.rules.hash, self.provider, self.cache_model_id,
+            data, usage,
+        )
+        return data, False, usage
 
 class OpenAICompatibleClassifier:
     """Stage 2 via provider OpenAI-compatible.
@@ -6009,7 +6536,7 @@ def taxonomy_consensus_for_review(
     Nao resolve o TYPE e nao remove Review Required. Ex.: DRILL + SCREWDRIVER
     podem permanecer ambíguos, mas ambos pertencem a OTHERS | POWER TOOLS.
     """
-    candidates = list(dict.fromkeys(s1.type_candidates or s1.review_type_hints or []))
+    candidates = list(dict.fromkeys(s1.type_candidates or []))
     if not candidates:
         return "", "", ""
     power = s1.power or "UNKNOWN"
@@ -6148,6 +6675,83 @@ def llm_preflight_rejection_reason(rules: Rules, s1: Stage1Result) -> str:
     return ""
 
 
+
+def _clef_auto_gate(
+    data: Dict[str, Any],
+    usage: Dict[str, Any],
+    rules: Rules,
+    s1: Stage1Result,
+    cfg: Dict[str, Any],
+) -> Tuple[bool, str]:
+    """Gate conservador de AUTO. Clef pode sugerir em REVIEW sem passar neste gate."""
+    if safe(data.get("decision")) != "RESOLVED":
+        return False, f"CLEF_{safe(data.get('decision')) or 'UNRESOLVED'}"
+    typ = safe(data.get("product_type"))
+    cg = safe(data.get("category_general"))
+    fam = safe(data.get("family"))
+    if typ not in rules.types:
+        return False, "CLEF_TYPE_INVALID"
+    if (cg, fam) not in rules.valid_pairs or (cg, fam) == ("OTHERS", "OTHERS"):
+        return False, "CLEF_TAXONOMY_INVALID"
+
+    policy = (cfg.get("clef", {}) or {}).get("auto_approval", {}) or {}
+    if bool(policy.get("require_type_taxonomy_compatible", True)):
+        allowed_pairs = _taxonomy_pairs_for_type(rules, typ)
+        if allowed_pairs and (cg, fam) not in allowed_pairs:
+            return False, "CLEF_TYPE_TAXONOMY_CONFLICT"
+
+    if bool(policy.get("require_strong_identity", True)) and s1.identity_best != "STRONG":
+        return False, "CLEF_IDENTITY_NOT_STRONG"
+
+    tax_prob = _unit_score(usage.get("clef_taxonomy_probability"))
+    tax_conf = _unit_score(usage.get("clef_taxonomy_confidence"))
+    tax_margin = _unit_score(usage.get("clef_taxonomy_margin"))
+    type_prob = _unit_score(usage.get("clef_type_probability"))
+    type_conf = _unit_score(usage.get("clef_type_confidence"))
+
+    min_tax_prob = float(policy.get("min_taxonomy_probability", 0.70) or 0.0)
+    min_tax_conf = float(policy.get("min_taxonomy_confidence", 0.50) or 0.0)
+    min_tax_margin = float(policy.get("min_taxonomy_margin", 0.20) or 0.0)
+    min_type_prob = float(policy.get("min_type_probability", 0.55) or 0.0)
+    min_type_conf = float(policy.get("min_type_confidence", 0.25) or 0.0)
+
+    if tax_prob < min_tax_prob:
+        return False, f"CLEF_TAX_PROB_LOW:{tax_prob:.3f}<{min_tax_prob:.3f}"
+    if tax_conf < min_tax_conf:
+        return False, f"CLEF_TAX_CONF_LOW:{tax_conf:.3f}<{min_tax_conf:.3f}"
+    if tax_margin < min_tax_margin:
+        return False, f"CLEF_TAX_MARGIN_LOW:{tax_margin:.3f}<{min_tax_margin:.3f}"
+    if type_prob < min_type_prob:
+        return False, f"CLEF_TYPE_PROB_LOW:{type_prob:.3f}<{min_type_prob:.3f}"
+    if type_conf < min_type_conf:
+        return False, f"CLEF_TYPE_CONF_LOW:{type_conf:.3f}<{min_type_conf:.3f}"
+    return True, "CLEF_AUTO_GATE_OK"
+
+
+def _best_target_title(s1: Stage1Result, refs: Sequence[int], require_strong: bool) -> Tuple[str, str]:
+    refset = {int(x) for x in refs if isinstance(x, int) and not isinstance(x, bool)}
+    rank = DeterministicEngine.IDENTITY_RANK
+    candidates = [
+        src for src in s1.sources
+        if (not refset or src.source_id in refset)
+        and (not require_strong or src.relevance == "STRONG")
+    ]
+    if not candidates and require_strong:
+        return "", ""
+    if not candidates:
+        candidates = list(s1.sources)
+    if not candidates:
+        return "", ""
+    candidates.sort(
+        key=lambda src: (
+            rank.get(src.relevance, 0), src.identity_score,
+            0 if src.quality_flags else 1, src.source_weight, float(src.tavily_score or 0.0),
+        ),
+        reverse=True,
+    )
+    return candidates[0].title, candidates[0].url
+
+
 def finalize_product(
     brand: str,
     model: str,
@@ -6172,10 +6776,6 @@ def finalize_product(
     consensus_cg, consensus_fam, consensus_reason = taxonomy_consensus_for_review(rules, s1, brand, model)
     if s1.state == "RESOLVED_RULE":
         next_action = "CONCLUIDO"
-    elif not s1.type_candidates and s1.review_type_hints and consensus_cg and consensus_fam:
-        next_action = "TYPE_HINT_REVIEW_FAMILY_JA_DEFINIDA"
-    elif not s1.type_candidates and s1.review_type_hints:
-        next_action = "TYPE_HINT_REVIEW"
     elif not s1.type_candidates and ref_identity in {"STRONG", "PROBABLE"}:
         next_action = "JSON_GAP_OU_LLM_GAP"
     elif not s1.type_candidates and raw_result_count:
@@ -6201,9 +6801,6 @@ def finalize_product(
         "Título Referência Decision": ref_decision,
         "Próxima Ação": next_action,
         "Stage1 Type Candidates": " | ".join(s1.type_candidates),
-        "Review Type Hints": " | ".join(s1.review_type_hints),
-        "Review Suggested Type": s1.review_type_hints[0] if len(s1.review_type_hints) == 1 else "",
-        "Review Hint Evidence": json.dumps(s1.review_hint_evidence, ensure_ascii=False, sort_keys=True),
         "Stage1.5 Type Candidates": " | ".join(funnel.candidates),
         "Stage1 Type Scores": json.dumps(s1.type_scores, ensure_ascii=False, sort_keys=True),
         "Stage1 Power Candidates": " | ".join(s1.power_candidates),
@@ -6304,6 +6901,94 @@ def finalize_product(
                 "LLM Completion Tokens": 0,
                 "LLM Total Tokens": 0,
             }
+
+    # Clef é o Stage 2 padrão e pode recuperar candidatos pelo BGE mesmo quando
+    # Stage 1 lexical não encontrou alias. Só bloqueamos falta de identidade target
+    # ou conflito real de múltiplos produtos.
+    if llm is not None and safe(getattr(llm, "provider", "")).casefold() == "clef":
+        clef_preflight = _clef_preflight_rejection_reason(rules, s1)
+        if clef_preflight:
+            title, url = _output_title(*choose_title(s1.sources, []))
+            reason_text = {
+                "LOW_TARGET_EVIDENCE":
+                    "Clef não chamado: nenhuma fonte PROBABLE/STRONG do SKU alvo; classificação sem identidade seria arriscada.",
+                "MULTI_PRODUCT_TARGET":
+                    "Clef não chamado: evidência target descreve múltiplos produtos físicos sem combo explicitamente modelado.",
+            }.get(clef_preflight, "Clef bloqueado pelo gate de identidade.")
+            return {
+                **common,
+                "Resolution State": "REVIEW",
+                "Stage": "CLEF_PRECHECK",
+                "O que é (Tipo)": s1.product_type or "REVISAR",
+                "Alimentação": s1.power or "UNKNOWN",
+                "Category General": consensus_cg,
+                "FAMILY": consensus_fam,
+                "Título Real": title,
+                "Fonte URL": url,
+                "Review Required": "SIM",
+                "Reason Code": clef_preflight,
+                "Motivo": reason_text,
+                "LLM Provider": "",
+                "LLM Model": "",
+                "LLM Cache": "",
+                "LLM Prompt Tokens": 0,
+                "LLM Completion Tokens": 0,
+                "LLM Total Tokens": 0,
+            }
+
+        data, cache_hit, usage = llm.classify(key, raw.raw_hash, brand, model, s1)
+        actual_provider = safe(usage.get("provider")) or "clef"
+        actual_model = safe(usage.get("model")) or safe(getattr(llm, "model", "clef"))
+        refs = data.get("evidence_source_ids", []) or []
+        typ = safe(data.get("product_type"))
+        power = safe(data.get("power")) or "UNKNOWN"
+        cg = safe(data.get("category_general"))
+        fam = safe(data.get("family"))
+        auto_ok, gate_reason = _clef_auto_gate(data, usage, rules, s1, cfg)
+        title, url = _best_target_title(s1, refs, require_strong=auto_ok)
+        title, url = _output_title(title, url)
+
+        base_clef = {
+            **common,
+            "LLM Provider": actual_provider.upper(),
+            "LLM Model": actual_model,
+            "LLM Cache": "SIM" if cache_hit else "NÃO",
+            "LLM Prompt Tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "LLM Completion Tokens": int(usage.get("completion_tokens", 0) or 0),
+            "LLM Total Tokens": int(usage.get("total_tokens", 0) or 0),
+            "Semantic Type Candidates": " | ".join(usage.get("semantic_type_candidates", []) or []),
+            "Semantic Taxonomy Candidates": " || ".join(usage.get("semantic_taxonomy_candidates", []) or []),
+            "Clef Type Probability": _unit_score(usage.get("clef_type_probability")),
+            "Clef Type Confidence": _unit_score(usage.get("clef_type_confidence")),
+            "Clef Type Top2": safe(usage.get("clef_type_top2")),
+            "Clef Type Margin": _unit_score(usage.get("clef_type_margin")),
+            "Clef Taxonomy Probability": _unit_score(usage.get("clef_taxonomy_probability")),
+            "Clef Taxonomy Confidence": _unit_score(usage.get("clef_taxonomy_confidence")),
+            "Clef Taxonomy Top2": safe(usage.get("clef_taxonomy_top2")),
+            "Clef Taxonomy Margin": _unit_score(usage.get("clef_taxonomy_margin")),
+        }
+        return {
+            **base_clef,
+            "Raw State": "RAW_OK",
+            "Próxima Ação": "CONCLUIDO" if auto_ok else "REVISAO_CLEF",
+            "Resolution State": "RESOLVED" if auto_ok else "REVIEW",
+            "Stage": "CLEF",
+            "O que é (Tipo)": typ if typ in rules.types else "REVISAR",
+            "Alimentação": power if power in rules.allowed_powers else "UNKNOWN",
+            "Category General": cg,
+            "FAMILY": fam,
+            "Título Real": title,
+            "Fonte URL": url,
+            "Review Required": "NÃO" if auto_ok else "SIM",
+            "Reason Code": "CLEF_AUTO_APROVADO" if auto_ok else gate_reason,
+            "Motivo": (
+                f"{safe(data.get('reason_short'))} | {gate_reason} | "
+                f"tax_prob={_unit_score(usage.get('clef_taxonomy_probability')):.3f} | "
+                f"tax_conf={_unit_score(usage.get('clef_taxonomy_confidence')):.3f} | "
+                f"tax_margin={_unit_score(usage.get('clef_taxonomy_margin')):.3f}"
+            ),
+            "Evidence Source IDs": ",".join(map(str, refs)),
+        }
 
     preflight_reason = llm_preflight_rejection_reason(rules, s1)
     if preflight_reason:
@@ -6521,6 +7206,16 @@ BASELINE_MASTER_FIELDS = [
     "Processed At",
     "LLM Provider",
     "LLM Model",
+    "Semantic Type Candidates",
+    "Semantic Taxonomy Candidates",
+    "Clef Type Probability",
+    "Clef Type Confidence",
+    "Clef Type Top2",
+    "Clef Type Margin",
+    "Clef Taxonomy Probability",
+    "Clef Taxonomy Confidence",
+    "Clef Taxonomy Top2",
+    "Clef Taxonomy Margin",
 ]
 
 _REVIEW_REJECT_STATES = {
@@ -8041,10 +8736,29 @@ def run_pipeline(
             or "openai/gpt-oss-120b:free"
         )
 
+        clef_model = (
+            os.getenv("CLOUDFLARE_CLEF_MODEL", "").strip()
+            or safe(cfg.get("clef", {}).get("model"))
+            or DEFAULT_CLEF_MODEL
+        )
         route_names = [safe(x).casefold() for x in (cfg.get("llm", {}).get("route", []) or []) if safe(x)]
+        if args.llm_provider:
+            route_names = [safe(args.llm_provider).casefold()]
         if not route_names:
-            route_names = ["nvidia", "groq"]
-        model_by_provider = {"groq": groq_model, "nvidia": nvidia_model, "openrouter": openrouter_model}
+            route_names = ["clef"]
+        if args.llm_model and route_names:
+            if route_names[0] == "clef":
+                clef_model = safe(args.llm_model)
+            elif route_names[0] == "groq":
+                groq_model = safe(args.llm_model)
+            elif route_names[0] == "nvidia":
+                nvidia_model = safe(args.llm_model)
+            elif route_names[0] == "openrouter":
+                openrouter_model = safe(args.llm_model)
+        model_by_provider = {
+            "clef": clef_model, "groq": groq_model,
+            "nvidia": nvidia_model, "openrouter": openrouter_model
+        }
         llm_identity = "cascade:" + "->".join(
             f"{name}:{model_by_provider.get(name, '')}" for name in route_names if name in model_by_provider
         )
@@ -8114,6 +8828,13 @@ def run_pipeline(
 
         if use_llm and targets:
             try:
+                clef_llm = ClefFunnelClassifier(
+                    rules=rules,
+                    cfg=cfg,
+                    db=db,
+                    provider="clef",
+                    model=clef_model,
+                )
                 groq_llm = OpenAICompatibleClassifier(
                     rules=rules,
                     cfg=cfg,
@@ -8137,13 +8858,14 @@ def run_pipeline(
                 )
 
                 provider_map = {
+                    "clef": clef_llm,
                     "groq": groq_llm,
                     "nvidia": nvidia_llm,
                     "openrouter": openrouter_llm,
                 }
                 ordered_providers = [provider_map[x] for x in route_names if x in provider_map]
                 if not ordered_providers:
-                    ordered_providers = [nvidia_llm, groq_llm, openrouter_llm]
+                    ordered_providers = [clef_llm]
                 llm = ProviderCascade(
                     ordered_providers,
                     switch_only_on_quota_exhaustion=bool(
@@ -8670,7 +9392,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", default="")
     p.add_argument("--inventory-output", default="")
     p.add_argument("--precollection-output", default="")
-    p.add_argument("--llm-provider", default="")
+    p.add_argument("--llm-provider", choices=["clef", "nvidia", "groq", "openrouter"], default="")
     p.add_argument("--llm-model", default="")
     p.add_argument("--no-llm", action="store_true")
     p.add_argument("--no-checkpoint", action="store_true")
@@ -8712,7 +9434,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     parser = build_parser()
     print("=" * 86)
     print(f" PIPELINE ENRIQUECEDOR DE PRODUTOS {PIPELINE_VERSION} | {BUILD_LABEL}")
-    print(" Search Provider -> Identity -> Target Isolation -> Curated Evidence -> Stage 1 -> Funnel -> NVIDIA/Groq")
+    print(" Search Provider -> Identity -> Curated Evidence -> Rules -> BGE Funnel -> Reranker -> Clef")
     print(" COLLECTION HARD RULE: 1 produto = no máximo 1 request | sem retry/fallback/extract/advanced")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 86)

@@ -1,0 +1,48 @@
+PIPELINE v4.0 — CLEF + BGE FUNNEL
+
+FLUXO PADRÃO
+Search/cache -> identidade -> evidência curada -> Stage 1 regras -> BGE-M3 -> BGE reranker -> Clef -> gate AUTO/REVIEW.
+
+O pipeline principal continua sendo pipeline_produtos.py.
+Não existe script de benchmark obrigatório para operar.
+
+PIP
+python -m pip install -r requirements.txt
+
+ou:
+python -m pip install -U pandas openpyxl numpy requests truststore torch "transformers>=4.51.0" "sentence-transformers>=5.4.0" trafilatura
+
+ENV
+CLOUDFLARE_ACCOUNT_ID=...
+CLOUDFLARE_API_TOKEN=...
+
+VALIDAÇÃO LOCAL
+python pipeline_produtos.py --mode validate
+
+CLASSIFICAÇÃO
+python pipeline_produtos.py --mode classify
+
+PROCESSO COMPLETO
+python pipeline_produtos.py --mode full
+
+PILOTO OPERACIONAL OPCIONAL
+python pipeline_produtos.py --mode classify --max-items 100
+
+REGRAS DE SEGURANÇA
+- Revisão B.I=OK continua HARD LOCK.
+- AUTO exige identity STRONG.
+- BGE/reranker nunca cria label: recupera somente PRODUCT_TYPES/TAXONOMY_PAIRS do JSON.
+- Clef só escolhe opções fechadas.
+- Category/FAMILY de baixa confiança permanecem preenchidas como sugestão, mas ficam REVIEW.
+- cache_tavily.sqlite permanece read-only durante classify.
+
+AUTO GATE INICIAL (pipeline_config.json)
+- taxonomy probability >= 0.70
+- taxonomy confidence >= 0.50
+- taxonomy margin >= 0.20
+- type probability >= 0.55
+- type confidence >= 0.25
+- TYPE x TAXONOMY compatíveis no JSON
+- identity STRONG
+
+Os thresholds são configuração operacional, não hard-code.
