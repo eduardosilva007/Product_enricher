@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-05-v4.0-clef-bge-funnel",
+  "VERSION": "2026-10-09-v4.0.3-clef-required",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -79,90 +79,6 @@
     "auto_approval_requires_strong_identity": true,
     "strong_identity_requires_brand_in_primary_field": true
   },
-  "llm": {
-    "route": [
-      "clef"
-    ],
-    "switch_only_on_quota_exhaustion": false
-  },
-  "groq": {
-    "model": "openai/gpt-oss-120b",
-    "base_url": "https://api.groq.com/openai/v1",
-    "requests_per_minute": 30,
-    "tokens_per_minute": 8000,
-    "requests_per_day": 1000,
-    "tokens_per_day": 200000,
-    "max_api_calls_per_run": 100,
-    "max_total_tokens_per_run": 150000,
-    "retry_attempts": 4,
-    "retry_backoff_seconds": [
-      2,
-      5,
-      10,
-      20
-    ],
-    "timeout_seconds": 90,
-    "max_output_tokens": 1024,
-    "reasoning_effort": "low",
-    "evidence_content_chars": 550,
-    "max_llm_sources": 3,
-    "operational_requests_per_minute": 3.0,
-    "max_aliases_per_type": 5,
-    "max_negative_aliases_per_type": 3,
-    "json_retry_max_completion_tokens": 2048,
-    "tpm_safety_margin": 0.88
-  },
-  "nvidia": {
-    "model": "openai/gpt-oss-20b",
-    "base_url": "https://integrate.api.nvidia.com/v1",
-    "operational_requests_per_minute": 3.0,
-    "max_api_calls_per_run": 1000,
-    "max_total_tokens_per_run": 0,
-    "retry_attempts": 2,
-    "retry_backoff_seconds": [
-      2,
-      5
-    ],
-    "timeout_seconds": 60,
-    "max_output_tokens": 1024,
-    "json_retry_max_completion_tokens": 2048,
-    "reasoning_effort": "low",
-    "evidence_content_chars": 550,
-    "max_llm_sources": 3,
-    "max_aliases_per_type": 5,
-    "max_negative_aliases_per_type": 3,
-    "model_candidates": [
-      "openai/gpt-oss-20b",
-      "openai/gpt-oss-120b"
-    ]
-  },
-  "openrouter": {
-    "model": "openai/gpt-oss-120b:free",
-    "base_url": "https://openrouter.ai/api/v1",
-    "require_free_model": true,
-    "requests_per_minute": 0,
-    "tokens_per_minute": 0,
-    "requests_per_day": 0,
-    "tokens_per_day": 0,
-    "operational_requests_per_minute": 3.0,
-    "max_api_calls_per_run": 1000,
-    "max_total_tokens_per_run": 0,
-    "retry_attempts": 4,
-    "retry_backoff_seconds": [
-      2,
-      5,
-      10,
-      20
-    ],
-    "timeout_seconds": 90,
-    "max_output_tokens": 1024,
-    "json_retry_max_completion_tokens": 2048,
-    "reasoning_effort": "low",
-    "evidence_content_chars": 550,
-    "max_llm_sources": 3,
-    "max_aliases_per_type": 5,
-    "max_negative_aliases_per_type": 3
-  },
   "recovery": {
     "reprocess_stale_auto_approved": true,
     "rule_metadata_source": "Consolidado",
@@ -228,21 +144,27 @@
     }
   },
   "semantic_funnel": {
-    "embedding_model": "BAAI/bge-m3",
-    "reranker_model": "BAAI/bge-reranker-v2-m3",
+    "embedding_model": "C:\\p\\models\\bge-m3",
+    "reranker_model": "C:\\p\\models\\bge-reranker-v2-m3",
     "embedding_device": "cpu",
     "reranker_device": "auto",
-    "embedding_batch_size": 16,
-    "rerank_batch_size": 4,
-    "type_dense_k": 20,
-    "type_pool_k": 24,
-    "type_top_k": 8,
-    "taxonomy_dense_k": 20,
-    "taxonomy_pool_k": 30,
-    "taxonomy_top_k": 8,
-    "max_sources": 5,
-    "source_chars": 900,
-    "max_evidence_chars": 6000
+    "embedding_batch_size": 32,
+    "rerank_batch_size": 8,
+    "type_dense_k": 8,
+    "type_pool_k": 10,
+    "type_top_k": 6,
+    "taxonomy_dense_k": 8,
+    "taxonomy_pool_k": 10,
+    "taxonomy_top_k": 6,
+    "max_sources": 4,
+    "source_chars": 420,
+    "max_evidence_chars": 1800,
+    "local_files_only": true,
+    "offline_mode": true,
+    "rerank_max_length": 192,
+    "rerank_types": false,
+    "rerank_taxonomy": true,
+    "direct_stage1_threshold": 4
   },
   "clef": {
     "model": "clef",
@@ -267,5 +189,16 @@
       "min_type_probability": 0.55,
       "min_type_confidence": 0.25
     }
+  },
+  "classification_flow": {
+    "clef_required_after_non_rule": true,
+    "preserve_valid_clef_classification_below_auto_gate": true,
+    "no_automatic_secondary_search": true,
+    "review_is_last_resort": true,
+    "recovery_priority": [
+      "READY_FOR_CLASSIFICATION",
+      "PARTIAL_TARGET_EVIDENCE",
+      "NO_TARGET_EVIDENCE"
+    ]
   }
 }

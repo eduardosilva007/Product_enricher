@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.0-clef / Collection R9.6p7
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.3-clef-required / Collection R9.6p7
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -12,7 +12,7 @@ Arquitetura:
     Stage 1.5 - Funil híbrido: regras/aliases + BGE-M3 + BGE reranker
     Stage 2 - Cloudflare Clef: decisão estruturada de TYPE/POWER/TAXONOMY
     Stage 3 - Gate local de consistência, confiança e identidade STRONG
-    Stage 4 - AUTO_APROVADO ou REVIEW com rastreabilidade
+    Stage 4 - AUTO_APROVADO ou CLASSIFIED_CLEF; coleta insuficiente vira NEEDS_RECOLLECTION
 
 Princípios:
 - Search RAW do provider selecionado descobre fontes; somente fontes aprovadas no Source Sieve podem ser aprofundadas.
@@ -20,6 +20,10 @@ Princípios:
 - Stage 1 usa o comportamento comprovado do R5: aliases JSON formam candidatos; resolução automática exige evidência explícita/repetida.
 - O funil semântico recupera apenas PRODUCT_TYPEs e pares TAXONOMY_PAIRS já existentes no JSON.
 - Clef escolhe TYPE, POWER e um par Category General|FAMILY dentro do contrato fechado.
+- Todo AMBIGUOUS/UNRESOLVED com evidência target utilizável passa obrigatoriamente pelo Clef.
+- BGE/reranker preparam candidatos; nunca encerram sozinhos um caso não resolvido por regra forte.
+- Resultado Clef válido abaixo do gate AUTO é preservado como CLASSIFIED_CLEF para double-check, não apagado em REVISAR.
+- Falta de evidência vira NEEDS_RECOLLECTION; REVIEW humano é exceção operacional/taxonômica, não rota padrão.
 - Clef nunca inventa Category/FAMILY: somente arbitra entre pares válidos do JSON.
 - Status=Manual/Revisão=MANUAL são FULL LOCK.
 - Revisão B.I=OK é HARD LOCK absoluto e vence inclusive --reprocess.
@@ -43,7 +47,7 @@ import sqlite3
 import sys
 import time
 import unicodedata
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
@@ -51,11 +55,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
 
-PIPELINE_VERSION = "4.0.0-clef"
-PROMPT_VERSION = "2026-10-05-v16-bge-reranker-clef-taxonomy"
-DEFAULT_MODEL = "openai/gpt-oss-120b"
+PIPELINE_VERSION = "4.0.3-clef-required"
+PROMPT_VERSION = "2026-10-09-v18-clef-required-preserve-classification"
 DEFAULT_CLEF_MODEL = "clef"
-BUILD_LABEL = "v4.0 Clef + BGE Funnel + Strong Identity"
+BUILD_LABEL = "v4.0.3 Clef Required after Funnel + Local BGE + Strong Identity"
 COLLECTION_ENGINE_VERSION = "2026-09-29-r9.6p7-import-noise-taxonomy"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
@@ -616,9 +619,9 @@ class Rules:
             "no_candidate_means_no_llm",
         ):
             if llm_gate.get(key) is not True:
-                errors.append(f"LLM_SAFETY_GATE_DISABLED: {key} deve ser true")
+                errors.append(f"CLEF_SAFETY_GATE_DISABLED: {key} deve ser true")
         if safe(llm_gate.get("require_identity_at_least")) not in {"PROBABLE", "STRONG"}:
-            errors.append("LLM_SAFETY_GATE_WEAK: require_identity_at_least deve ser PROBABLE ou STRONG")
+            errors.append("CLEF_SAFETY_GATE_WEAK: require_identity_at_least deve ser PROBABLE ou STRONG")
         funnel_policy = llm_gate.get("candidate_funnel", {}) or {}
         if not funnel_policy:
             errors.append("CLASSIFICATION_POLICY.llm_resolution_gate.candidate_funnel ausente")
@@ -750,7 +753,7 @@ class Rules:
         HF2 introduz TAXONOMY_EVIDENCE_RULES para tipos fisicamente amplos cuja
         família não pode ser decidida apenas por TYPE+POWER (principalmente
         WATERPUMP e LIFT PUMP). Essas regras só usam evidência já aprovada pelo
-        Stage 0 / Collection Quality Gate; a LLM continua sem decidir taxonomia.
+        Stage 0 / Collection Quality Gate; o Clef continua sem superar identidade/taxonomia válida.
         """
         evidence_fold = strip_accents(evidence_text).casefold()
         evidence_candidates = []
@@ -879,7 +882,7 @@ class TavilyReadOnlyStore:
         """Catálogo em ordem determinística pela business_key.
 
         Isso garante que um piloto de N produtos use o mesmo cohort ao trocar
-        apenas provider/modelo, permitindo benchmark Groq x NVIDIA no futuro.
+        apenas provider/modelo, permitindo comparação determinística entre execuções.
         """
         out = []
         for k in sorted(self._rows):
@@ -3191,7 +3194,7 @@ class DeterministicEngine:
     - candidatos vêm SOMENTE de aliases/regras do JSON;
     - qualquer fonte Tavily pode gerar candidato, como no R5;
     - resolução automática exige identidade explícita do modelo OU repetição;
-    - LLM nunca cria candidato novo (gate posterior).
+    - Clef nunca cria candidato novo (gate posterior).
     """
     IDENTITY_RANK = {"CONFLICT": 0, "WEAK": 1, "CONTEXTUAL": 2, "PROBABLE": 3, "STRONG": 4}
 
@@ -3203,7 +3206,7 @@ class DeterministicEngine:
         self.identity_cfg = cfg.get("identity", {}) or {}
         self.suffixes = self.identity_cfg.get("regional_suffixes", ["AR", "BR", "B1", "B2", "B3", "B4"])
         self.component_negations = rules.component_context.get("negation_phrases", {}) or {}
-        self.min_score = 1.0  # usado pelo gate LLM; 1 ponto = 1 fonte de suporte.
+        self.min_score = 1.0  # usado pelo gate Clef; 1 ponto = 1 fonte de suporte.
 
     def _source_quality_flags(self, title: str, content: str) -> List[str]:
         flags: List[str] = []
@@ -3594,7 +3597,7 @@ class DeterministicEngine:
             reasons.append("POWER_UNRESOLVED")
 
         # Se a taxonomia do TYPE independe de alimentação, UNKNOWN é uma decisão
-        # válida e não motivo para gastar LLM.
+        # válida e não motivo para chamar Clef.
         if product_type and power is None and not self._type_requires_specific_power(product_type):
             power = "UNKNOWN"
             reasons.append("POWER_UNKNOWN_ALLOWED_BY_TAXONOMY")
@@ -3619,9 +3622,9 @@ class DeterministicEngine:
         identity_best = max((s.relevance for s in supporters), key=lambda x: self.IDENTITY_RANK.get(x, 0), default="WEAK")
 
         if type_candidates:
-            reasons.append("ALLOWED_LLM_TYPES:" + ",".join(type_candidates))
+            reasons.append("ALLOWED_CLEF_TYPES:" + ",".join(type_candidates))
         else:
-            reasons.append("LLM_BLOCKED:NO_TYPE_CANDIDATE")
+            reasons.append("CLEF_BLOCKED:NO_TYPE_CANDIDATE")
 
         return Stage1Result(
             state=state,
@@ -3736,10 +3739,10 @@ class CandidateFunnelResult:
 
 
 def candidate_funnel(rules: Rules, s1: Stage1Result) -> CandidateFunnelResult:
-    """Stage 1.5 determinístico: reduz o espaço da LLM sem inventar candidatos.
+    """Stage 1.5 determinístico: reduz o espaço do Clef sem inventar candidatos.
 
     O funil opera somente sobre TYPEs já encontrados pelo Stage 1 e aplica o
-    mesmo conceito de evidência que será exigido depois da resposta da LLM.
+    mesmo conceito de evidência que será exigido depois da resposta do Clef.
     """
     gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
     policy = gate.get("candidate_funnel", {}) or {}
@@ -3925,7 +3928,7 @@ class ClassificationDB:
     @staticmethod
     def checkpoint_id(key: str, raw_hash: str, rules_hash: str, model: str) -> str:
         # Inclui modelo + prompt para impedir reaproveitamento silencioso de
-        # resultados de outra política LLM.
+        # resultados de outra política Clef.
         material = f"{PIPELINE_VERSION}|{PROMPT_VERSION}|{model}|{key}|{raw_hash}|{rules_hash}"
         return hashlib.sha256(material.encode()).hexdigest()
 
@@ -3999,68 +4002,6 @@ class ClassificationDB:
             ),
         )
         self.conn.commit()
-
-
-# -----------------------------------------------------------------------------
-# OpenAI-compatible Stage 2 — Groq
-# -----------------------------------------------------------------------------
-class DualWindowLimiter:
-    """Limiter conservador para RPM + TPM usando janela móvel de 60 segundos.
-
-    O consumo de tokens da próxima chamada é estimado antes do POST. A API continua
-    sendo a autoridade final; headers e 429 são tratados separadamente.
-    """
-
-    def __init__(self, rpm: int, tpm: int, safety_margin: float = 0.90):
-        self.rpm = max(1, int(rpm))
-        self.tpm = max(1, int(tpm))
-        self.margin = min(1.0, max(0.50, float(safety_margin)))
-        self.effective_rpm = max(1, int(self.rpm * self.margin))
-        self.effective_tpm = max(1, int(self.tpm * self.margin))
-        self.requests: deque = deque()
-        self.tokens: deque = deque()
-
-    def _prune(self, now: float) -> None:
-        while self.requests and now - self.requests[0] >= 60.0:
-            self.requests.popleft()
-        while self.tokens and now - self.tokens[0][0] >= 60.0:
-            self.tokens.popleft()
-
-    def wait(self, estimated_tokens: int) -> None:
-        estimated_tokens = max(1, int(estimated_tokens))
-        while True:
-            now = time.monotonic()
-            self._prune(now)
-
-            used_tokens = sum(x[1] for x in self.tokens)
-            req_ok = len(self.requests) < self.effective_rpm
-            tok_ok = used_tokens + estimated_tokens <= self.effective_tpm
-
-            # Uma única chamada maior que o budget efetivo não pode ficar em loop eterno.
-            if estimated_tokens > self.effective_tpm:
-                raise OperationalPause(
-                    "GROQ_SINGLE_REQUEST_TOO_LARGE",
-                    f"Prompt estimado={estimated_tokens} tokens excede TPM operacional="
-                    f"{self.effective_tpm}. Reduza contexto/evidências."
-                )
-
-            if req_ok and tok_ok:
-                self.requests.append(now)
-                self.tokens.append((now, estimated_tokens))
-                return
-
-            waits = []
-            if not req_ok and self.requests:
-                waits.append(max(0.1, 60.0 - (now - self.requests[0]) + 0.05))
-            if not tok_ok and self.tokens:
-                waits.append(max(0.1, 60.0 - (now - self.tokens[0][0]) + 0.05))
-            wait_for = min(waits) if waits else 1.0
-            LOG.info(
-                "GROQ LIMITER: aguardando %.1fs | req_window=%d/%d | token_est_window=%d/%d",
-                wait_for, len(self.requests), self.effective_rpm,
-                used_tokens, self.effective_tpm,
-            )
-            time.sleep(wait_for)
 
 
 
@@ -4173,7 +4114,7 @@ class ClefFunnelClassifier:
         self.max_calls_per_run = max(0, int(self.ccfg.get("max_api_calls_per_run", 0) or 0))
         self.max_total_tokens_per_run = max(0, int(self.ccfg.get("max_total_tokens_per_run", 0) or 0))
 
-        # Atributos mantidos para compatibilidade com logs do ProviderCascade.
+        # Atributos mantidos para compatibilidade com o formato de execução/cache existente.
         self.max_output_tokens = 0
         self.json_retry_max_completion_tokens = 0
         self.account_requests_per_minute = 0
@@ -4183,17 +4124,23 @@ class ClefFunnelClassifier:
 
         self.embedding_model_name = safe(self.fcfg.get("embedding_model")) or "BAAI/bge-m3"
         self.reranker_model_name = safe(self.fcfg.get("reranker_model")) or "BAAI/bge-reranker-v2-m3"
+        self.local_files_only = bool(self.fcfg.get("local_files_only", False))
+        self.offline_mode = bool(self.fcfg.get("offline_mode", self.local_files_only))
         self.embedding_batch_size = max(1, int(self.fcfg.get("embedding_batch_size", 16) or 16))
-        self.rerank_batch_size = max(1, int(self.fcfg.get("rerank_batch_size", 4) or 4))
-        self.type_dense_k = max(4, int(self.fcfg.get("type_dense_k", 20) or 20))
-        self.type_pool_k = max(self.type_dense_k, int(self.fcfg.get("type_pool_k", 24) or 24))
-        self.type_top_k = max(3, int(self.fcfg.get("type_top_k", 8) or 8))
-        self.taxonomy_dense_k = max(4, int(self.fcfg.get("taxonomy_dense_k", 20) or 20))
-        self.taxonomy_pool_k = max(self.taxonomy_dense_k, int(self.fcfg.get("taxonomy_pool_k", 30) or 30))
-        self.taxonomy_top_k = max(3, int(self.fcfg.get("taxonomy_top_k", 8) or 8))
-        self.max_sources = max(1, int(self.fcfg.get("max_sources", 5) or 5))
-        self.source_chars = max(200, int(self.fcfg.get("source_chars", 900) or 900))
-        self.max_evidence_chars = max(1200, int(self.fcfg.get("max_evidence_chars", 6000) or 6000))
+        self.rerank_batch_size = max(1, int(self.fcfg.get("rerank_batch_size", 8) or 8))
+        self.rerank_max_length = max(128, int(self.fcfg.get("rerank_max_length", 224) or 224))
+        self.rerank_types = bool(self.fcfg.get("rerank_types", False))
+        self.rerank_taxonomy = bool(self.fcfg.get("rerank_taxonomy", True))
+        self.type_dense_k = max(4, int(self.fcfg.get("type_dense_k", 8) or 8))
+        self.type_pool_k = max(self.type_dense_k, int(self.fcfg.get("type_pool_k", 10) or 10))
+        self.type_top_k = max(3, int(self.fcfg.get("type_top_k", 6) or 6))
+        self.taxonomy_dense_k = max(4, int(self.fcfg.get("taxonomy_dense_k", 10) or 10))
+        self.taxonomy_pool_k = max(self.taxonomy_dense_k, int(self.fcfg.get("taxonomy_pool_k", 14) or 14))
+        self.taxonomy_top_k = max(3, int(self.fcfg.get("taxonomy_top_k", 6) or 6))
+        self.max_sources = max(1, int(self.fcfg.get("max_sources", 4) or 4))
+        self.source_chars = max(160, int(self.fcfg.get("source_chars", 500) or 500))
+        self.max_evidence_chars = max(900, int(self.fcfg.get("max_evidence_chars", 2200) or 2200))
+        self.direct_stage1_threshold = max(1, int(self.fcfg.get("direct_stage1_threshold", 4) or 4))
         self.embedding_device_cfg = safe(self.fcfg.get("embedding_device")) or "cpu"
         self.reranker_device_cfg = safe(self.fcfg.get("reranker_device")) or "auto"
 
@@ -4201,6 +4148,9 @@ class ClefFunnelClassifier:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
+        self.semantic_calls = 0
+        self.semantic_seconds = 0.0
+        self.rerank_seconds = 0.0
 
         self._torch = None
         self._embedder = None
@@ -4217,8 +4167,9 @@ class ClefFunnelClassifier:
             label: self._taxonomy_document(label) for label in self.taxonomy_labels
         }
         self.cache_model_id = (
-            f"{self.model}|{self.embedding_model_name}|{self.reranker_model_name}"
+            f"{self.model}|prompt:{PROMPT_VERSION}|{self.embedding_model_name}|{self.reranker_model_name}"
             f"|type{self.type_top_k}|tax{self.taxonomy_top_k}"
+            f"|rt{int(self.rerank_types)}|rx{self.rerank_max_length}|tp{self.type_pool_k}|xp{self.taxonomy_pool_k}"
         )
 
         account_id = os.getenv(self.account_id_env, "").strip()
@@ -4231,8 +4182,10 @@ class ClefFunnelClassifier:
 
     def route_identity_fragment(self) -> str:
         return (
-            f"clef:{self.model}+embed:{self.embedding_model_name}"
+            f"clef:{self.model}+prompt:{PROMPT_VERSION}+embed:{self.embedding_model_name}"
             f"+rerank:{self.reranker_model_name}"
+            f"+rt:{int(self.rerank_types)}+rx:{self.rerank_max_length}"
+            f"+tp:{self.type_pool_k}+xp:{self.taxonomy_pool_k}"
         )
 
     def preflight(self) -> Dict[str, Any]:
@@ -4260,6 +4213,17 @@ class ClefFunnelClassifier:
                     "CLEF_API_TOKEN_MISSING",
                     f"{self.api_key_env} não configurada no .env.",
                 )
+        if self.local_files_only:
+            missing_local_models = [
+                value for value in [self.embedding_model_name, self.reranker_model_name]
+                if not Path(value).expanduser().exists()
+            ]
+            if missing_local_models:
+                raise OperationalPause(
+                    "CLEF_FUNNEL_LOCAL_MODEL_MISSING",
+                    "Modelos locais não encontrados: " + ", ".join(missing_local_models),
+                )
+
         account_id = os.getenv(self.account_id_env, "").strip()
         slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
         self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
@@ -4472,14 +4436,25 @@ class ClefFunnelClassifier:
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
         self._torch = torch
+        if self.offline_mode:
+            # Impede qualquer tentativa de consulta/download do Hugging Face durante a classificação.
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
         embed_device = self._resolve_device(self.embedding_device_cfg, torch)
         rerank_device = self._resolve_device(self.reranker_device_cfg, torch)
         LOG.info(
-            "SEMANTIC FUNNEL loading | embedding=%s (%s) | reranker=%s (%s)",
+            "SEMANTIC FUNNEL loading | embedding=%s (%s) | reranker=%s (%s) | "
+            "local_only=%s | offline=%s | type_rerank=%s | tax_pool=%d | rerank_max_length=%d",
             self.embedding_model_name, embed_device,
             self.reranker_model_name, rerank_device,
+            self.local_files_only, self.offline_mode, self.rerank_types,
+            self.taxonomy_pool_k, self.rerank_max_length,
         )
-        self._embedder = SentenceTransformer(self.embedding_model_name, device=embed_device)
+        self._embedder = SentenceTransformer(
+            self.embedding_model_name,
+            device=embed_device,
+            local_files_only=self.local_files_only,
+        )
         type_docs = [self.type_docs[x] for x in self.type_labels]
         tax_docs = [self.taxonomy_docs[x] for x in self.taxonomy_labels]
         self._type_doc_embeddings = self._embedder.encode(
@@ -4496,21 +4471,31 @@ class ClefFunnelClassifier:
             show_progress_bar=False,
             convert_to_numpy=True,
         )
-        self._reranker_tokenizer = AutoTokenizer.from_pretrained(self.reranker_model_name)
-        self._reranker = AutoModelForSequenceClassification.from_pretrained(self.reranker_model_name)
+        self._reranker_tokenizer = AutoTokenizer.from_pretrained(
+            self.reranker_model_name,
+            local_files_only=self.local_files_only,
+        )
+        self._reranker = AutoModelForSequenceClassification.from_pretrained(
+            self.reranker_model_name,
+            local_files_only=self.local_files_only,
+        )
         self._reranker.to(rerank_device)
         self._reranker.eval()
         self._reranker_device = rerank_device
 
-    def _dense_scores(self, query: str, labels: Sequence[str], doc_embeddings) -> Dict[str, float]:
-        q = self._embedder.encode(
+    def _query_embedding(self, query: str):
+        # Um único embedding por produto é reutilizado em TYPE e TAXONOMIA.
+        return self._embedder.encode(
             [query],
             batch_size=1,
             normalize_embeddings=True,
             show_progress_bar=False,
             convert_to_numpy=True,
         )[0]
-        sims = doc_embeddings @ q
+
+    @staticmethod
+    def _dense_scores_from_vector(query_embedding, labels: Sequence[str], doc_embeddings) -> Dict[str, float]:
+        sims = doc_embeddings @ query_embedding
         return {label: float(sims[i]) for i, label in enumerate(labels)}
 
     @staticmethod
@@ -4542,6 +4527,7 @@ class ClefFunnelClassifier:
     def _rerank_labels(self, query: str, labels: Sequence[str], docs: Dict[str, str], top_k: int) -> Tuple[List[str], Dict[str, float]]:
         if not labels:
             return [], {}
+        started = time.monotonic()
         torch = self._torch
         scores: List[float] = []
         for start in range(0, len(labels), self.rerank_batch_size):
@@ -4551,63 +4537,76 @@ class ClefFunnelClassifier:
                 [docs[x] for x in batch],
                 padding=True,
                 truncation=True,
-                max_length=512,
+                max_length=self.rerank_max_length,
                 return_tensors="pt",
             )
             enc = {k: v.to(self._reranker_device) for k, v in enc.items()}
-            with torch.no_grad():
+            with torch.inference_mode():
                 logits = self._reranker(**enc, return_dict=True).logits
                 if logits.ndim == 2 and logits.shape[1] > 1:
                     vals = logits[:, -1].float().view(-1)
                 else:
                     vals = logits.float().view(-1)
             scores.extend(vals.detach().cpu().numpy().astype(float).tolist())
+        self.rerank_seconds += time.monotonic() - started
         ranked = sorted(zip(labels, scores), key=lambda kv: (-kv[1], kv[0]))
         return [x[0] for x in ranked[:top_k]], {x[0]: float(x[1]) for x in ranked}
 
     def _semantic_candidates(self, brand: str, model: str, s1: Stage1Result) -> Dict[str, Any]:
         self._ensure_models()
+        started = time.monotonic()
+        rerank_before = self.rerank_seconds
         evidence, refs = self._evidence_text(brand, model, s1)
 
+        query_embedding = self._query_embedding(evidence)
         type_lex = self._lexical_type_scores(evidence, s1)
-        type_dense = self._dense_scores(evidence, self.type_labels, self._type_doc_embeddings)
+        type_dense = self._dense_scores_from_vector(query_embedding, self.type_labels, self._type_doc_embeddings)
         type_pool = self._merge_pool(
             type_lex, type_dense, s1.type_candidates,
             self.type_dense_k, self.type_pool_k,
         )
-        type_top, type_rerank = self._rerank_labels(
-            evidence, type_pool, self.type_docs, self.type_top_k
-        )
-        # Nunca deixa um candidato determinístico forte desaparecer apenas por
-        # reranking semântico. Preserva até 4 TYPEs Stage 1 de maior score.
+
+        # TYPE: BGE + lexical/RRF já têm recall alto e são baratos. O cross-encoder
+        # fica desligado por padrão nesta etapa para não duplicar o maior custo em CPU.
+        if self.rerank_types and len(type_pool) > self.type_top_k:
+            type_top, type_rerank = self._rerank_labels(
+                evidence, type_pool, self.type_docs, self.type_top_k
+            )
+        else:
+            type_top = list(type_pool[: self.type_top_k])
+            type_rerank = {}
+
         deterministic_keep = [
             typ for typ, _ in sorted(
                 [(t, float(s1.type_scores.get(t, 0.0) or 0.0)) for t in s1.type_candidates],
                 key=lambda kv: (-kv[1], kv[0]),
-            )[:4]
+            )[: self.direct_stage1_threshold]
             if typ in self.rules.types
         ]
         for typ in deterministic_keep:
             if typ not in type_top:
                 type_top.append(typ)
 
-        # Taxonomia recebe obrigatoriamente os pares mapeados dos TYPEs finais,
-        # mas também usa dense/lexical para recuperar subtipo que Stage 1 não viu.
-        mapped_required = []
+        # TAXONOMIA: concentra o cross-encoder onde ele mais agrega — separar FAMILYs
+        # vizinhas. Pool pequeno, contexto curto e apenas um reranking por produto.
+        mapped_required: List[str] = []
         for typ in type_top:
             mapped_required.extend(_pair_label(x) for x in _taxonomy_pairs_for_type(self.rules, typ))
         tax_lex = self._lexical_taxonomy_scores(evidence, type_top)
-        tax_dense = self._dense_scores(evidence, self.taxonomy_labels, self._taxonomy_doc_embeddings)
+        tax_dense = self._dense_scores_from_vector(query_embedding, self.taxonomy_labels, self._taxonomy_doc_embeddings)
         tax_pool = self._merge_pool(
             tax_lex, tax_dense, mapped_required,
             self.taxonomy_dense_k, self.taxonomy_pool_k,
         )
-        tax_top, tax_rerank = self._rerank_labels(
-            evidence, tax_pool, self.taxonomy_docs, self.taxonomy_top_k
-        )
-        # Preserva os pares diretamente mapeados dos TYPEs determinísticos que
-        # sobreviveram, evitando que o reranker elimine uma opção sustentada pelo JSON.
-        deterministic_pairs = []
+        if self.rerank_taxonomy and len(tax_pool) > self.taxonomy_top_k:
+            tax_top, tax_rerank = self._rerank_labels(
+                evidence, tax_pool, self.taxonomy_docs, self.taxonomy_top_k
+            )
+        else:
+            tax_top = list(tax_pool[: self.taxonomy_top_k])
+            tax_rerank = {}
+
+        deterministic_pairs: List[str] = []
         for typ in deterministic_keep:
             deterministic_pairs.extend(
                 _pair_label(pair) for pair in _taxonomy_pairs_for_type(self.rules, typ)
@@ -4615,6 +4614,11 @@ class ClefFunnelClassifier:
         for label in deterministic_pairs:
             if label in self.taxonomy_profiles and label not in tax_top:
                 tax_top.append(label)
+
+        elapsed = time.monotonic() - started
+        rerank_elapsed = self.rerank_seconds - rerank_before
+        self.semantic_calls += 1
+        self.semantic_seconds += elapsed
         return {
             "evidence": evidence,
             "refs": refs,
@@ -4622,6 +4626,10 @@ class ClefFunnelClassifier:
             "taxonomy_candidates": tax_top,
             "type_rerank_scores": type_rerank,
             "taxonomy_rerank_scores": tax_rerank,
+            "semantic_seconds": elapsed,
+            "rerank_seconds": rerank_elapsed,
+            "type_pool_size": len(type_pool),
+            "taxonomy_pool_size": len(tax_pool),
         }
 
     @staticmethod
@@ -4861,6 +4869,10 @@ class ClefFunnelClassifier:
             "semantic_taxonomy_candidates": tax_candidates,
             "semantic_type_rerank_scores": sem["type_rerank_scores"],
             "semantic_taxonomy_rerank_scores": sem["taxonomy_rerank_scores"],
+            "semantic_seconds": float(sem.get("semantic_seconds", 0.0) or 0.0),
+            "rerank_seconds": float(sem.get("rerank_seconds", 0.0) or 0.0),
+            "semantic_type_pool_size": int(sem.get("type_pool_size", 0) or 0),
+            "semantic_taxonomy_pool_size": int(sem.get("taxonomy_pool_size", 0) or 0),
             "clef_type_probability": type_ans["probability"],
             "clef_type_confidence": type_ans["confidence"],
             "clef_type_top2": type_ans["top2"],
@@ -4879,1558 +4891,6 @@ class ClefFunnelClassifier:
             data, usage,
         )
         return data, False, usage
-
-class OpenAICompatibleClassifier:
-    """Stage 2 via provider OpenAI-compatible.
-
-    Providers:
-    - nvidia     / openai/gpt-oss-20b (primário, com failover de modelo)
-    - groq       / openai/gpt-oss-120b
-    - openrouter / opcional; fora da rota padrão enquanto bloqueado pelo T.I.
-    """
-
-    def __init__(
-        self,
-        rules: Rules,
-        cfg: Dict[str, Any],
-        db: ClassificationDB,
-        provider: str,
-        model: str,
-    ):
-        self.rules = rules
-        self.cfg = cfg
-        self.db = db
-        self.provider = provider.casefold().strip()
-        self.model = model
-
-        if self.provider not in {"groq", "nvidia", "openrouter"}:
-            raise OperationalPause(
-                "LLM_PROVIDER_UNSUPPORTED",
-                f"Provider '{provider}' não está habilitado nesta versão."
-            )
-
-        pcfg = cfg.get(self.provider, {}) or {}
-
-        if self.provider == "groq":
-            self.api_key_env = "GROQ_API_KEY"
-            self.base_url = (
-                os.getenv("GROQ_BASE_URL", "").strip()
-                or safe(pcfg.get("base_url"))
-                or "https://api.groq.com/openai/v1"
-            ).rstrip("/")
-            self.model_candidates = [self.model]
-
-        elif self.provider == "nvidia":
-            self.api_key_env = "NVIDIA_API_KEY"
-            self.base_url = (
-                os.getenv("NVIDIA_BASE_URL", "").strip()
-                or safe(pcfg.get("base_url"))
-                or "https://integrate.api.nvidia.com/v1"
-            ).rstrip("/")
-
-            env_candidates = [
-                x.strip()
-                for x in os.getenv("NVIDIA_MODEL_CANDIDATES", "").split(",")
-                if x.strip()
-            ]
-            config_candidates = [
-                safe(x)
-                for x in (pcfg.get("model_candidates", []) or [])
-                if safe(x)
-            ]
-            defaults = [
-                "openai/gpt-oss-20b",
-                "openai/gpt-oss-120b",
-            ]
-            ordered = [self.model] + env_candidates + config_candidates + defaults
-            self.model_candidates = []
-            for candidate in ordered:
-                candidate = safe(candidate)
-                if candidate and candidate not in self.model_candidates:
-                    self.model_candidates.append(candidate)
-            # Preflight preencherá somente os modelos realmente servidos agora.
-            self.available_model_candidates: List[str] = []
-
-        else:  # OpenRouter
-            self.api_key_env = "OPENROUTER_API_KEY"
-            self.base_url = (
-                os.getenv("OPENROUTER_BASE_URL", "").strip()
-                or safe(pcfg.get("base_url"))
-                or "https://openrouter.ai/api/v1"
-            ).rstrip("/")
-
-            # Mantemos um modelo fixo para não misturar qualidade entre modelos.
-            # O OpenRouter já faz failover entre provedores que servem o MESMO modelo.
-            self.require_free_model = bool(pcfg.get("require_free_model", True))
-            self.model_candidates = [self.model]
-
-        self.account_requests_per_minute = int(
-            pcfg.get("requests_per_minute", 30 if self.provider == "groq" else 0)
-        )
-        self.account_tokens_per_minute = int(
-            pcfg.get("tokens_per_minute", 8000 if self.provider == "groq" else 0)
-        )
-
-        self.operational_requests_per_minute = float(
-            pcfg.get("operational_requests_per_minute", 3.0)
-        )
-        self.limiter = RateLimiter(self.operational_requests_per_minute)
-
-        # Groq aplica simultaneamente RPM e TPM. O RateLimiter sozinho controla
-        # apenas a cadência de requests; o segundo guard reserva também o budget
-        # estimado de tokens na janela móvel de 60s para evitar 429 por TPM.
-        self.groq_window_limiter: Optional[DualWindowLimiter] = None
-        if (
-            self.provider == "groq"
-            and self.account_requests_per_minute > 0
-            and self.account_tokens_per_minute > 0
-        ):
-            self.groq_window_limiter = DualWindowLimiter(
-                self.account_requests_per_minute,
-                self.account_tokens_per_minute,
-                safety_margin=float(pcfg.get("tpm_safety_margin", 0.88)),
-            )
-
-        self.requests_per_day = int(
-            pcfg.get("requests_per_day", 1000 if self.provider == "groq" else 0)
-        )
-        self.tokens_per_day = int(
-            pcfg.get("tokens_per_day", 200000 if self.provider == "groq" else 0)
-        )
-        self.max_calls_per_run = max(
-            0, int(pcfg.get("max_api_calls_per_run", 1000))
-        )
-        self.max_total_tokens_per_run = max(
-            0, int(pcfg.get("max_total_tokens_per_run", 0))
-        )
-
-        # NVIDIA precisa falhar rápido para não travar lotes grandes.
-        # Groq/OpenRouter preservam os limites históricos.
-        default_timeout = 60 if self.provider == "nvidia" else 90
-        default_retries = 2 if self.provider == "nvidia" else 4
-        default_backoff = [2, 5] if self.provider == "nvidia" else [2, 5, 10, 20]
-        self.timeout_seconds = max(
-            10, int(pcfg.get("timeout_seconds", default_timeout))
-        )
-        self.retry_attempts = max(
-            1, int(pcfg.get("retry_attempts", default_retries))
-        )
-        self.retry_backoff = list(
-            pcfg.get("retry_backoff_seconds", default_backoff)
-            or default_backoff
-        )
-        self.max_output_tokens = max(
-            64, int(pcfg.get("max_output_tokens", 1024))
-        )
-        self.json_retry_max_completion_tokens = max(
-            self.max_output_tokens,
-            int(pcfg.get("json_retry_max_completion_tokens", 2048)),
-        )
-        self.reasoning_effort = safe(
-            pcfg.get("reasoning_effort", "low")
-        ) or "low"
-
-        self.evidence_content_chars = max(
-            250, int(pcfg.get("evidence_content_chars", 500))
-        )
-        self.max_llm_sources = max(
-            1, int(pcfg.get("max_llm_sources", 2))
-        )
-        self.max_aliases_per_type = max(
-            3, int(pcfg.get("max_aliases_per_type", 6))
-        )
-        self.max_negative_aliases_per_type = max(
-            2, int(pcfg.get("max_negative_aliases_per_type", 4))
-        )
-
-        self.api_calls = 0
-        self.prompt_tokens = 0
-        self.completion_tokens = 0
-        self.total_tokens = 0
-
-    @property
-    def identity(self) -> str:
-        return f"{self.provider}:{self.model}"
-
-    def _discover_nvidia_model(self) -> Dict[str, Any]:
-        """Consulta a API NVIDIA e prepara a cadeia de modelos servidos agora."""
-        import requests
-
-        url = self.base_url + "/models"
-        headers = {
-            "Authorization": f"Bearer {os.environ[self.api_key_env].strip()}",
-            "Accept": "application/json",
-        }
-
-        try:
-            resp = requests.get(
-                url,
-                headers=headers,
-                timeout=min(self.timeout_seconds, 30),
-            )
-        except requests.RequestException as exc:
-            raise OperationalPause(
-                "NVIDIA_MODEL_DISCOVERY_NETWORK",
-                f"Falha ao consultar {url}: {type(exc).__name__}: {safe(exc)}",
-            ) from exc
-
-        if resp.status_code != 200:
-            raise self._operational_error(
-                resp.status_code,
-                safe(resp.text)[:3000],
-            )
-
-        try:
-            payload = resp.json()
-            available = {
-                safe(row.get("id"))
-                for row in (payload.get("data", []) or [])
-                if safe(row.get("id"))
-            }
-        except Exception as exc:
-            raise OperationalPause(
-                "NVIDIA_MODEL_DISCOVERY_PARSE",
-                f"Resposta inválida de GET /models: {type(exc).__name__}: {safe(exc)}",
-            ) from exc
-
-        if not available:
-            raise OperationalPause(
-                "NVIDIA_NO_MODELS",
-                "GET /v1/models não retornou modelos disponíveis.",
-            )
-
-        requested = self.model
-        served_candidates = [
-            candidate
-            for candidate in self.model_candidates
-            if candidate in available
-        ]
-        if not served_candidates:
-            interesting = sorted(
-                x for x in available
-                if any(k in x.casefold() for k in ["nemotron", "llama", "gpt-oss"])
-            )[:30]
-            raise OperationalPause(
-                "NVIDIA_NO_COMPATIBLE_MODEL",
-                "Nenhum candidato configurado está disponível na API NVIDIA. "
-                f"Candidatos={self.model_candidates}. "
-                f"Disponíveis relacionados={interesting}",
-            )
-
-        self.available_model_candidates = served_candidates
-
-        if requested in served_candidates:
-            selected = requested
-            auto_selected = False
-        else:
-            selected = served_candidates[0]
-            auto_selected = True
-            self.model = selected
-            LOG.warning(
-                "NVIDIA MODEL AUTO-SELECT | configurado=%s indisponível | selecionado=%s",
-                requested,
-                selected,
-            )
-
-        return {
-            "requested_model": requested,
-            "selected_model": selected,
-            "auto_selected": auto_selected,
-            "available_count": len(available),
-            "candidate_models": list(served_candidates),
-        }
-
-    def advance_nvidia_model(self, reason_code: str) -> bool:
-        """Troca para o próximo modelo NVIDIA já validado pelo preflight."""
-        if self.provider != "nvidia":
-            return False
-
-        candidates = list(getattr(self, "available_model_candidates", []) or [])
-        if not candidates:
-            return False
-
-        try:
-            current_index = candidates.index(self.model)
-        except ValueError:
-            current_index = -1
-
-        for candidate in candidates[current_index + 1:]:
-            candidate = safe(candidate)
-            if not candidate or candidate == self.model:
-                continue
-            old = self.model
-            self.model = candidate
-            LOG.warning(
-                "NVIDIA MODEL FAILOVER | %s -> %s | motivo=%s",
-                old,
-                candidate,
-                reason_code,
-            )
-            return True
-        return False
-
-    def route_identity_fragment(self) -> str:
-        """Identidade auditável da política de modelos do provider."""
-        if self.provider == "nvidia":
-            candidates = list(
-                getattr(self, "available_model_candidates", []) or self.model_candidates
-            )
-            return "nvidia:[" + ",".join(candidates) + "]"
-        return f"{self.provider}:{self.model}"
-
-    def _discover_openrouter_model(self) -> Dict[str, Any]:
-        """Valida chave/modelo diretamente no catálogo vivo do OpenRouter.
-
-        Para este projeto o default é fixo em openai/gpt-oss-120b:free. Não usa
-        openrouter/free, porque esse router pode trocar de modelo e dificultar a
-        auditoria da taxa de acerto.
-        """
-        import requests
-
-        headers = {
-            "Authorization": f"Bearer {os.environ[self.api_key_env].strip()}",
-            "Accept": "application/json",
-        }
-        models_url = self.base_url + "/models"
-        key_url = self.base_url + "/key"
-
-        try:
-            resp = requests.get(
-                models_url,
-                headers=headers,
-                timeout=min(self.timeout_seconds, 30),
-            )
-        except requests.RequestException as exc:
-            raise OperationalPause(
-                "OPENROUTER_MODEL_DISCOVERY_NETWORK",
-                f"Falha ao consultar {models_url}: {type(exc).__name__}: {safe(exc)}",
-            ) from exc
-
-        if resp.status_code != 200:
-            raise self._operational_error(resp.status_code, safe(resp.text)[:3000])
-
-        try:
-            payload = resp.json()
-            rows = payload.get("data", []) or []
-            by_id = {
-                safe(row.get("id")): row
-                for row in rows
-                if safe(row.get("id"))
-            }
-        except Exception as exc:
-            raise OperationalPause(
-                "OPENROUTER_MODEL_DISCOVERY_PARSE",
-                f"Resposta inválida de GET /models: {type(exc).__name__}: {safe(exc)}",
-            ) from exc
-
-        requested = self.model
-        row = by_id.get(requested)
-        if row is None:
-            related = sorted(
-                mid for mid in by_id
-                if any(k in mid.casefold() for k in ["gpt-oss-120b", "gpt-oss-20b", "nemotron"])
-                and mid.endswith(":free")
-            )[:30]
-            raise OperationalPause(
-                "OPENROUTER_MODEL_UNAVAILABLE",
-                f"Modelo configurado não aparece em GET /models: {requested}. "
-                f"Free relacionados disponíveis={related}",
-            )
-
-        pricing = row.get("pricing", {}) or {}
-        prompt_price = safe(pricing.get("prompt"))
-        completion_price = safe(pricing.get("completion"))
-        request_price = safe(pricing.get("request"))
-        is_free_slug = requested.endswith(":free")
-        def _price_is_zero(value: str) -> bool:
-            value = safe(value)
-            if not value:
-                return True
-            try:
-                return float(value) == 0.0
-            except Exception:
-                return False
-
-        is_zero_priced = all(
-            _price_is_zero(x)
-            for x in [prompt_price, completion_price, request_price]
-        )
-        if getattr(self, "require_free_model", True) and not (is_free_slug and is_zero_priced):
-            raise OperationalPause(
-                "OPENROUTER_MODEL_NOT_FREE",
-                f"O projeto exige endpoint gratuito, mas o modelo configurado não foi validado como free: {requested}",
-            )
-
-        supported = {safe(x) for x in (row.get("supported_parameters", []) or [])}
-        structured = "response_format" in supported
-        if not structured:
-            raise OperationalPause(
-                "OPENROUTER_STRUCTURED_OUTPUT_UNSUPPORTED",
-                f"Modelo {requested} não anuncia response_format em GET /models; "
-                "não será usado para evitar regressão de JSON.",
-            )
-
-        key_info: Dict[str, Any] = {}
-        try:
-            kres = requests.get(
-                key_url,
-                headers=headers,
-                timeout=min(self.timeout_seconds, 30),
-            )
-            if kres.status_code == 200:
-                kd = (kres.json() or {}).get("data", {}) or {}
-                key_info = {
-                    "is_free_tier": bool(kd.get("is_free_tier", False)),
-                    "limit_remaining": kd.get("limit_remaining"),
-                    "usage_daily": kd.get("usage_daily"),
-                }
-        except Exception:
-            # /key é telemetria auxiliar; falha aqui não invalida a inferência.
-            key_info = {}
-
-        return {
-            "requested_model": requested,
-            "selected_model": requested,
-            "auto_selected": False,
-            "available_count": len(by_id),
-            "free_validated": True,
-            "structured_output": True,
-            "key_info": key_info,
-        }
-
-    def preflight(self) -> Dict[str, Any]:
-        """Pre-flight local; NVIDIA/OpenRouter validam modelo no catálogo vivo."""
-        try:
-            import requests  # noqa: F401
-        except ImportError as exc:
-            raise OperationalPause(
-                f"{self.provider.upper()}_REQUESTS_MISSING",
-                "Pacote requests não instalado. Instale requirements.txt.",
-            ) from exc
-
-        if not os.getenv(self.api_key_env, "").strip():
-            raise OperationalPause(
-                f"{self.provider.upper()}_API_KEY_MISSING",
-                f"{self.api_key_env} não configurada no .env."
-            )
-
-        if not self.base_url.startswith("https://"):
-            raise OperationalPause(
-                f"{self.provider.upper()}_BASE_URL_INVALID",
-                f"Base URL inválida: {self.base_url!r}"
-            )
-
-        discovery = None
-        if self.provider == "nvidia":
-            discovery = self._discover_nvidia_model()
-        elif self.provider == "openrouter":
-            discovery = self._discover_openrouter_model()
-
-        return {
-            "provider": self.provider,
-            "model": self.model,
-            "base_url": self.base_url,
-            "account_rpm": self.account_requests_per_minute,
-            "account_tpm": self.account_tokens_per_minute,
-            "operational_rpm": self.operational_requests_per_minute,
-            "requests_per_day": self.requests_per_day,
-            "tokens_per_day": self.tokens_per_day,
-            "run_cap": self.max_calls_per_run,
-            "token_cap": self.max_total_tokens_per_run,
-            "model_discovery": discovery,
-        }
-
-
-    def schema(self, s1: Stage1Result, allowed_types: Optional[Sequence[str]] = None) -> Dict[str, Any]:
-        """Structured Output fechado nos candidatos sobreviventes do Stage 1.5.
-
-        Groq/OpenRouter nem conseguem gerar TYPE/POWER fora do conjunto
-        determinístico; NVIDIA continua protegida pelo validator Python.
-        """
-        return {
-            "type": "object",
-            "properties": {
-                "decision": {
-                    "type": "string",
-                    "enum": ["RESOLVED", "INSUFFICIENT_EVIDENCE", "CONFLICT"],
-                },
-                "product_type": {
-                    "type": "string",
-                    "enum": sorted(set(allowed_types or s1.type_candidates) | {"REVISAR"}),
-                },
-                "power": {
-                    "type": "string",
-                    "enum": sorted(set(s1.power_candidates) | {"UNKNOWN"}),
-                },
-                "evidence_source_ids": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                },
-                "reason_short": {"type": "string"},
-            },
-            "required": [
-                "decision",
-                "product_type",
-                "power",
-                "evidence_source_ids",
-                "reason_short",
-            ],
-            "additionalProperties": False,
-        }
-
-    @staticmethod
-    def _tokens(text: str) -> set:
-        return {
-            x for x in re.findall(r"\w+", norm_text(text), flags=re.UNICODE)
-            if len(x) >= 3
-        }
-
-    def _context_type_names(self, brand: str, model: str, s1: Stage1Result) -> List[str]:
-        """Stage 1.5: LLM vê somente os candidatos sobreviventes do funil."""
-        funnel = candidate_funnel(self.rules, s1)
-        return [typ for typ in funnel.candidates if typ in self.rules.types]
-
-    def _rules_context(
-        self, brand: str, model: str, s1: Stage1Result
-    ) -> Tuple[Dict[str, Any], List[str]]:
-        """Pacote mínimo de regras do JSON para o fallback LLM."""
-        selected = self._context_type_names(brand, model, s1)
-        selected_set = set(selected)
-
-        evidence_text = "\n".join(
-            [brand, model]
-            + [
-                f"{s.title}\n{s.content[:self.evidence_content_chars]}"
-                for s in s1.sources[: self.max_llm_sources]
-            ]
-        )
-        e_tokens = self._tokens(evidence_text)
-
-        def rank_aliases(values: List[str], limit: int) -> List[str]:
-            ranked = []
-            for alias in values or []:
-                alias = safe(alias)
-                if not alias:
-                    continue
-                a_tokens = self._tokens(alias)
-                overlap = len(a_tokens & e_tokens)
-                literal = 1 if norm_text(alias) in norm_text(evidence_text) else 0
-                ranked.append((literal, overlap, len(a_tokens), alias))
-            ranked.sort(reverse=True)
-            return [x[-1] for x in ranked[:limit]]
-
-        type_rules: Dict[str, Any] = {}
-        for typ in selected:
-            raw = self.rules.types[typ]
-            type_rules[typ] = {
-                "aliases": rank_aliases(
-                    list(raw.get("aliases", []) or []),
-                    self.max_aliases_per_type,
-                ),
-                "negative_aliases": rank_aliases(
-                    list(raw.get("negative_aliases", []) or []),
-                    self.max_negative_aliases_per_type,
-                ),
-            }
-
-        collision_all = (
-            self.rules.raw.get("RESOLUTION_POLICY", {}) or {}
-        ).get("alias_collision_policy", {}) or {}
-        ntext = norm_text(evidence_text)
-        collision_relevant = {
-            alias: target
-            for alias, target in collision_all.items()
-            if safe(target) in selected_set or norm_text(alias) in ntext
-        }
-
-        context = {
-            "ALLOWED_PRODUCT_TYPES": list(selected),
-            "RELEVANT_TYPE_RULES": type_rules,
-            "POWER_RULES": {p: self.rules.power_rules[p] for p in s1.power_candidates if p in self.rules.power_rules},
-            "TYPE_POLICY": self.rules.type_policy,
-            "COMPONENT_CONTEXT_RULES": self.rules.component_context,
-            "SOURCE_POLICY": {
-                "notes": safe(self.rules.source_rules.get("notes")),
-                "replacement_compatibility_rule": safe(
-                    self.rules.type_policy.get("replacement_compatibility_rule")
-                ),
-                "source_conflict_rule": safe(
-                    self.rules.type_policy.get("source_conflict_rule")
-                ),
-                "output_voltage_rule": safe(
-                    self.rules.type_policy.get("output_voltage_rule")
-                ),
-                "agricultural_mower_rule": safe(
-                    self.rules.type_policy.get("agricultural_mower_rule")
-                ),
-            },
-            "ALIAS_COLLISIONS_RELEVANT": collision_relevant,
-            "ALLOWED_POWER": sorted(set(s1.power_candidates) | {"UNKNOWN"}),
-        }
-        return context, selected
-
-    def _messages(
-        self, brand: str, model: str, s1: Stage1Result
-    ) -> Tuple[List[Dict[str, str]], List[str], Dict[int, int]]:
-        rules_context, selected_types = self._rules_context(brand, model, s1)
-
-        # Stage 1 atual usa identidade graduada. Os rótulos antigos
-        # BRAND_MODEL/MODEL/BRAND/QUERY_CONTEXT não podem ordenar estas fontes.
-        relevance_rank = {
-            "STRONG": 0,
-            "PROBABLE": 1,
-            "CONTEXTUAL": 2,
-            "WEAK": 3,
-            "CONFLICT": 4,
-        }
-        ranked_sources = sorted(
-            s1.sources,
-            key=lambda s: (
-                relevance_rank.get(s.relevance, 9),
-                1 if s.quality_flags else 0,
-                0 if (s.type_hits or s.power_hits) else 1,
-                s.source_id,
-            ),
-        )[: self.max_llm_sources]
-
-        # IDs do prompt são SEMPRE 1..N. Isso elimina a ambiguidade criada
-        # quando as fontes ranqueadas eram, por exemplo, [1, 3, 5].
-        prompt_to_source_id: Dict[int, int] = {}
-        sources = []
-        for prompt_id, s in enumerate(ranked_sources, 1):
-            prompt_to_source_id[prompt_id] = s.source_id
-            sources.append(
-                {
-                    "id": prompt_id,
-                    "relevance": s.relevance,
-                    "quality_flags": s.quality_flags,
-                    "title": s.title,
-                    "content": s.content[: self.evidence_content_chars],
-                }
-            )
-
-        system = (
-            "You are an evidence arbiter, not an open-ended product classifier. "
-            "The deterministic engine already produced the only product types you may choose from. "
-            "Use only the supplied Tavily evidence; do not use outside knowledge. "
-            "Do not create, translate, repair, broaden, or infer a product type outside ALLOWED_PRODUCT_TYPES. "
-            "Do not classify Category General or FAMILY. "
-            "Choose RESOLVED only when exactly one allowed type is clearly supported by target evidence. "
-            "If evidence supports multiple products, a kit/combo, a compatible/replacement item, another model, "
-            "or is insufficient, return INSUFFICIENT_EVIDENCE or CONFLICT. "
-            "Power must be UNKNOWN or one exact value from ALLOWED_POWER. "
-            "Cite at least one supplied evidence source id that textually supports the chosen product_type. "
-            "Evidence IDs are local and contiguous (1..N); never invent another ID. "
-            "Respect relevance and quality_flags. A phrase such as 'without battery', 'tool only', "
-            "or 'battery sold separately' does not mean the physical product is a battery. "
-            "Return only the requested JSON object."
-        )
-
-        payload = {
-            "product": {"brand": brand, "model": model},
-            "stage1": {
-                "state": s1.state,
-                "type_candidates": selected_types,
-                "power_candidates": s1.power_candidates,
-            },
-            "business_rules": rules_context,
-            "tavily_evidence": sources,
-            "output": {
-                "fields": [
-                    "decision",
-                    "product_type",
-                    "power",
-                    "evidence_source_ids",
-                    "reason_short",
-                ]
-            },
-        }
-
-        return [
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=str,
-                ),
-            },
-        ], selected_types, prompt_to_source_id
-
-    @staticmethod
-    def _is_json_completion_limit_error(status: int, detail: str) -> bool:
-        if status != 400:
-            return False
-        folded = safe(detail).casefold()
-        return (
-            "json_validate_failed" in folded
-            and "max completion tokens reached" in folded
-        )
-
-    def _quota_code(self, status: int, detail: str) -> Optional[str]:
-        if status != 429:
-            return None
-
-        folded = safe(detail).casefold()
-
-        if self.provider == "groq":
-            if "tokens per day" in folded or "(tpd)" in folded:
-                return "GROQ_TPD_EXHAUSTED"
-            return None
-
-        if self.provider == "nvidia":
-            # NVIDIA pode variar a mensagem de quota/crédito.
-            if any(
-                phrase in folded
-                for phrase in [
-                    "quota exhausted",
-                    "quota exceeded",
-                    "credits exhausted",
-                    "credit balance",
-                    "daily quota",
-                    "daily limit",
-                ]
-            ):
-                return "NVIDIA_QUOTA_EXHAUSTED"
-            return None
-
-        if self.provider == "openrouter":
-            # RPM/provider congestion é retryable. Só troca/pausa como quota
-            # quando a mensagem aponta explicitamente para limite diário.
-            if any(phrase in folded for phrase in [
-                "requests per day",
-                "request per day",
-                "daily limit",
-                "daily quota",
-                "free-models-per-day",
-                "free models per day",
-            ]):
-                return "OPENROUTER_QUOTA_EXHAUSTED"
-            return None
-
-        return None
-
-    def _operational_error(
-        self, status: int, detail: str
-    ) -> OperationalPause:
-        p = self.provider.upper()
-
-        if status == 401:
-            return OperationalPause(
-                f"{p}_AUTH", f"{p} 401 AUTH: {detail}"
-            )
-        if status == 403:
-            return OperationalPause(
-                f"{p}_PERMISSION", f"{p} 403 PERMISSION: {detail}"
-            )
-        if status == 402 and self.provider == "openrouter":
-            return OperationalPause(
-                "OPENROUTER_CREDIT_LIMIT",
-                f"OPENROUTER 402 CREDIT/LIMIT: {detail}",
-            )
-        if status == 429:
-            quota_code = self._quota_code(status, detail)
-            if quota_code:
-                return OperationalPause(quota_code, detail)
-            return OperationalPause(
-                f"{p}_RATE_LIMIT", f"{p} 429 RATE_LIMIT: {detail}"
-            )
-        if self.provider == "nvidia" and status == 410:
-            return OperationalPause(
-                "NVIDIA_MODEL_EOL",
-                f"NVIDIA informou modelo indisponível/EOL: {self.model} | {detail}",
-            )
-        if status in {408, 500, 502, 503, 504}:
-            return OperationalPause(
-                f"{p}_TRANSIENT", f"{p} {status} TRANSIENT: {detail}"
-            )
-
-        return OperationalPause(
-            f"{p}_FATAL", f"{p} HTTP {status}: {detail}"
-        )
-
-
-    def _post(self, payload: Dict[str, Any]):
-        import requests
-
-        url = self.base_url + "/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {os.environ[self.api_key_env].strip()}",
-            "Content-Type": "application/json",
-        }
-        if self.provider == "openrouter":
-            # Opcionais segundo a documentação; úteis apenas para atribuição.
-            referer = os.getenv("OPENROUTER_SITE_URL", "").strip()
-            app_title = os.getenv("OPENROUTER_APP_TITLE", "").strip()
-            if referer:
-                headers["HTTP-Referer"] = referer
-            if app_title:
-                headers["X-OpenRouter-Title"] = app_title
-
-        for attempt in range(1, self.retry_attempts + 1):
-            if attempt > 1:
-                # Retry HTTP também é um novo request real.
-                self._wait_provider_limits(payload)
-            try:
-                resp = requests.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.timeout_seconds,
-                )
-            except requests.RequestException as exc:
-                if attempt >= self.retry_attempts:
-                    raise OperationalPause(
-                        f"{self.provider.upper()}_TRANSIENT",
-                        f"Falha de rede após {attempt} tentativa(s): "
-                        f"{type(exc).__name__}: {safe(exc)}",
-                    ) from exc
-                wait = float(
-                    self.retry_backoff[
-                        min(attempt - 1, len(self.retry_backoff) - 1)
-                    ]
-                )
-                LOG.warning(
-                    "%s rede/transiente | tentativa=%d/%d | retry em %.1fs",
-                    self.provider.upper(),
-                    attempt,
-                    self.retry_attempts,
-                    wait,
-                )
-                time.sleep(wait)
-                continue
-
-            self._sync_tpm_from_headers(resp)
-
-            if resp.status_code == 200:
-                return resp
-
-            detail = safe(resp.text)[:3000]
-
-            quota_code = self._quota_code(resp.status_code, detail)
-            if quota_code:
-                # Não aguarda 10/15 minutos quando o TPD acabou:
-                # entrega imediatamente ao próximo provider.
-                raise OperationalPause(quota_code, detail)
-
-            # Specific GPT-OSS structured-output failure:
-            # reasoning/output budget ended before a complete JSON document existed.
-            # This is recoverable by increasing ONLY the completion budget for the
-            # same product. It must not become REVIEW and must not stop the batch.
-            if self._is_json_completion_limit_error(resp.status_code, detail):
-                token_field = (
-                    "max_completion_tokens"
-                    if self.provider == "groq"
-                    else "max_tokens"
-                )
-                current_cap = int(
-                    payload.get(token_field, self.max_output_tokens)
-                )
-                if (
-                    current_cap < self.json_retry_max_completion_tokens
-                    and attempt < self.retry_attempts
-                ):
-                    new_cap = min(
-                        self.json_retry_max_completion_tokens,
-                        max(1024, current_cap * 2),
-                    )
-                    payload[token_field] = new_cap
-                    LOG.warning(
-                        "%s JSON RETRY | produto não concluído dentro de %d tokens "
-                        "| novo max_completion_tokens=%d | tentativa=%d/%d",
-                        self.provider.upper(),
-                        current_cap,
-                        new_cap,
-                        attempt + 1,
-                        self.retry_attempts,
-                    )
-                    time.sleep(1.0)
-                    continue
-
-                raise OperationalPause(
-                    f"{self.provider.upper()}_JSON_TOKEN_LIMIT",
-                    f"{self.provider.upper()} não concluiu o JSON mesmo com "
-                    f"max_completion_tokens={current_cap}: {detail}",
-                )
-
-            retryable = resp.status_code in {408, 429, 500, 502, 503, 504}
-            if not retryable or attempt >= self.retry_attempts:
-                raise self._operational_error(resp.status_code, detail)
-
-            retry_after = safe(resp.headers.get("Retry-After"))
-            try:
-                wait = max(1.0, float(retry_after)) if retry_after else float(
-                    self.retry_backoff[
-                        min(attempt - 1, len(self.retry_backoff) - 1)
-                    ]
-                )
-            except Exception:
-                wait = float(
-                    self.retry_backoff[
-                        min(attempt - 1, len(self.retry_backoff) - 1)
-                    ]
-                )
-
-            detail_short = re.sub(r"\s+", " ", detail)[:600]
-            LOG.warning(
-                "%s HTTP %s | tentativa=%d/%d | retry em %.1fs | %s",
-                self.provider.upper(),
-                resp.status_code,
-                attempt,
-                self.retry_attempts,
-                wait,
-                detail_short,
-            )
-            time.sleep(wait)
-
-        raise OperationalPause(
-            f"{self.provider.upper()}_TRANSIENT",
-            f"Falha transiente {self.provider.upper()} sem resposta final."
-        )
-
-    @staticmethod
-    def _decode_model_json(content: str) -> Dict[str, Any]:
-        """Decodifica a resposta do modelo sem alterar o conteúdo semântico.
-
-        Aceita:
-        - JSON puro;
-        - JSON cercado por ```json ... ```;
-        - texto residual antes/depois de um único objeto JSON.
-
-        NÃO tenta "consertar" campos ou inventar classificação.
-        """
-        raw = safe(content).strip()
-        if not raw:
-            raise ValueError("Resposta sem conteúdo.")
-
-        # Remove markdown fences, caso o modelo ignore a instrução de JSON puro.
-        if raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\\s*", "", raw, flags=re.I)
-            raw = re.sub(r"\\s*```$", "", raw).strip()
-
-        # 1) tentativa direta
-        try:
-            data = json.loads(raw)
-            if not isinstance(data, dict):
-                raise ValueError("Resposta JSON não é objeto.")
-            return data
-        except json.JSONDecodeError:
-            pass
-
-        # 2) extrai o primeiro objeto delimitado por { ... }.
-        first = raw.find("{")
-        last = raw.rfind("}")
-        if first >= 0 and last > first:
-            candidate = raw[first:last + 1]
-            data = json.loads(candidate)
-            if not isinstance(data, dict):
-                raise ValueError("Resposta JSON extraída não é objeto.")
-            return data
-
-        raise ValueError("Nenhum objeto JSON válido encontrado.")
-
-    @staticmethod
-    def _header_snapshot(resp) -> Dict[str, str]:
-        names = [
-            "x-ratelimit-limit-requests",
-            "x-ratelimit-remaining-requests",
-            "x-ratelimit-reset-requests",
-            "x-ratelimit-limit-tokens",
-            "x-ratelimit-remaining-tokens",
-            "x-ratelimit-reset-tokens",
-            "retry-after",
-        ]
-        return {
-            k: safe(resp.headers.get(k))
-            for k in names
-            if safe(resp.headers.get(k))
-        }
-
-    def _estimate_request_tokens(self, payload: Dict[str, Any]) -> int:
-        """Estimativa conservadora usada somente para pacing local do Groq.
-
-        O rate-limit do Groq considera o request inteiro, inclusive o orçamento
-        máximo de completion. Usamos ~3 chars/token para não depender de tokenizer
-        externo e adicionamos pequena margem estrutural.
-        """
-        messages = payload.get("messages", []) or []
-        serialized = json.dumps(
-            messages, ensure_ascii=False, separators=(",", ":"), default=str
-        )
-        prompt_estimate = max(1, (len(serialized) + 2) // 3)
-        completion_budget = int(
-            payload.get("max_completion_tokens")
-            or payload.get("max_tokens")
-            or self.max_output_tokens
-            or 0
-        )
-        return prompt_estimate + max(0, completion_budget) + 128
-
-    def _wait_provider_limits(self, payload: Dict[str, Any]) -> None:
-        """Aplica pacing RPM e, no Groq, também a janela TPM."""
-        self.limiter.wait()
-        if self.groq_window_limiter is not None:
-            estimated = self._estimate_request_tokens(payload)
-            self.groq_window_limiter.wait(estimated)
-
-    def _sync_tpm_from_headers(self, resp) -> None:
-        """Headers permanecem registrados; o pacing preventivo é local."""
-        return
-
-    @staticmethod
-    def _normalize_evidence_refs(
-        data: Dict[str, Any],
-        prompt_to_source_id: Dict[int, int],
-    ) -> Tuple[Dict[str, Any], bool]:
-        """Normaliza refs do LLM sem inventar evidência.
-
-        NVIDIA JSON mode às vezes devolve "1" como string. Aceitamos apenas
-        inteiros ou strings estritamente numéricas que apontem para IDs locais
-        realmente presentes no prompt. Depois convertemos para source_id real.
-        """
-        out = dict(data or {})
-        refs = out.get("evidence_source_ids", [])
-
-        if refs is None:
-            refs = []
-        if not isinstance(refs, list):
-            return out, False
-
-        normalized_local: List[int] = []
-        for raw in refs:
-            if isinstance(raw, bool):
-                return out, False
-            if isinstance(raw, int):
-                ref = raw
-            elif isinstance(raw, float) and raw.is_integer():
-                ref = int(raw)
-            elif isinstance(raw, str) and raw.strip().isdigit():
-                ref = int(raw.strip())
-            else:
-                return out, False
-
-            if ref not in prompt_to_source_id:
-                return out, False
-            if ref not in normalized_local:
-                normalized_local.append(ref)
-
-        out["evidence_source_ids"] = [
-            prompt_to_source_id[x] for x in normalized_local
-        ]
-        return out, True
-
-    def classify(
-        self,
-        key: str,
-        raw_hash: str,
-        brand: str,
-        model: str,
-        s1: Stage1Result,
-    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
-        cached = self.db.get_llm(
-            key, raw_hash, self.rules.hash, self.provider, self.model
-        )
-        if cached is not None:
-            data, usage = cached
-            return data, True, usage
-
-        if self.max_calls_per_run and self.api_calls >= self.max_calls_per_run:
-            raise OperationalPause(
-                f"{self.provider.upper()}_RUN_CAP",
-                f"Limite local de {self.max_calls_per_run} chamadas {self.provider.upper()}/run atingido.",
-            )
-
-        messages, context_types, prompt_to_source_id = self._messages(
-            brand, model, s1
-        )
-
-        if (
-            self.max_total_tokens_per_run
-            and self.total_tokens >= self.max_total_tokens_per_run
-        ):
-            raise OperationalPause(
-                f"{self.provider.upper()}_LOCAL_TOKEN_CAP",
-                f"Cap real de {self.max_total_tokens_per_run} tokens/run atingido. "
-                f"Consumidos={self.total_tokens}.",
-            )
-
-        LOG.info(
-            "%s CALL %d | ritmo=%.1f req/min | context_types=%d | sources=%d",
-            self.provider.upper(),
-            self.api_calls + 1,
-            self.operational_requests_per_minute,
-            len(context_types),
-            min(len(s1.sources), self.max_llm_sources),
-        )
-
-        # O pacing efetivo é aplicado imediatamente antes de cada POST,
-        # incluindo retries de parse, para respeitar RPM + TPM.
-        self.api_calls += 1
-
-        if self.provider == "groq":
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "product_classification",
-                        "strict": True,
-                        "schema": self.schema(s1, context_types),
-                    },
-                },
-                "reasoning_effort": self.reasoning_effort,
-                "temperature": 0,
-                "max_completion_tokens": self.max_output_tokens,
-            }
-        elif self.provider == "openrouter":
-            # OpenRouter suporta o contrato OpenAI e, para gpt-oss-120b:free,
-            # structured outputs via response_format/json_schema.
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "product_classification",
-                        "strict": True,
-                        "schema": self.schema(s1, context_types),
-                    },
-                },
-                "temperature": 0,
-                "max_tokens": self.max_output_tokens,
-                "stream": False,
-            }
-        else:
-            # NVIDIA hosted: JSON mode + validator Python.
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "response_format": {"type": "json_object"},
-                "temperature": 0,
-                "max_tokens": self.max_output_tokens,
-                "stream": False,
-            }
-
-            # Nemotron 3.5: desliga thinking para usar o orçamento de saída
-            # no JSON final, conforme recomendação da documentação NVIDIA.
-            if self.model == "nvidia/nemotron-3.5-lightning-30b-a3b":
-                payload["chat_template_kwargs"] = {
-                    "enable_thinking": False
-                }
-
-        parse_max_attempts = 2
-        data = None
-        usage = None
-        last_parse_error = None
-        failed_parse_tokens = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        }
-
-        for parse_attempt in range(1, parse_max_attempts + 1):
-            self._wait_provider_limits(payload)
-            resp = self._post(payload)
-
-            try:
-                envelope = resp.json()
-                raw_usage = envelope.get("usage", {}) or {}
-                current_usage = {
-                    "prompt_tokens": int(raw_usage.get("prompt_tokens", 0) or 0),
-                    "completion_tokens": int(raw_usage.get("completion_tokens", 0) or 0),
-                    "total_tokens": int(raw_usage.get("total_tokens", 0) or 0),
-                }
-
-                content = safe(envelope["choices"][0]["message"]["content"])
-                data = self._decode_model_json(content)
-                data, evidence_refs_valid = self._normalize_evidence_refs(
-                    data, prompt_to_source_id
-                )
-
-                usage = {
-                    **current_usage,
-                    "context_types": context_types,
-                    "rate_limit_headers": self._header_snapshot(resp),
-                    "json_parse_retries": parse_attempt - 1,
-                    "failed_parse_tokens": failed_parse_tokens["total_tokens"],
-                    "evidence_refs_valid": evidence_refs_valid,
-                    "evidence_prompt_map": {
-                        str(k): int(v) for k, v in prompt_to_source_id.items()
-                    },
-                }
-                break
-
-            except Exception as exc:
-                last_parse_error = exc
-
-                # Se a API entregou usage, contabiliza também a resposta inválida.
-                try:
-                    envelope_for_usage = resp.json()
-                    raw_failed = envelope_for_usage.get("usage", {}) or {}
-                    failed_now = {
-                        "prompt_tokens": int(raw_failed.get("prompt_tokens", 0) or 0),
-                        "completion_tokens": int(raw_failed.get("completion_tokens", 0) or 0),
-                        "total_tokens": int(raw_failed.get("total_tokens", 0) or 0),
-                    }
-                    for k in failed_parse_tokens:
-                        failed_parse_tokens[k] += failed_now[k]
-                except Exception:
-                    pass
-
-                if parse_attempt < parse_max_attempts:
-                    LOG.warning(
-                        "%s JSON inválido | retry controlado %d/%d | %s: %s",
-                        self.provider.upper(),
-                        parse_attempt + 1,
-                        parse_max_attempts,
-                        type(exc).__name__,
-                        safe(exc),
-                    )
-
-                    # Mantém o mesmo produto/evidência/regras e só reforça o formato.
-                    retry_payload = dict(payload)
-                    retry_messages = list(payload.get("messages", []))
-                    retry_messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Your previous response was not valid JSON. "
-                                "Return ONLY one syntactically valid JSON object, "
-                                "with exactly these keys: decision, product_type, "
-                                "power, evidence_source_ids, reason_short. "
-                                "No markdown, no comments, no trailing text."
-                            ),
-                        }
-                    )
-                    retry_payload["messages"] = retry_messages
-                    payload = retry_payload
-
-                    # Conta a segunda requisição real na métrica.
-                    self.api_calls += 1
-                    time.sleep(1.0)
-                    continue
-
-                raise OperationalPause(
-                    f"{self.provider.upper()}_OUTPUT_PARSE",
-                    f"Falha ao interpretar JSON de {self.provider.upper()} "
-                    f"após {parse_max_attempts} tentativa(s): "
-                    f"{type(exc).__name__}: {safe(exc)}",
-                ) from exc
-
-        if data is None or usage is None:
-            raise OperationalPause(
-                f"{self.provider.upper()}_OUTPUT_PARSE",
-                f"Resposta sem JSON válido: {safe(last_parse_error)}",
-            )
-
-        # Consumo total inclui tentativas de parse que consumiram tokens.
-        self.prompt_tokens += usage["prompt_tokens"] + failed_parse_tokens["prompt_tokens"]
-        self.completion_tokens += (
-            usage["completion_tokens"] + failed_parse_tokens["completion_tokens"]
-        )
-        self.total_tokens += usage["total_tokens"] + failed_parse_tokens["total_tokens"]
-
-        self.db.put_llm(
-            key,
-            raw_hash,
-            self.rules.hash,
-            self.provider,
-            self.model,
-            data,
-            usage,
-        )
-        return data, False, usage
-
-
-class ProviderCascade:
-    """Cascata configurável; RC4 HF1 suporta failover NVIDIA + provider."""
-
-    EXHAUSTION_CODES = {
-        "GROQ_TPD_EXHAUSTED",
-        "NVIDIA_QUOTA_EXHAUSTED",
-        "OPENROUTER_QUOTA_EXHAUSTED",
-    }
-
-    def __init__(
-        self,
-        providers: List[OpenAICompatibleClassifier],
-        switch_only_on_quota_exhaustion: bool = False,
-    ):
-        if not providers:
-            raise ValueError("ProviderCascade requer ao menos um provider.")
-        self.providers = providers
-        self.active_index = 0
-        self.disabled: set = set()
-        self.switch_only_on_quota_exhaustion = bool(
-            switch_only_on_quota_exhaustion
-        )
-
-    @property
-    def active(self) -> OpenAICompatibleClassifier:
-        return self.providers[self.active_index]
-
-    @property
-    def provider(self) -> str:
-        return self.active.provider
-
-    @property
-    def model(self) -> str:
-        return self.active.model
-
-    @property
-    def api_calls(self) -> int:
-        return sum(x.api_calls for x in self.providers)
-
-    @property
-    def prompt_tokens(self) -> int:
-        return sum(x.prompt_tokens for x in self.providers)
-
-    @property
-    def completion_tokens(self) -> int:
-        return sum(x.completion_tokens for x in self.providers)
-
-    @property
-    def total_tokens(self) -> int:
-        return sum(x.total_tokens for x in self.providers)
-
-    def preflight_all(self) -> List[Dict[str, Any]]:
-        """Valida cada provider isoladamente.
-
-        Falha de preflight em um provider NÃO derruba toda a rota: o provider é
-        desabilitado somente nesta execução e os demais continuam disponíveis.
-        Isso é especialmente importante para providers de fallback opcionais
-        (ex.: OpenRouter bloqueado por TLS/proxy corporativo).
-
-        Se TODOS falharem, aí sim ocorre SAFE PAUSE antes da classificação.
-        """
-        results: List[Dict[str, Any]] = []
-        enabled_indexes: List[int] = []
-
-        for idx, provider in enumerate(self.providers):
-            try:
-                pf = dict(provider.preflight() or {})
-                pf["enabled"] = True
-                pf["error_code"] = ""
-                pf["error_detail"] = ""
-                enabled_indexes.append(idx)
-                results.append(pf)
-            except OperationalPause as exc:
-                self.disabled.add(idx)
-                results.append({
-                    "provider": provider.provider,
-                    "model": provider.model,
-                    "base_url": provider.base_url,
-                    "operational_rpm": provider.operational_requests_per_minute,
-                    "enabled": False,
-                    "error_code": exc.code,
-                    "error_detail": safe(exc),
-                    "model_discovery": None,
-                })
-                LOG.warning(
-                    "LLM PRE-FLIGHT SKIP | provider=%s | model=%s | code=%s | %s",
-                    provider.provider,
-                    provider.model,
-                    exc.code,
-                    safe(exc),
-                )
-
-        if not enabled_indexes:
-            details = " | ".join(
-                f"{x.get('provider')}={x.get('error_code')}" for x in results
-            )
-            raise OperationalPause(
-                "LLM_NO_PROVIDER_AVAILABLE",
-                f"Nenhum provider passou no preflight. {details}",
-            )
-
-        self.active_index = enabled_indexes[0]
-        return results
-
-    def enabled_route(self) -> List[OpenAICompatibleClassifier]:
-        return [
-            p for idx, p in enumerate(self.providers)
-            if idx not in self.disabled
-        ]
-
-    def _advance(self) -> bool:
-        for idx in range(self.active_index + 1, len(self.providers)):
-            if idx not in self.disabled:
-                self.active_index = idx
-                return True
-        return False
-
-    def classify(
-        self,
-        key: str,
-        raw_hash: str,
-        brand: str,
-        model: str,
-        s1: Stage1Result,
-    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
-        while True:
-            current = self.active
-
-            try:
-                data, cache_hit, usage = current.classify(
-                    key, raw_hash, brand, model, s1
-                )
-                usage = dict(usage or {})
-                usage["provider"] = current.provider
-                usage["model"] = current.model
-                return data, cache_hit, usage
-
-            except OperationalPause as exc:
-                # Primeiro tenta outro modelo NVIDIA quando a falha parece
-                # específica do modelo/endpoint e a política permite failover.
-                nvidia_model_failover = (
-                    current.provider == "nvidia"
-                    and (
-                        exc.code.endswith("_OUTPUT_PARSE")
-                        or exc.code.endswith("_JSON_TOKEN_LIMIT")
-                        or exc.code.endswith("_MODEL_EOL")
-                        or (
-                            not self.switch_only_on_quota_exhaustion
-                            and exc.code.endswith("_TRANSIENT")
-                        )
-                    )
-                )
-                if nvidia_model_failover and current.advance_nvidia_model(exc.code):
-                    continue
-
-                always_rotate = (
-                    exc.code in self.EXHAUSTION_CODES
-                    or exc.code.endswith("_LOCAL_TOKEN_CAP")
-                    or exc.code.endswith("_RUN_CAP")
-                    or exc.code.endswith("_OUTPUT_PARSE")
-                    or exc.code.endswith("_JSON_TOKEN_LIMIT")
-                )
-                operational_rotate = (
-                    not self.switch_only_on_quota_exhaustion
-                    and (
-                        exc.code.endswith("_TRANSIENT")
-                        or exc.code.endswith("_RATE_LIMIT")
-                        or exc.code.endswith("_MODEL_EOL")
-                    )
-                )
-                rotate_provider = always_rotate or operational_rotate
-                if not rotate_provider:
-                    raise
-
-                old_provider = current.provider.upper()
-                old_model = current.model
-                self.disabled.add(self.active_index)
-
-                if not self._advance():
-                    raise
-
-                LOG.warning(
-                    "%s / %s não pôde concluir com segurança (%s). "
-                    "FALLBACK AUTOMÁTICO -> %s / %s",
-                    old_provider,
-                    old_model,
-                    exc.code,
-                    self.active.provider.upper(),
-                    self.active.model,
-                )
-
-
-# -----------------------------------------------------------------------------
-# Stage 3/4 e saída
-# -----------------------------------------------------------------------------
-def validate_llm_output(
-    data: Dict[str, Any],
-    rules: Rules,
-    s1: Stage1Result,
-) -> Tuple[bool, str]:
-    """Post-gate determinístico: LLM nunca vira fonte de verdade.
-
-    RESOLVED só é aceito se:
-    - TYPE já existia nos candidatos Stage 1;
-    - POWER já existia nos candidatos Stage 1 (ou UNKNOWN);
-    - ao menos uma fonte citada realmente pontuou para o TYPE;
-    - há suporte explícito no TITLE ou suporte independente suficiente;
-    - identidade/conflitos respeitam a política JSON.
-    """
-    decision = safe(data.get("decision"))
-    typ = safe(data.get("product_type"))
-    power = safe(data.get("power"))
-    refs = data.get("evidence_source_ids", [])
-    allowed_refs = {int(s.source_id) for s in s1.sources}
-    gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
-
-    if decision not in {"RESOLVED", "INSUFFICIENT_EVIDENCE", "CONFLICT"}:
-        return False, "DECISION_INVALID"
-    if power not in rules.allowed_powers:
-        return False, "POWER_OUTSIDE_TAXONOMY"
-    if not isinstance(refs, list) or any(
-        isinstance(x, bool) or not isinstance(x, int) or x not in allowed_refs
-        for x in refs
-    ):
-        return False, "EVIDENCE_REFS_INVALID"
-
-    if decision != "RESOLVED":
-        if typ != "REVISAR" and typ not in rules.types:
-            return False, "TYPE_OUTSIDE_TAXONOMY"
-        return True, "OK"
-
-    if typ not in rules.types:
-        return False, "TYPE_OUTSIDE_TAXONOMY"
-    if not refs:
-        return False, "RESOLVED_WITHOUT_EVIDENCE"
-
-    funnel = candidate_funnel(rules, s1)
-    allowed_types = set(funnel.candidates)
-    if bool(gate.get("allow_only_stage1_type_candidates", True)) and typ not in allowed_types:
-        return False, "TYPE_NOT_STAGE15_CANDIDATE"
-
-    if bool(gate.get("block_multi_primary_title_conflict", True)):
-        candidate_set = allowed_types
-        for src in s1.sources:
-            explicit_here = {
-                t for t in candidate_set
-                if "TITLE" in (src.type_evidence_fields.get(t, []) or [])
-                and float(src.type_scores.get(t, 0.0) or 0.0) > 0.0
-            }
-            if len(explicit_here) >= 2:
-                return False, "MULTI_PRIMARY_TITLE_CONFLICT"
-
-    allowed_power = set(s1.power_candidates) | {"UNKNOWN"}
-    if bool(gate.get("allow_only_stage1_power_candidates", True)) and power not in allowed_power:
-        return False, "POWER_NOT_STAGE1_CANDIDATE"
-
-    by_id = {s.source_id: s for s in s1.sources}
-    cited = [by_id[x] for x in refs if x in by_id]
-    supporting = [s for s in cited if float(s.type_scores.get(typ, 0.0) or 0.0) > 0.0]
-    if bool(gate.get("require_cited_source_support", True)) and not supporting:
-        return False, "CITED_SOURCE_DOES_NOT_SUPPORT_TYPE"
-
-    title_support = any("TITLE" in (s.type_evidence_fields.get(typ, []) or []) for s in supporting)
-    strong_support = int(s1.type_support.get(typ, 0) or 0)
-    hit_support = sum(
-        1 for s in s1.sources
-        if s.source_weight > 0
-        and s.relevance not in {"WEAK", "CONFLICT"}
-        and float(s.type_scores.get(typ, 0.0) or 0.0) > 0.0
-    )
-    total_support = max(strong_support, hit_support)
-    typ_score = float(s1.type_scores.get(typ, 0.0) or 0.0)
-    score_total = sum(max(0.0, float(s1.type_scores.get(t, 0.0) or 0.0)) for t in allowed_types) or 1.0
-    candidate_share = typ_score / score_total
-    min_sources = int(gate.get("require_title_support_or_min_sources", 2) or 2)
-    min_share = float(gate.get("min_candidate_share_without_title", 0.45) or 0.45)
-    if not title_support and not (total_support >= min_sources and candidate_share >= min_share):
-        return False, "TYPE_EVIDENCE_TOO_WEAK_FOR_LLM_RESOLVED"
-
-    id_rank = DeterministicEngine.IDENTITY_RANK
-    req_id = safe(gate.get("require_identity_at_least", "CONTEXTUAL")) or "CONTEXTUAL"
-    best_id = max((s.relevance for s in supporting), key=lambda x: id_rank.get(x, 0), default="WEAK")
-    if id_rank.get(best_id, 0) < id_rank.get(req_id, 2):
-        return False, "IDENTITY_TOO_WEAK_FOR_LLM_RESOLVED"
-    return True, "OK"
-
 
 def choose_title(sources: List[Source], refs: Sequence[int]) -> Tuple[str, str]:
     by_id = {s.source_id: s for s in sources}
@@ -6554,40 +5014,6 @@ def taxonomy_consensus_for_review(
     return cg, fam, "TAXONOMY_CONSENSUS:" + ",".join(candidates)
 
 
-def repair_llm_evidence_refs(data: Dict[str, Any], rules: Rules, s1: Stage1Result) -> Tuple[Dict[str, Any], bool]:
-    """Repara somente IDs de evidência quando TYPE já é elegível e suportado.
-
-    Nunca altera TYPE/POWER escolhidos pela LLM. Evita perder uma classificação
-    correta apenas porque o modelo citou um id local inválido.
-    """
-    if safe(data.get("decision")) != "RESOLVED":
-        return data, False
-    typ = safe(data.get("product_type"))
-    funnel = candidate_funnel(rules, s1)
-    if typ not in set(funnel.candidates):
-        return data, False
-    rank = DeterministicEngine.IDENTITY_RANK
-    gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
-    req = safe(gate.get("require_identity_at_least", "PROBABLE")) or "PROBABLE"
-    supporting = [
-        src for src in s1.sources
-        if float(src.type_scores.get(typ, 0.0) or 0.0) > 0.0
-        and rank.get(src.relevance, 0) >= rank.get(req, 3)
-    ]
-    if not supporting:
-        return data, False
-    supporting.sort(
-        key=lambda src: (
-            1 if "TITLE" in (src.type_evidence_fields.get(typ, []) or []) else 0,
-            rank.get(src.relevance, 0),
-            float(src.type_scores.get(typ, 0.0) or 0.0),
-            src.identity_score,
-        ),
-        reverse=True,
-    )
-    out = dict(data)
-    out["evidence_source_ids"] = [supporting[0].source_id]
-    return out, True
 
 
 def record_for_raw_state(raw: RawEvidence) -> Dict[str, Any]:
@@ -6642,38 +5068,13 @@ def record_for_uncurated_cache(raw: RawEvidence) -> Dict[str, Any]:
         ),
         "Pipeline Version": PIPELINE_VERSION,
         "Processed At": now_iso(),
-        "LLM Provider": "",
-        "LLM Model": "",
-        "LLM Cache": "",
-        "LLM Prompt Tokens": 0,
-        "LLM Completion Tokens": 0,
-        "LLM Total Tokens": 0,
+        "Clef Provider": "",
+        "Clef Model": "",
+        "Clef Cache": "",
+        "Clef Prompt Tokens": 0,
+        "Clef Completion Tokens": 0,
+        "Clef Total Tokens": 0,
     }
-
-
-def llm_preflight_rejection_reason(rules: Rules, s1: Stage1Result) -> str:
-    """Stage 0 + Stage 1.5 pre-flight; nenhuma chamada LLM inútil."""
-    gate = rules.classification_policy.get("llm_resolution_gate", {}) or {}
-    rank = DeterministicEngine.IDENTITY_RANK
-    target_sources = [s for s in s1.sources if rank.get(s.relevance, 0) >= rank.get("PROBABLE", 3)]
-    if not target_sources:
-        return "LOW_TARGET_EVIDENCE"
-
-    if bool(gate.get("block_multi_primary_title_conflict", True)) and multi_product_target_detected(rules, s1):
-        return "MULTI_PRODUCT_TARGET"
-
-    if bool(gate.get("no_candidate_means_no_llm", True)) and not s1.type_candidates:
-        return "TAXONOMY_GAP_NO_ALIAS"
-
-    funnel = candidate_funnel(rules, s1)
-    if funnel.blocked:
-        if funnel.reason.startswith("TOO_MANY_PLAUSIBLE_CANDIDATES"):
-            return "NOISY_TOO_MANY_CANDIDATES"
-        return "NO_LLM_ELIGIBLE_TARGET_EVIDENCE"
-    if not funnel.candidates:
-        return "NO_LLM_ELIGIBLE_TARGET_EVIDENCE"
-    return ""
-
 
 
 def _clef_auto_gate(
@@ -6759,7 +5160,7 @@ def finalize_product(
     s1: Stage1Result,
     rules: Rules,
     cfg: Dict[str, Any],
-    llm: Optional[OpenAICompatibleClassifier],
+    clef: Optional[ClefFunnelClassifier],
     db: ClassificationDB,
     run_id: str,
 ) -> Dict[str, Any]:
@@ -6777,7 +5178,7 @@ def finalize_product(
     if s1.state == "RESOLVED_RULE":
         next_action = "CONCLUIDO"
     elif not s1.type_candidates and ref_identity in {"STRONG", "PROBABLE"}:
-        next_action = "JSON_GAP_OU_LLM_GAP"
+        next_action = "JSON_GAP_OU_CLEF_GAP"
     elif not s1.type_candidates and raw_result_count:
         next_action = "RECOLETAR_EVIDENCIA_TARGET"
     elif not s1.type_candidates:
@@ -6785,7 +5186,7 @@ def finalize_product(
     elif consensus_cg and consensus_fam:
         next_action = "TYPE_REVIEW_FAMILY_JA_DEFINIDA"
     else:
-        next_action = "LLM_COM_CANDIDATOS_OU_REVISAO"
+        next_action = "CLEF_COM_CANDIDATOS_OU_REVISAO"
 
     common = {
         "Marca": brand,
@@ -6808,6 +5209,9 @@ def finalize_product(
         "Rules Hash": rules.hash,
         "Pipeline Version": PIPELINE_VERSION,
         "Processed At": now_iso(),
+        "Classification Outcome": "",
+        "Auto Eligible": "NÃO",
+        "Double Check Priority": "",
     }
 
     def _output_title(primary_title: str = "", primary_url: str = "") -> Tuple[str, str]:
@@ -6833,14 +5237,17 @@ def finalize_product(
             "Título Real": title,
             "Fonte URL": url,
             "Review Required": "NÃO",
+            "Classification Outcome": "RULE_CLASSIFIED",
+            "Auto Eligible": "SIM",
+            "Double Check Priority": "BAIXA",
             "Reason Code": "POWER_TOOL_COMBO_KIT",
             "Motivo": f"Combo kit explícito com múltiplas ferramentas principais: {', '.join(combo_components)} | {tax_reason}",
-            "LLM Provider": "",
-            "LLM Model": "",
-            "LLM Cache": "",
-            "LLM Prompt Tokens": 0,
-            "LLM Completion Tokens": 0,
-            "LLM Total Tokens": 0,
+            "Clef Provider": "",
+            "Clef Model": "",
+            "Clef Cache": "",
+            "Clef Prompt Tokens": 0,
+            "Clef Completion Tokens": 0,
+            "Clef Total Tokens": 0,
         }
 
     if s1.state == "RESOLVED_RULE":
@@ -6861,52 +5268,30 @@ def finalize_product(
             "Título Real": title,
             "Fonte URL": url,
             "Review Required": "NÃO",
+            "Classification Outcome": "RULE_CLASSIFIED",
+            "Auto Eligible": "SIM",
+            "Double Check Priority": "BAIXA",
             "Reason Code": "RULE_UNIQUE",
             "Motivo": " | ".join(s1.reasons + [tax_reason]),
-            "LLM Provider": "",
-            "LLM Model": "",
-            "LLM Cache": "",
-            "LLM Prompt Tokens": 0,
-            "LLM Completion Tokens": 0,
-            "LLM Total Tokens": 0,
+            "Clef Provider": "",
+            "Clef Model": "",
+            "Clef Cache": "",
+            "Clef Prompt Tokens": 0,
+            "Clef Completion Tokens": 0,
+            "Clef Total Tokens": 0,
         }
 
-    # Stage 1.5 pode encerrar deterministicamente quando restou um único TYPE
-    # bem sustentado e a alimentação necessária já está resolvida/dispensável.
-    if len(funnel.candidates) == 1 and not multi_product_target_detected(rules, s1):
-        typ = funnel.candidates[0]
-        if _single_funnel_candidate_can_resolve(rules, s1, typ, brand, model):
-            power = s1.power or "UNKNOWN"
-            tax_evidence = taxonomy_evidence_text(s1.sources, typ)
-            cg, fam, tax_reason = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
-            title, url = choose_title_for_type(s1.sources, typ, min_identity="STRONG")
-            return {
-                **common,
-                "Próxima Ação": "CONCLUIDO",
-                "Resolution State": "RESOLVED",
-                "Stage": "FUNNEL_RULE",
-                "O que é (Tipo)": typ,
-                "Alimentação": power,
-                "Category General": cg,
-                "FAMILY": fam,
-                "Título Real": title,
-                "Fonte URL": url,
-                "Review Required": "NÃO",
-                "Reason Code": "FUNNEL_SINGLE_CANDIDATE",
-                "Motivo": f"Stage 1.5 reduziu para um TYPE target-aware; {tax_reason}",
-                "LLM Provider": "",
-                "LLM Model": "",
-                "LLM Cache": "",
-                "LLM Prompt Tokens": 0,
-                "LLM Completion Tokens": 0,
-                "LLM Total Tokens": 0,
-            }
+    # IMPORTANTE v4.0.3: o funil NÃO fecha casos AMBIGUOUS/UNRESOLVED.
+    # Mesmo que BGE/regras deixem apenas um candidato, se Stage 1 não foi
+    # RESOLVED_RULE o Clef é o adjudicador obrigatório quando há evidência útil.
 
-    # Clef é o Stage 2 padrão e pode recuperar candidatos pelo BGE mesmo quando
-    # Stage 1 lexical não encontrou alias. Só bloqueamos falta de identidade target
-    # ou conflito real de múltiplos produtos.
-    if llm is not None and safe(getattr(llm, "provider", "")).casefold() == "clef":
-        clef_preflight = _clef_preflight_rejection_reason(rules, s1)
+    # Clef é o Stage 2 padrão. NO_TARGET_EVIDENCE sem qualquer title-rescue
+    # target-anchored é desviado antes de carregar/executar BGE/reranker.
+    if clef is not None:
+        if collection_state == "NO_TARGET_EVIDENCE" and curated_count == 0 and title_rescue_count == 0:
+            clef_preflight = "NO_TARGET_EVIDENCE"
+        else:
+            clef_preflight = _clef_preflight_rejection_reason(rules, s1)
         if clef_preflight:
             title, url = _output_title(*choose_title(s1.sources, []))
             reason_text = {
@@ -6914,31 +5299,66 @@ def finalize_product(
                     "Clef não chamado: nenhuma fonte PROBABLE/STRONG do SKU alvo; classificação sem identidade seria arriscada.",
                 "MULTI_PRODUCT_TARGET":
                     "Clef não chamado: evidência target descreve múltiplos produtos físicos sem combo explicitamente modelado.",
+                "NO_TARGET_EVIDENCE":
+                    "Clef/BGE não chamados: cache curado sem evidência target e sem title-rescue seguro; item direcionado à nova coleta.",
             }.get(clef_preflight, "Clef bloqueado pelo gate de identidade.")
             return {
                 **common,
-                "Resolution State": "REVIEW",
-                "Stage": "CLEF_PRECHECK",
+                "Próxima Ação": "RECOLETA_DIRIGIDA",
+                "Resolution State": "NEEDS_RECOLLECTION",
+                "Classification Outcome": "NEEDS_RECOLLECTION",
+                "Stage": "COLLECTION_GATE",
                 "O que é (Tipo)": s1.product_type or "REVISAR",
                 "Alimentação": s1.power or "UNKNOWN",
                 "Category General": consensus_cg,
                 "FAMILY": consensus_fam,
                 "Título Real": title,
                 "Fonte URL": url,
-                "Review Required": "SIM",
+                "Review Required": "NÃO",
+                "Auto Eligible": "NÃO",
+                "Double Check Priority": "AGUARDAR_RECOLETA",
                 "Reason Code": clef_preflight,
-                "Motivo": reason_text,
-                "LLM Provider": "",
-                "LLM Model": "",
-                "LLM Cache": "",
-                "LLM Prompt Tokens": 0,
-                "LLM Completion Tokens": 0,
-                "LLM Total Tokens": 0,
+                "Motivo": reason_text + " Nenhuma segunda consulta automática foi executada.",
+                "Clef Provider": "",
+                "Clef Model": "",
+                "Clef Cache": "",
+                "Clef Prompt Tokens": 0,
+                "Clef Completion Tokens": 0,
+                "Clef Total Tokens": 0,
             }
 
-        data, cache_hit, usage = llm.classify(key, raw.raw_hash, brand, model, s1)
+        try:
+            data, cache_hit, usage = clef.classify(key, raw.raw_hash, brand, model, s1)
+        except OperationalPause as exc:
+            if exc.code == "CLEF_SEMANTIC_FUNNEL_EMPTY":
+                title, url = _output_title(*choose_title(s1.sources, []))
+                return {
+                    **common,
+                    "Próxima Ação": "RECOLETA_DIRIGIDA",
+                    "Resolution State": "NEEDS_RECOLLECTION",
+                    "Classification Outcome": "NEEDS_RECOLLECTION",
+                    "Stage": "SEMANTIC_FUNNEL_EMPTY",
+                    "O que é (Tipo)": s1.product_type or "REVISAR",
+                    "Alimentação": s1.power or "UNKNOWN",
+                    "Category General": consensus_cg,
+                    "FAMILY": consensus_fam,
+                    "Título Real": title,
+                    "Fonte URL": url,
+                    "Review Required": "NÃO",
+                    "Auto Eligible": "NÃO",
+                    "Double Check Priority": "AGUARDAR_RECOLETA",
+                    "Reason Code": exc.code,
+                    "Motivo": f"{safe(exc)} Nenhuma segunda consulta automática foi executada.",
+                    "Clef Provider": "",
+                    "Clef Model": "",
+                    "Clef Cache": "",
+                    "Clef Prompt Tokens": 0,
+                    "Clef Completion Tokens": 0,
+                    "Clef Total Tokens": 0,
+                }
+            raise
         actual_provider = safe(usage.get("provider")) or "clef"
-        actual_model = safe(usage.get("model")) or safe(getattr(llm, "model", "clef"))
+        actual_model = safe(usage.get("model")) or safe(getattr(clef, "model", "clef"))
         refs = data.get("evidence_source_ids", []) or []
         typ = safe(data.get("product_type"))
         power = safe(data.get("power")) or "UNKNOWN"
@@ -6950,12 +5370,12 @@ def finalize_product(
 
         base_clef = {
             **common,
-            "LLM Provider": actual_provider.upper(),
-            "LLM Model": actual_model,
-            "LLM Cache": "SIM" if cache_hit else "NÃO",
-            "LLM Prompt Tokens": int(usage.get("prompt_tokens", 0) or 0),
-            "LLM Completion Tokens": int(usage.get("completion_tokens", 0) or 0),
-            "LLM Total Tokens": int(usage.get("total_tokens", 0) or 0),
+            "Clef Provider": actual_provider.upper(),
+            "Clef Model": actual_model,
+            "Clef Cache": "SIM" if cache_hit else "NÃO",
+            "Clef Prompt Tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "Clef Completion Tokens": int(usage.get("completion_tokens", 0) or 0),
+            "Clef Total Tokens": int(usage.get("total_tokens", 0) or 0),
             "Semantic Type Candidates": " | ".join(usage.get("semantic_type_candidates", []) or []),
             "Semantic Taxonomy Candidates": " || ".join(usage.get("semantic_taxonomy_candidates", []) or []),
             "Clef Type Probability": _unit_score(usage.get("clef_type_probability")),
@@ -6967,196 +5387,92 @@ def finalize_product(
             "Clef Taxonomy Top2": safe(usage.get("clef_taxonomy_top2")),
             "Clef Taxonomy Margin": _unit_score(usage.get("clef_taxonomy_margin")),
         }
+        clef_valid = (
+            safe(data.get("decision")) == "RESOLVED"
+            and typ in rules.types
+            and (cg, fam) in rules.valid_pairs
+            and (cg, fam) != ("OTHERS", "OTHERS")
+        )
+        if clef_valid:
+            # Resultado estruturado válido é sempre preservado. O gate AUTO apenas
+            # define se pode ser aceito sem double-check; não apaga a classificação.
+            priority = "BAIXA" if auto_ok else (
+                "ALTA" if any(x in gate_reason for x in ["IDENTITY", "CONFLICT", "MARGIN_LOW"]) else "MEDIA"
+            )
+            return {
+                **base_clef,
+                "Raw State": "RAW_OK",
+                "Próxima Ação": "CONCLUIDO" if auto_ok else "DOUBLE_CHECK",
+                "Resolution State": "RESOLVED" if auto_ok else "CLASSIFIED_CLEF",
+                "Classification Outcome": "CLEF_CLASSIFIED_AUTO" if auto_ok else "CLEF_CLASSIFIED",
+                "Stage": "CLEF",
+                "O que é (Tipo)": typ,
+                "Alimentação": power if power in rules.allowed_powers else "UNKNOWN",
+                "Category General": cg,
+                "FAMILY": fam,
+                "Título Real": title,
+                "Fonte URL": url,
+                "Review Required": "NÃO" if auto_ok else "SIM",
+                "Auto Eligible": "SIM" if auto_ok else "NÃO",
+                "Double Check Priority": priority,
+                "Reason Code": "CLEF_AUTO_APROVADO" if auto_ok else gate_reason,
+                "Motivo": (
+                    f"{safe(data.get('reason_short'))} | {gate_reason} | "
+                    f"tax_prob={_unit_score(usage.get('clef_taxonomy_probability')):.3f} | "
+                    f"tax_conf={_unit_score(usage.get('clef_taxonomy_confidence')):.3f} | "
+                    f"tax_margin={_unit_score(usage.get('clef_taxonomy_margin')):.3f}"
+                ),
+                "Evidence Source IDs": ",".join(map(str, refs)),
+            }
+
+        # Clef foi consultado, mas não conseguiu produzir TYPE + par taxonômico
+        # válidos. Isso é falta de evidência/aderência para esta consulta, não uma
+        # tarefa manual imediata: vai para fila de nova coleta/segunda consulta futura.
         return {
             **base_clef,
             "Raw State": "RAW_OK",
-            "Próxima Ação": "CONCLUIDO" if auto_ok else "REVISAO_CLEF",
-            "Resolution State": "RESOLVED" if auto_ok else "REVIEW",
-            "Stage": "CLEF",
+            "Próxima Ação": "RECOLETA_DIRIGIDA",
+            "Resolution State": "NEEDS_RECOLLECTION",
+            "Classification Outcome": "NEEDS_RECOLLECTION",
+            "Stage": "CLEF_INSUFFICIENT",
             "O que é (Tipo)": typ if typ in rules.types else "REVISAR",
             "Alimentação": power if power in rules.allowed_powers else "UNKNOWN",
-            "Category General": cg,
-            "FAMILY": fam,
+            "Category General": cg if (cg, fam) in rules.valid_pairs else "",
+            "FAMILY": fam if (cg, fam) in rules.valid_pairs else "",
             "Título Real": title,
             "Fonte URL": url,
-            "Review Required": "NÃO" if auto_ok else "SIM",
-            "Reason Code": "CLEF_AUTO_APROVADO" if auto_ok else gate_reason,
+            "Review Required": "NÃO",
+            "Auto Eligible": "NÃO",
+            "Double Check Priority": "AGUARDAR_RECOLETA",
+            "Reason Code": f"CLEF_{safe(data.get('decision')) or 'INSUFFICIENT'}",
             "Motivo": (
-                f"{safe(data.get('reason_short'))} | {gate_reason} | "
-                f"tax_prob={_unit_score(usage.get('clef_taxonomy_probability')):.3f} | "
-                f"tax_conf={_unit_score(usage.get('clef_taxonomy_confidence')):.3f} | "
-                f"tax_margin={_unit_score(usage.get('clef_taxonomy_margin')):.3f}"
+                f"{safe(data.get('reason_short'))} | Clef não fechou TYPE + taxonomia válidos. "
+                "Nenhuma segunda consulta automática foi executada."
             ),
             "Evidence Source IDs": ",".join(map(str, refs)),
         }
 
-    preflight_reason = llm_preflight_rejection_reason(rules, s1)
-    if preflight_reason:
-        # Mantém título apenas de fonte target; para taxonomy gap não inventa tipo.
-        title, url = _output_title(*choose_title(s1.sources, []))
-        reason_text = {
-            "LOW_TARGET_EVIDENCE":
-                "Stage 0 não encontrou fonte PROBABLE/STRONG do SKU alvo; candidato a recoleta seletiva.",
-            "TAXONOMY_GAP_NO_ALIAS":
-                "Há evidência target do produto, mas nenhum alias do JSON gerou TYPE; revisar cobertura da taxonomia/regras.",
-            "MULTI_PRODUCT_TARGET":
-                "Fonte target descreve múltiplos tipos/produtos (kit/combo); escolha automática bloqueada.",
-            "NOISY_TOO_MANY_CANDIDATES":
-                "Stage 1.5 encontrou candidatos plausíveis demais; LLM bloqueada para não arbitrar ruído.",
-            "NO_LLM_ELIGIBLE_TARGET_EVIDENCE":
-                "Há candidato bruto, mas nenhum sobreviveu ao funil mínimo de score/identidade/suporte.",
-        }.get(preflight_reason, "LLM bloqueada pelo pre-flight determinístico.")
-        return {
-            **common,
-            "Resolution State": "REVIEW",
-            "Stage": "STAGE0" if preflight_reason == "LOW_TARGET_EVIDENCE" else "FUNNEL",
-            "O que é (Tipo)": s1.product_type or "REVISAR",
-            "Alimentação": s1.power or "UNKNOWN",
-            "Category General": consensus_cg,
-            "FAMILY": consensus_fam,
-            "Título Real": title,
-            "Fonte URL": url,
-            "Review Required": "SIM",
-            "Reason Code": preflight_reason,
-            "Motivo": (reason_text + (f" | {consensus_reason}" if consensus_reason else "")),
-            "LLM Provider": "",
-            "LLM Model": "",
-            "LLM Cache": "",
-            "LLM Prompt Tokens": 0,
-            "LLM Completion Tokens": 0,
-            "LLM Total Tokens": 0,
-        }
-
-    if llm is None:
-        title, url = _output_title(*choose_title(s1.sources, []))
-        return {
-            **common,
-            "Resolution State": "REVIEW",
-            "Stage": "FUNNEL",
-            "O que é (Tipo)": s1.product_type or "REVISAR",
-            "Alimentação": s1.power or "UNKNOWN",
-            "Category General": consensus_cg,
-            "FAMILY": consensus_fam,
-            "Título Real": title,
-            "Fonte URL": url,
-            "Review Required": "SIM",
-            "Reason Code": f"STAGE15_{s1.state}",
-            "Motivo": " | ".join(s1.reasons + ([consensus_reason] if consensus_reason else [])),
-            "LLM Provider": "",
-            "LLM Model": "",
-            "LLM Cache": "",
-            "LLM Prompt Tokens": 0,
-            "LLM Completion Tokens": 0,
-            "LLM Total Tokens": 0,
-        }
-
-    data, cache_hit, usage = llm.classify(key, raw.raw_hash, brand, model, s1)
-
-    evidence_repaired = False
-    if usage.get("evidence_refs_valid") is False:
-        data, evidence_repaired = repair_llm_evidence_refs(data, rules, s1)
-        if evidence_repaired:
-            usage = dict(usage or {})
-            usage["evidence_refs_valid"] = True
-            usage["evidence_refs_repaired"] = True
-
-    if usage.get("evidence_refs_valid") is False:
-        ok, why = False, "EVIDENCE_REFS_INVALID"
-    else:
-        ok, why = validate_llm_output(data, rules, s1)
-
-    actual_provider = safe(usage.get("provider")) or llm.provider
-    actual_model = safe(usage.get("model")) or llm.model
-    provider_upper = actual_provider.upper()
-
-    base_llm = {
-        **common,
-        "LLM Provider": provider_upper,
-        "LLM Model": actual_model,
-        "LLM Cache": "SIM" if cache_hit else "NÃO",
-        "LLM Prompt Tokens": int(usage.get("prompt_tokens", 0) or 0),
-        "LLM Completion Tokens": int(usage.get("completion_tokens", 0) or 0),
-        "LLM Total Tokens": int(usage.get("total_tokens", 0) or 0),
-        "LLM JSON Parse Retries": int(usage.get("json_parse_retries", 0) or 0),
-        "LLM Failed Parse Tokens": int(usage.get("failed_parse_tokens", 0) or 0),
-        "LLM Evidence Repaired": "SIM" if evidence_repaired else "NÃO",
-        "LLM Rule Context": " | ".join(usage.get("context_types", []) or []),
-        "LLM Rate Limit Headers": json.dumps(usage.get("rate_limit_headers", {}) or {}, ensure_ascii=False),
-    }
-
-    if not ok:
-        db.event(run_id, key, f"{provider_upper}_OUTPUT_REJECTED", why)
-        rejected_refs = data.get("evidence_source_ids", []) or []
-        suggested_type = safe(data.get("product_type"))
-        if suggested_type in rules.types:
-            title, url = choose_title_for_type(s1.sources, suggested_type, rejected_refs)
-        else:
-            title, url = choose_title(s1.sources, rejected_refs)
-        suggested_power = safe(data.get("power"))
-        suggestion = ""
-        if suggested_type or suggested_power:
-            suggestion = f" | LLM_SUGGESTION={suggested_type or 'REVISAR'}/{suggested_power or 'UNKNOWN'}"
-        return {
-            **base_llm,
-            "Resolution State": "REVIEW",
-            "Stage": "LLM",
-            "O que é (Tipo)": "REVISAR",
-            "Alimentação": "UNKNOWN",
-            "Category General": consensus_cg,
-            "FAMILY": consensus_fam,
-            "Título Real": title,
-            "Fonte URL": url,
-            "Review Required": "SIM",
-            "Reason Code": why,
-            "Motivo": (f"{safe(data.get('reason_short'))}{suggestion} | POST_GATE={why}" + (f" | {consensus_reason}" if consensus_reason else "")).strip(" |"),
-            "Evidence Source IDs": ",".join(map(str, rejected_refs)),
-        }
-
-    decision = safe(data.get("decision"))
-    refs = data.get("evidence_source_ids", []) or []
-    typ = safe(data.get("product_type"))
-    title, url = choose_title_for_type(s1.sources, typ, refs) if typ in rules.types else choose_title(s1.sources, refs)
-
-    if decision != "RESOLVED":
-        return {
-            **base_llm,
-            "Resolution State": "REVIEW",
-            "Stage": "LLM",
-            "O que é (Tipo)": typ,
-            "Alimentação": safe(data.get("power")),
-            "Category General": consensus_cg,
-            "FAMILY": consensus_fam,
-            "Título Real": title,
-            "Fonte URL": url,
-            "Review Required": "SIM",
-            "Reason Code": f"{provider_upper}_{decision}",
-            "Motivo": (safe(data.get("reason_short")) + (f" | {consensus_reason}" if consensus_reason else "")),
-            "Evidence Source IDs": ",".join(map(str, refs)),
-        }
-
-    power = safe(data.get("power"))
-    title, url = choose_title_for_type(s1.sources, typ, refs, min_identity="STRONG")
-    tax_evidence = taxonomy_evidence_text(s1.sources, typ, refs)
-    cg, fam, tax_reason = rules.map_taxonomy(typ, power, tax_evidence, brand, model)
-    review = (cg, fam) not in rules.valid_pairs or (cg, fam) == ("OTHERS", "OTHERS")
-    out_cg, out_fam = ("", "") if review else (cg, fam)
-
+    # Execução explicitamente sem Clef: mantém resultado conservador em REVIEW.
+    title, url = _output_title(*choose_title(s1.sources, []))
     return {
-        **base_llm,
-        "Raw State": "RAW_OK",
-        "Próxima Ação": "CONCLUIDO" if not review else common.get("Próxima Ação", "LLM_COM_CANDIDATOS_OU_REVISAO"),
-        "Resolution State": "REVIEW" if review else "RESOLVED",
-        "Stage": "LLM",
-        "O que é (Tipo)": typ,
-        "Alimentação": power,
-        "Category General": out_cg,
-        "FAMILY": out_fam,
+        **common,
+        "Resolution State": "REVIEW",
+        "Stage": "FUNNEL",
+        "O que é (Tipo)": s1.product_type or "REVISAR",
+        "Alimentação": s1.power or "UNKNOWN",
+        "Category General": consensus_cg,
+        "FAMILY": consensus_fam,
         "Título Real": title,
         "Fonte URL": url,
-        "Review Required": "SIM" if review else "NÃO",
-        "Reason Code": "TAXONOMY_UNMAPPED" if review else f"{provider_upper}_RESOLVED",
-        "Motivo": f"{safe(data.get('reason_short'))} | {tax_reason}",
-        "Evidence Source IDs": ",".join(map(str, refs)),
+        "Review Required": "SIM",
+        "Reason Code": f"CLEF_DISABLED_{s1.state}",
+        "Motivo": "Clef desabilitado para esta execução; " + " | ".join(s1.reasons + ([consensus_reason] if consensus_reason else [])),
+        "Clef Provider": "",
+        "Clef Model": "",
+        "Clef Cache": "",
+        "Clef Prompt Tokens": 0,
+        "Clef Completion Tokens": 0,
+        "Clef Total Tokens": 0,
     }
 
 
@@ -7196,7 +5512,10 @@ BASELINE_MASTER_FIELDS = [
     "Revisão",
     "Revisão B.I",
     "Resolution State",
+    "Classification Outcome",
     "Review Required",
+    "Auto Eligible",
+    "Double Check Priority",
     "Reason Code",
     "Motivo",
     "Stage",
@@ -7204,8 +5523,8 @@ BASELINE_MASTER_FIELDS = [
     "Rules Hash",
     "Pipeline Version",
     "Processed At",
-    "LLM Provider",
-    "LLM Model",
+    "Clef Provider",
+    "Clef Model",
     "Semantic Type Candidates",
     "Semantic Taxonomy Candidates",
     "Clef Type Probability",
@@ -7224,6 +5543,7 @@ _REVIEW_REJECT_STATES = {
     "PENDENTE_COLETA",
     "PENDING_COLLECTION",
     "PENDING_RECOLLECTION",
+    "NEEDS_RECOLLECTION",
     "CACHE_ERROR",
     "CACHE_COLLISION",
     "NÃO_CLASSIFICADO",
@@ -7525,8 +5845,8 @@ def _copy_business_values(
         "Rules Hash": ["Rules Hash"],
         "Pipeline Version": ["Pipeline Version"],
         "Processed At": ["Processed At"],
-        "LLM Provider": ["LLM Provider"],
-        "LLM Model": ["LLM Model"],
+        "Clef Provider": ["Clef Provider"],
+        "Clef Model": ["Clef Model"],
     }
 
     for dst_col, names in aliases.items():
@@ -7746,7 +6066,7 @@ def _audit_baseline_conflicts(
     final_path: Optional[Path],
     report_path: Path,
 ) -> Dict[str, int]:
-    """Gera CSV de conflitos objetivos sem modificar Excel e sem usar LLM."""
+    """Gera CSV de conflitos objetivos sem modificar Excel e sem usar Clef."""
     import csv
     stats={'audit_rows':0,'review_bi_conflict':0,'others_others':0}
     if not final_path or not final_path.exists():
@@ -7902,9 +6222,13 @@ def _record_process_state(rec: Dict[str, Any]) -> Tuple[str, str]:
         return "PROCESSADO", "AUTO_APROVADO"
 
     resolution = safe(rec.get("Resolution State")).upper()
+    if resolution == "CLASSIFIED_CLEF":
+        # Classificação completa produzida pelo Clef; falta apenas double-check humano.
+        return "PROCESSADO", "PROVÁVEL"
     if resolution in {
         "PENDING_COLLECTION",
         "PENDING_RECOLLECTION",
+        "NEEDS_RECOLLECTION",
         "CACHE_ERROR",
         "CACHE_COLLISION",
     }:
@@ -8007,7 +6331,9 @@ def _derive_final_review(row: Any, df: Any) -> Any:
 
     resolution_col = find_col(df, ["Resolution State"], required=False)
     resolution = safe(row.get(resolution_col)).upper() if resolution_col else ""
-    if resolution in {"PENDING_COLLECTION", "PENDING_RECOLLECTION", "CACHE_ERROR", "CACHE_COLLISION"}:
+    if resolution == "CLASSIFIED_CLEF":
+        return "PROVÁVEL"
+    if resolution in {"PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "CACHE_ERROR", "CACHE_COLLISION"}:
         return "PENDENTE_COLETA"
 
     # Linha conhecida, mas ainda nunca enriquecida: fica PENDENTE, não REVISAR.
@@ -8265,7 +6591,7 @@ def reconcile_baseline_before_run(
             "BASELINE_RECONCILIATION_FAILED: "
             f"{len(missing_after)} item(ns) seriam pulados pelo pipeline, "
             "mas ainda não constam como aceitos na Base Final. "
-            "Classificação não iniciada para evitar gastar LLM com baseline inconsistente."
+            "Classificação não iniciada para evitar chamar Clef com baseline inconsistente."
         )
 
     return stats
@@ -8461,6 +6787,21 @@ def _cache_recovery_reason(
     accepted = _baseline_row_accepted(row, df)
     review = safe(row.get(review_col)).upper() if review_col else ""
 
+    # CLASSIFIED_CLEF atual já tem uma proposta completa para double-check; não
+    # deve voltar automaticamente à fila de recuperação em toda execução.
+    resolution_col = find_col(df, ["Resolution State"], required=False)
+    pipeline_col = find_col(df, ["Pipeline Version"], required=False)
+    resolution = safe(row.get(resolution_col)).upper() if resolution_col else ""
+    pipeline_version = safe(row.get(pipeline_col)) if pipeline_col else ""
+    meta = master_meta.get(key, {})
+    if (
+        resolution == "CLASSIFIED_CLEF"
+        and review in {"PROVÁVEL", "PROVAVEL"}
+        and _rule_metadata_is_current(meta, rules)
+        and pipeline_version == PIPELINE_VERSION
+    ):
+        return ""
+
     if accepted:
         if review == "AUTO_APROVADO":
             meta = master_meta.get(key, {})
@@ -8521,7 +6862,7 @@ def build_cache_recovery_plan(
 
     with_cache: List[Dict[str, Any]] = []
     without_cache: List[Dict[str, Any]] = []
-    target_all: List[Tuple[str, str, str]] = []
+    target_ranked: List[Tuple[int, str, str, str]] = []
     seen = set()
     locked = good = stale_auto = stale_unknown_meta = 0
     collection_counts: Dict[str, int] = defaultdict(int)
@@ -8586,7 +6927,15 @@ def build_cache_recovery_plan(
             else:
                 rec["Ação"] = "RECOLETA_NECESSARIA"
             with_cache.append(rec)
-            target_all.append((brand, model, key))
+            # Pilotos/recovery priorizam o que pode ser classificado agora. Itens sem
+            # evidência permanecem na mesma fila, mas vêm depois e viram NEEDS_RECOLLECTION
+            # sem BGE/Clef. Nenhuma segunda consulta é disparada automaticamente.
+            state_priority = {
+                "READY_FOR_CLASSIFICATION": 0,
+                "PARTIAL_TARGET_EVIDENCE": 1,
+                "NO_TARGET_EVIDENCE": 2,
+            }.get(coll_state, 1 if curated_count else 2)
+            target_ranked.append((state_priority, brand, model, key))
         else:
             rec["Ação"] = "PENDENTE_COLETA"
             without_cache.append(rec)
@@ -8594,6 +6943,8 @@ def build_cache_recovery_plan(
     _export_recovery_report(with_cache, with_cache_path, "Pendentes_Com_Cache")
     _export_recovery_report(without_cache, without_cache_path, "Pendentes_Sem_Cache")
 
+    target_ranked.sort(key=lambda x: (x[0], business_key(x[1], x[2])))
+    target_all = [(brand, model, key) for _, brand, model, key in target_ranked]
     targets = target_all[:max_items] if max_items else target_all
     stats = {
         "linhas_unicas_analisadas": len(seen),
@@ -8720,54 +7071,21 @@ def run_pipeline(
             LOG.info("Arquivo: %s", inventory_path)
             return
 
-        groq_model = (
-            os.getenv("GROQ_MODEL", "").strip()
-            or safe(cfg.get("groq", {}).get("model"))
-            or DEFAULT_MODEL
-        )
-        nvidia_model = (
-            os.getenv("NVIDIA_MODEL", "").strip()
-            or safe(cfg.get("nvidia", {}).get("model"))
-            or "openai/gpt-oss-20b"
-        )
-        openrouter_model = (
-            os.getenv("OPENROUTER_MODEL", "").strip()
-            or safe(cfg.get("openrouter", {}).get("model"))
-            or "openai/gpt-oss-120b:free"
-        )
-
         clef_model = (
             os.getenv("CLOUDFLARE_CLEF_MODEL", "").strip()
             or safe(cfg.get("clef", {}).get("model"))
             or DEFAULT_CLEF_MODEL
         )
-        route_names = [safe(x).casefold() for x in (cfg.get("llm", {}).get("route", []) or []) if safe(x)]
-        if args.llm_provider:
-            route_names = [safe(args.llm_provider).casefold()]
-        if not route_names:
-            route_names = ["clef"]
-        if args.llm_model and route_names:
-            if route_names[0] == "clef":
-                clef_model = safe(args.llm_model)
-            elif route_names[0] == "groq":
-                groq_model = safe(args.llm_model)
-            elif route_names[0] == "nvidia":
-                nvidia_model = safe(args.llm_model)
-            elif route_names[0] == "openrouter":
-                openrouter_model = safe(args.llm_model)
-        model_by_provider = {
-            "clef": clef_model, "groq": groq_model,
-            "nvidia": nvidia_model, "openrouter": openrouter_model
-        }
-        llm_identity = "cascade:" + "->".join(
-            f"{name}:{model_by_provider.get(name, '')}" for name in route_names if name in model_by_provider
-        )
+        if safe(getattr(args, "clef_model", "")):
+            clef_model = safe(args.clef_model)
+
+        clef_identity = f"clef:{clef_model}"
         db = ClassificationDB(db_path)
-        run_id = db.start_run(args.mode, rules.hash, llm_identity)
+        run_id = db.start_run(args.mode, rules.hash, clef_identity)
         engine = DeterministicEngine(rules, cfg)
 
-        use_llm = not args.no_llm
-        llm: Optional[ProviderCascade] = None
+        use_clef = not bool(getattr(args, "no_clef", False))
+        clef: Optional[ClefFunnelClassifier] = None
 
         rows: List[Dict[str, Any]] = []
         stats = defaultdict(int)
@@ -8826,116 +7144,21 @@ def run_pipeline(
             cohort_hash,
         )
 
-        if use_llm and targets:
+        if use_clef and targets:
             try:
-                clef_llm = ClefFunnelClassifier(
-                    rules=rules,
-                    cfg=cfg,
-                    db=db,
-                    provider="clef",
-                    model=clef_model,
+                clef = ClefFunnelClassifier(
+                    rules=rules, cfg=cfg, db=db, provider="clef", model=clef_model
                 )
-                groq_llm = OpenAICompatibleClassifier(
-                    rules=rules,
-                    cfg=cfg,
-                    db=db,
-                    provider="groq",
-                    model=groq_model,
-                )
-                nvidia_llm = OpenAICompatibleClassifier(
-                    rules=rules,
-                    cfg=cfg,
-                    db=db,
-                    provider="nvidia",
-                    model=nvidia_model,
-                )
-                openrouter_llm = OpenAICompatibleClassifier(
-                    rules=rules,
-                    cfg=cfg,
-                    db=db,
-                    provider="openrouter",
-                    model=openrouter_model,
-                )
-
-                provider_map = {
-                    "clef": clef_llm,
-                    "groq": groq_llm,
-                    "nvidia": nvidia_llm,
-                    "openrouter": openrouter_llm,
-                }
-                ordered_providers = [provider_map[x] for x in route_names if x in provider_map]
-                if not ordered_providers:
-                    ordered_providers = [clef_llm]
-                llm = ProviderCascade(
-                    ordered_providers,
-                    switch_only_on_quota_exhaustion=bool(
-                        cfg.get("llm", {}).get(
-                            "switch_only_on_quota_exhaustion", False
-                        )
-                    ),
-                )
-                preflights = llm.preflight_all()
-
-                # Registra a cadeia de modelos validada no preflight para
-                # impedir mistura de checkpoints entre políticas de fallback.
-                llm_identity = "cascade:" + "->".join(
-                    obj.route_identity_fragment() for obj in llm.providers
-                )
-                db.update_run_model(run_id, llm_identity)
-
-                for pf, pobj in zip(preflights, llm.providers):
-                    if not pf.get("enabled", True):
-                        # Já foi registrado em WARNING por ProviderCascade.preflight_all().
-                        continue
-
-                    LOG.info(
-                        "LLM PRE-FLIGHT OK | provider=%s | model=%s | "
-                        "endpoint=%s | ritmo=%.1f req/min | "
-                        "output=%d | retry_output_max=%d",
-                        pf["provider"],
-                        pobj.model,
-                        pf["base_url"],
-                        pf["operational_rpm"],
-                        pobj.max_output_tokens,
-                        pobj.json_retry_max_completion_tokens,
-                    )
-                    if pf.get("model_discovery"):
-                        md = pf["model_discovery"]
-                        LOG.info(
-                            "%s MODELS | disponíveis=%s | solicitado=%s | selecionado=%s | auto=%s",
-                            pf["provider"].upper(),
-                            md["available_count"],
-                            md["requested_model"],
-                            md["selected_model"],
-                            md["auto_selected"],
-                        )
-                        if pf["provider"] == "nvidia" and md.get("candidate_models"):
-                            LOG.info(
-                                "NVIDIA MODEL ROUTE: %s",
-                                " -> ".join(md["candidate_models"]),
-                            )
-                        if pf["provider"] == "openrouter" and md.get("key_info"):
-                            ki = md["key_info"]
-                            LOG.info(
-                                "OPENROUTER KEY | free_tier=%s | usage_daily=%s | key_limit_remaining=%s",
-                                ki.get("is_free_tier"),
-                                ki.get("usage_daily"),
-                                ki.get("limit_remaining"),
-                            )
-
-                enabled_names = [p.provider.upper() for p in llm.enabled_route()]
-                disabled_names = [
-                    p.provider.upper() for i, p in enumerate(llm.providers)
-                    if i in llm.disabled
-                ]
+                pf = clef.preflight()
+                clef_identity = clef.route_identity_fragment()
+                db.update_run_model(run_id, clef_identity)
                 LOG.info(
-                    "ROTA LLM ATIVA: %s | fallback em cota/cap, formato e falha "
-                    "transitória após retries; evidência insuficiente nunca é forçada.%s",
-                    " -> ".join(enabled_names),
-                    (f" | indisponíveis nesta execução: {', '.join(disabled_names)}"
-                     if disabled_names else ""),
+                    "CLEF PRE-FLIGHT OK | model=%s | endpoint=%s | ritmo=%.1f req/min",
+                    clef.model, pf["base_url"], pf["operational_rpm"],
                 )
-
+                LOG.info(
+                    "ROTA CLEF ATIVA | regra forte fecha; todo AMBIGUOUS/UNRESOLVED com evidência útil segue BGE/reranker -> Clef; falta de evidência vira NEEDS_RECOLLECTION."
+                )
             except OperationalPause as exc:
                 db.event(run_id, "", exc.code, safe(exc))
                 db.finish_run(run_id, "FAILED", f"{exc.code}: {exc}")
@@ -8943,10 +7166,9 @@ def run_pipeline(
                 raise RuntimeError(
                     f"{exc.code}: {exc}\nClassificação NÃO iniciada."
                 ) from exc
-        elif use_llm:
+        elif use_clef:
             LOG.info(
-                "LLM PRE-FLIGHT DISPENSADO | cohort sem itens pendentes; "
-                "nenhuma chamada de provider necessária."
+                "CLEF PRE-FLIGHT DISPENSADO | cohort sem itens pendentes; nenhuma chamada Clef necessária."
             )
 
         paused_reason = ""
@@ -8959,7 +7181,7 @@ def run_pipeline(
                     rec = record_for_raw_state(raw)
                     stats[raw.state.lower()] += 1
                     db.put_checkpoint(
-                        key, brand, model_, raw.raw_hash, rules.hash, rec, llm_identity
+                        key, brand, model_, raw.raw_hash, rules.hash, rec, clef_identity
                     )
                     rows.append(rec)
                     continue
@@ -8974,7 +7196,7 @@ def run_pipeline(
                     rec = record_for_uncurated_cache(raw)
                     stats["collection_uncurated"] += 1
                     db.put_checkpoint(
-                        key, brand, model_, raw.raw_hash, rules.hash, rec, llm_identity
+                        key, brand, model_, raw.raw_hash, rules.hash, rec, clef_identity
                     )
                     rows.append(rec)
                     continue
@@ -8985,7 +7207,7 @@ def run_pipeline(
                         key,
                         raw.raw_hash,
                         rules.hash,
-                        llm_identity,
+                        clef_identity,
                     )
 
                 if cp is not None:
@@ -8998,7 +7220,7 @@ def run_pipeline(
 
                 try:
                     rec = finalize_product(
-                        brand, model_, raw, s1, rules, cfg, llm, db, run_id
+                        brand, model_, raw, s1, rules, cfg, clef, db, run_id
                     )
                 except OperationalPause as exc:
                     db.event(run_id, key, exc.code, safe(exc))
@@ -9011,15 +7233,15 @@ def run_pipeline(
         "Classification Identity": s1.identity_best,
                             "Rules Hash": rules.hash, "Pipeline Version": PIPELINE_VERSION,
                             "Processed At": now_iso(), "Resolution State": "REVIEW",
-                            "Stage": "LLM_FORMAT_REVIEW", "O que é (Tipo)": s1.product_type or "REVISAR",
+                            "Stage": "CLEF_FORMAT_REVIEW", "O que é (Tipo)": s1.product_type or "REVISAR",
                             "Alimentação": s1.power or "UNKNOWN", "Category General": "", "FAMILY": "",
                             "Título Real": title, "Fonte URL": url, "Review Required": "SIM",
                             "Reason Code": exc.code,
-                            "Motivo": f"Todos os providers disponíveis falharam no formato para este item; execução continuou. {safe(exc)}",
-                            "LLM Provider": "", "LLM Model": "", "LLM Cache": "",
-                            "LLM Prompt Tokens": 0, "LLM Completion Tokens": 0, "LLM Total Tokens": 0,
+                            "Motivo": f"Clef falhou no formato para este item; execução continuou. {safe(exc)}",
+                            "Clef Provider": "", "Clef Model": "", "Clef Cache": "",
+                            "Clef Prompt Tokens": 0, "Clef Completion Tokens": 0, "Clef Total Tokens": 0,
                         }
-                        stats["llm_format_review"] += 1
+                        stats["clef_format_review"] += 1
                         LOG.warning("%s | item enviado a REVIEW; execução continuará.", exc.code)
                     else:
                         stats["api_paused"] += 1
@@ -9029,33 +7251,43 @@ def run_pipeline(
 
                 if should_checkpoint_record(rec):
                     db.put_checkpoint(
-                        key, brand, model_, raw.raw_hash, rules.hash, rec, llm_identity
+                        key, brand, model_, raw.raw_hash, rules.hash, rec, clef_identity
                     )
 
                 rows.append(rec)
                 stats[f"final_{safe(rec.get('Resolution State')).lower()}"] += 1
                 stats[f"stage_{safe(rec.get('Stage')).lower()}"] += 1
 
-                if safe(rec.get("LLM Cache")).upper() == "SIM":
-                    stats["llm_cache_hit"] += 1
-                elif safe(rec.get("Stage")).upper() == "LLM":
-                    stats["llm_result"] += 1
+                if safe(rec.get("Clef Cache")).upper() == "SIM":
+                    stats["clef_cache_hit"] += 1
+                stage_upper = safe(rec.get("Stage")).upper()
+                resolution_upper = safe(rec.get("Resolution State")).upper()
+                if stage_upper == "CLEF":
+                    stats["clef_result"] += 1
+                    if safe(rec.get("Reason Code")) == "CLEF_AUTO_APROVADO":
+                        stats["clef_auto"] += 1
+                    elif resolution_upper == "CLASSIFIED_CLEF":
+                        stats["clef_classified"] += 1
+                if resolution_upper == "NEEDS_RECOLLECTION":
+                    stats["needs_recollection"] += 1
+                if stage_upper in {"COLLECTION_GATE", "SEMANTIC_FUNNEL_EMPTY"}:
+                    stats["clef_blocked_no_evidence"] += 1
 
                 if idx % 10 == 0 or idx == len(targets):
+                    sem_avg = (clef.semantic_seconds / clef.semantic_calls) if clef is not None and clef.semantic_calls else 0.0
+                    rerank_avg = (clef.rerank_seconds / clef.semantic_calls) if clef is not None and clef.semantic_calls else 0.0
                     LOG.info(
                         "PROGRESSO %d/%d | rule=%d ambiguous=%d unresolved=%d | "
-                        "llm_ok=%d llm_api=%d llm_cache=%d | review=%d checkpoint=%d | tokens=%d",
-                        idx,
-                        len(targets),
-                        stats["stage1_resolved_rule"],
-                        stats["stage1_ambiguous"],
-                        stats["stage1_unresolved"],
-                        stats["stage_llm"],
-                        llm.api_calls if llm is not None else 0,
-                        stats["llm_cache_hit"],
-                        stats["final_review"],
-                        stats["checkpoint_hit"],
-                        llm.total_tokens if llm is not None else 0,
+                        "clef_auto=%d clef_classified=%d clef_api=%d clef_cache=%d | "
+                        "needs_recollection=%d blocked_no_evidence=%d exception_review=%d checkpoint=%d | "
+                        "tokens=%d | sem_avg=%.2fs rerank_avg=%.2fs",
+                        idx, len(targets),
+                        stats["stage1_resolved_rule"], stats["stage1_ambiguous"], stats["stage1_unresolved"],
+                        stats["clef_auto"], stats["clef_classified"],
+                        clef.api_calls if clef is not None else 0, stats["clef_cache_hit"],
+                        stats["needs_recollection"], stats["clef_blocked_no_evidence"],
+                        stats["final_review"], stats["checkpoint_hit"],
+                        clef.total_tokens if clef is not None else 0, sem_avg, rerank_avg,
                     )
 
             baseline_stats: Dict[str, int] = {}
@@ -9120,23 +7352,18 @@ def run_pipeline(
                 "Pipeline Version": PIPELINE_VERSION,
                 "Rules Version": rules.version,
                 "Rules Hash": rules.hash,
-                "LLM Provider": (
-                    "->".join(p.provider for p in llm.providers)
-                    if llm is not None
-                    else ("NOT_NEEDED" if use_llm else "DISABLED")
-                ),
-                "LLM Model": (
-                    "|".join(p.route_identity_fragment() for p in llm.providers)
-                    if llm is not None
-                    else ("NOT_NEEDED" if use_llm else "DISABLED")
-                ),
+                "Clef Provider": "CLEF" if clef is not None else ("NOT_NEEDED" if use_clef else "DISABLED"),
+                "Clef Model": clef.route_identity_fragment() if clef is not None else ("NOT_NEEDED" if use_clef else "DISABLED"),
                 "Produtos no cache": len(store.catalog()),
                 "Elegíveis": len(targets),
                 "Pilot Cohort Hash": cohort_hash,
-                "LLM API Calls": llm.api_calls if llm is not None else 0,
-                "LLM Prompt Tokens": llm.prompt_tokens if llm is not None else 0,
-                "LLM Completion Tokens": llm.completion_tokens if llm is not None else 0,
-                "LLM Total Tokens": llm.total_tokens if llm is not None else 0,
+                "Clef API Calls": clef.api_calls if clef is not None else 0,
+                "Clef Prompt Tokens": clef.prompt_tokens if clef is not None else 0,
+                "Clef Completion Tokens": clef.completion_tokens if clef is not None else 0,
+                "Clef Total Tokens": clef.total_tokens if clef is not None else 0,
+                "Semantic Calls": clef.semantic_calls if clef is not None else 0,
+                "Semantic Seconds": round(clef.semantic_seconds, 3) if clef is not None else 0,
+                "Rerank Seconds": round(clef.rerank_seconds, 3) if clef is not None else 0,
                 "Baseline Warning": baseline_warning,
                 **baseline_pre_stats,
                 **dict(stats),
@@ -9158,7 +7385,7 @@ def run_pipeline(
                     output_path,
                 )
                 LOG.warning(
-                    "Rode novamente depois; checkpoints e cache LLM evitam repetir itens concluídos."
+                    "Rode novamente depois; checkpoints e cache Clef evitam repetir itens concluídos."
                 )
             else:
                 LOG.info("CONCLUÍDO. Resultado: %s", output_path)
@@ -9353,6 +7580,27 @@ def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
     }
 
 
+
+def validate_classification_flow_policy(cfg: Dict[str, Any]) -> List[str]:
+    """Fail-closed para o contrato operacional da v4.0.3.
+
+    O funil prepara candidatos; Clef decide toda cauda não resolvida por regra
+    quando há evidência target utilizável. Resultado Clef válido é preservado
+    mesmo abaixo do gate AUTO. REVIEW humano não é rota padrão.
+    """
+    flow = cfg.get("classification_flow", {}) or {}
+    errors: List[str] = []
+    required_true = (
+        "clef_required_after_non_rule",
+        "preserve_valid_clef_classification_below_auto_gate",
+        "no_automatic_secondary_search",
+        "review_is_last_resort",
+    )
+    for key in required_true:
+        if not bool(flow.get(key, False)):
+            errors.append(f"CLASSIFICATION_FLOW_POLICY: {key} deve ser true")
+    return errors
+
 def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") -> None:
     errors = rules.validate()
     if errors:
@@ -9365,6 +7613,49 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
         "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | reference_only=%d",
         qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"], qg["real_reference_only"],
     )
+
+    # Contrato operacional v4.0.3: uma consulta automática por produto e Clef
+    # obrigatório para toda cauda não resolvida por regra com evidência útil.
+    cost_errors = validate_collection_cost_policy(cfg)
+    if cost_errors:
+        for e in cost_errors:
+            LOG.error(e)
+        raise RuntimeError("Política de coleta inválida; execução bloqueada.")
+    flow_errors = validate_classification_flow_policy(cfg)
+    if flow_errors:
+        for e in flow_errors:
+            LOG.error(e)
+        raise RuntimeError("Contrato de classificação v4.0.3 inválido; execução bloqueada.")
+    LOG.info(
+        "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
+        "preserve_clef_classification=True | review_last_resort=True"
+    )
+
+    sf = cfg.get("semantic_funnel", {}) or {}
+    local_only = bool(sf.get("local_files_only", False))
+    offline = bool(sf.get("offline_mode", local_only))
+    embedding_model = safe(sf.get("embedding_model"))
+    reranker_model = safe(sf.get("reranker_model"))
+    if local_only:
+        local_errors = []
+        if not offline:
+            local_errors.append("semantic_funnel.offline_mode deve ser true quando local_files_only=true")
+        for label, value in [("embedding_model", embedding_model), ("reranker_model", reranker_model)]:
+            if not value:
+                local_errors.append(f"semantic_funnel.{label} vazio")
+            elif not Path(value).expanduser().exists():
+                local_errors.append(f"semantic_funnel.{label} não encontrado: {value}")
+        if local_errors:
+            for e in local_errors:
+                LOG.error(e)
+            raise RuntimeError("BGE local/offline inválido; classificação bloqueada.")
+        LOG.info(
+            "BGE LOCAL CONFIG OK | embedding=%s | reranker=%s | local_only=%s | offline=%s | "
+            "type_rerank=%s | taxonomy_rerank=%s | rerank_max_length=%s",
+            embedding_model, reranker_model, local_only, offline,
+            bool(sf.get("rerank_types", False)), bool(sf.get("rerank_taxonomy", True)),
+            int(sf.get("rerank_max_length", 224) or 224),
+        )
 
     cache = Path(cache_override or cfg["files"]["cache"])
     if cache.exists():
@@ -9379,7 +7670,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v3")
+    p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
     p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
@@ -9392,9 +7683,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", default="")
     p.add_argument("--inventory-output", default="")
     p.add_argument("--precollection-output", default="")
-    p.add_argument("--llm-provider", choices=["clef", "nvidia", "groq", "openrouter"], default="")
-    p.add_argument("--llm-model", default="")
-    p.add_argument("--no-llm", action="store_true")
+    p.add_argument("--clef-model", dest="clef_model", default="")
+    p.add_argument("--no-clef", dest="no_clef", action="store_true")
     p.add_argument("--no-checkpoint", action="store_true")
     p.add_argument("--reprocess", action="store_true")
     p.add_argument("--max-items", type=int, default=0)
@@ -9442,7 +7732,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print("2 - CLASSIFICAÇÃO")
     print("3 - PROCESSO COMPLETO")
     print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
-    print("5 - AUDITORIA / REPARO BASE (SEM LLM)")
+    print("5 - AUDITORIA / REPARO BASE (SEM CLEF)")
     print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
     print("7 - SAIR")
     op = input("Opção: ").strip()
@@ -9493,7 +7783,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
 
 
 def run_baseline_repair(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
-    """Audita e saneia baseline local sem Tavily e sem LLM."""
+    """Audita e saneia baseline local sem Tavily e sem Clef."""
     master_path = Path(args.master or cfg["files"].get("master", "")) if (args.master or cfg["files"].get("master")) else None
     final_path = Path(args.final or cfg["files"].get("final", "")) if (args.final or cfg["files"].get("final")) else None
     input_path = Path(args.input or cfg["files"].get("input", "")) if (args.input or cfg["files"].get("input")) else None
@@ -9522,7 +7812,7 @@ def run_baseline_repair(args: argparse.Namespace, cfg: Dict[str, Any], rules: Ru
         reprocess=False,
     )
     LOG.info(
-        "REPARO BASE CONCLUÍDO SEM LLM | %s",
+        "REPARO BASE CONCLUÍDO SEM CLEF | %s",
         " | ".join(f"{k}={v}" for k, v in stats.items()),
     )
     LOG.info("Revisão B.I não foi recalculada nem preenchida pelo script.")
@@ -9556,11 +7846,9 @@ def main() -> int:
 
     if env_info["exists"]:
         LOG.info(
-            ".env carregado: %s | GROQ=%s | NVIDIA=%s | OPENROUTER=%s | TAVILY=%s | SERPER=%s | BRIGHTDATA=%s | BRIGHTDATA_ZONE=%s",
+            ".env carregado: %s | CLEF=%s | TAVILY=%s | SERPER=%s | BRIGHTDATA=%s | BRIGHTDATA_ZONE=%s",
             env_info["path"],
-            "CONFIGURADA" if bool(os.getenv("GROQ_API_KEY", "").strip()) else "AUSENTE",
-            "CONFIGURADA" if bool(os.getenv("NVIDIA_API_KEY", "").strip()) else "AUSENTE",
-            "CONFIGURADA" if bool(os.getenv("OPENROUTER_API_KEY", "").strip()) else "AUSENTE",
+            "CONFIGURADA" if bool(os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()) and bool((os.getenv("CLOUDFLARE_API_TOKEN", "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip())) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("TAVILY_API_KEY", "").strip()) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("SERPER_API_KEY", "").strip()) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("BRIGHTDATA_API_KEY", "").strip()) else "AUSENTE",
@@ -9583,9 +7871,18 @@ def main() -> int:
         return 0
     if args.mode in {"classify", "full", "recover"}:
         qg = run_quality_gates(rules, cfg)
+        flow_errors = validate_classification_flow_policy(cfg)
+        if flow_errors:
+            for e in flow_errors:
+                LOG.error(e)
+            return 2
         LOG.info(
             "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | classificação liberada",
             qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"],
+        )
+        LOG.info(
+            "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
+            "preserve_clef_classification=True | review_last_resort=True"
         )
     if args.mode == "inventory":
         run_pipeline(args, cfg, rules)
