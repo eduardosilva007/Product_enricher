@@ -1,12 +1,12 @@
 {
-  "VERSION": "2026-10-05-v3.0.11-clef-funnel",
+  "VERSION": "2026-10-13-v3.0.12-manual-taxonomy-gold",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
-    "Clef é somente árbitro restrito: candidatos podem vir do Stage 1 determinístico ou do funil semântico BGE sobre labels já existentes no JSON; sem identidade target suficiente o item permanece em REVIEW.",
-    "Nenhum provider cria candidato: PRODUCT_TYPE e Category|FAMILY enviados ao Clef pertencem ao JSON e são reduzidos localmente antes da chamada.",
+    "LLM é somente desempate restrito quando existe candidato determinístico de TYPE; sem candidato de TYPE o item vai para REVISAR sem chamada LLM.",
+    "LLM nunca cria candidato: PRODUCT_TYPE deve pertencer aos candidatos do Stage 1; POWER deve pertencer aos candidatos de power do Stage 1 ou ser UNKNOWN.",
     "RESOLVED via LLM exige evidência citada que sustente o TYPE e fonte com identidade STRONG (Marca+Modelo no campo primário); source_id sozinho não é prova.",
-    "Category General e FAMILY continuam sob autoridade exclusiva do JSON: o Clef pode apenas arbitrar entre TAXONOMY_PAIRS válidos recuperados pelo funil, nunca criar Category/FAMILY fora da taxonomia.",
+    "Category General e FAMILY são sempre determinísticos por TAXONOMY_RULES/fallback_pair; nenhum provider decide taxonomia.",
     "O que é (Tipo) final só pode ser um PRODUCT_TYPE canônico deste JSON ou REVISAR.",
     "O que é (Tipo) representa o PRIMARY PRODUCT TYPE curto, específico, em inglês e UPPERCASE; não traduzir nem generalizar o tipo identificado.",
     "Tipo, alimentação e taxonomia são etapas independentes; bateria/carregador de kit não substituem o produto principal.",
@@ -773,6 +773,66 @@
     {
       "category_general": "OTHERS",
       "family": "MIXER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CYLINDER MOWERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRAIN PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRAINAGE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELETRIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ENGINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FLAIL MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GENERATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MULTIFUNCTIONAL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PORTABLE WASHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REBAR TYING TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROUTER GLASS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SOIL COMPACTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TILLERS"
+    },
+    {
+      "category_general": "WATERPUMPS",
+      "family": "WATERPUMP"
     }
   ],
   "PRODUCT_TYPES": {
@@ -7213,7 +7273,7 @@
         "bomba centrífuga",
         "bomba centrifuga"
       ],
-      "priority": 290
+      "priority": 304
     },
     {
       "primary_type": "WATERPUMP",
@@ -7537,6 +7597,528 @@
         "horizontal multistage centrifugal pump"
       ],
       "priority": 330
+    },
+    {
+      "primary_type": "GARDEN PRUNER",
+      "category_general": "OTHERS",
+      "family": "SHEARS",
+      "brand": "INFACO",
+      "model_regex": "^F3020$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "WALK BEHIND MOWER",
+      "category_general": "ROBOTIC",
+      "family": "ROBOTIC LAWN MOWER",
+      "brand": "MOVA",
+      "model_regex": "^LIDAX\\ ULTRA\\ 2000$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "ENGINE",
+      "category_general": "OTHERS",
+      "family": "CYLINDER MOWERS",
+      "brand": "DENNIS",
+      "model_regex": "^G860$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "ENGINE",
+      "category_general": "OTHERS",
+      "family": "ENGINE",
+      "brand": "KOOP",
+      "model_regex": "^192F$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "ENGINE",
+      "category_general": "OTHERS",
+      "family": "SOIL COMPACTOR",
+      "brand": "MASALTA",
+      "model_regex": "^EMR70H$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "ENGINE",
+      "category_general": "OTHERS",
+      "family": "FLAIL MOWER",
+      "brand": "TAVOL",
+      "model_regex": "^FLAIL\\ MOWER$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "GENERATOR",
+      "category_general": "OTHERS",
+      "family": "ENGINE",
+      "brand": "BAUDOUIN",
+      "model_regex": "^12M33G10N0/5$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "GENERATOR",
+      "category_general": "OTHERS",
+      "family": "GENERATOR",
+      "brand": "BRANIK",
+      "model_regex": "^BK20RSE\\.3$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "GENERATOR",
+      "category_general": "OTHERS",
+      "family": "ENGINE",
+      "brand": "CUMMINS",
+      "model_regex": "^K50N\\ G10$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "GENERATOR",
+      "category_general": "OTHERS",
+      "family": "INVERTER GENERATOR",
+      "brand": "KEYPOWER",
+      "model_regex": "^KPLH4300I$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "GENERATOR",
+      "category_general": "OTHERS",
+      "family": "GENERATOR",
+      "brand": "PRAMAC",
+      "model_regex": "^GA13000$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "GENERATOR",
+      "category_general": "OTHERS",
+      "family": "DRAIN PUMP",
+      "brand": "RATIONAL",
+      "model_regex": "^87\\.01\\.954S$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "GENERATOR",
+      "category_general": "OTHERS",
+      "family": "GENERATOR",
+      "brand": "TOMAHAWK",
+      "model_regex": "^TG3500E$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "GENERATOR",
+      "category_general": "OTHERS",
+      "family": "GENERATOR",
+      "brand": "WEICHAI",
+      "model_regex": "^WPG22L1$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "DUSTER",
+      "category_general": "OTHERS",
+      "family": "BLOWER MOTOR",
+      "brand": "RENAULT",
+      "model_regex": "^272109239R$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "DUSTER",
+      "category_general": "OTHERS",
+      "family": "BLOWER MOTOR",
+      "brand": "RENAULT",
+      "model_regex": "^6001552011$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "DUSTER",
+      "category_general": "OTHERS",
+      "family": "FAN",
+      "brand": "VALEO",
+      "model_regex": "^696886$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "DUSTER",
+      "category_general": "OTHERS",
+      "family": "BLOWER",
+      "brand": "WOLFBOX",
+      "model_regex": "^MEGAFLOW\\ 50$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "MIXER",
+      "category_general": "WASHERS",
+      "family": "WASHER",
+      "brand": "ADV3",
+      "model_regex": "^HL1400$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "AMT",
+      "model_regex": "^2763\\ 95$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "WATERPUMPS",
+      "family": "WATERPUMP",
+      "brand": "CET",
+      "model_regex": "^PFP\\ 9HP\\ DSL$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "VACUUM CLEANER",
+      "category_general": "OTHERS",
+      "family": "MINI BLOWER",
+      "brand": "DOWEN PAGIO",
+      "model_regex": "^9993153$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "RIVET TOOL",
+      "category_general": "PARTS & ACCESSORIES",
+      "family": "PARTS",
+      "brand": "GESIPA",
+      "model_regex": "^1679664$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "ELETRIC PUMP",
+      "brand": "GRIFO",
+      "model_regex": "^G20I95$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "CONCRETE CUTTER",
+      "category_general": "OTHERS",
+      "family": "MARBLE SAW",
+      "brand": "HAMILTON",
+      "model_regex": "^HCM001$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "MIXER",
+      "category_general": "OTHERS",
+      "family": "MULTIFUNCTIONAL",
+      "brand": "HEAR",
+      "model_regex": "^HSM300$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "CONCRETE SCREED",
+      "category_general": "OTHERS",
+      "family": "CONCRETE VIBRATOR",
+      "brand": "MASALTA",
+      "model_regex": "^MCD\\ 4$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "VACUUM CLEANER",
+      "category_general": "BATTERY PRODUCT",
+      "family": "BATTERY BLOWER",
+      "brand": "MIYAWA",
+      "model_regex": "^DSTI_155B$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "PEDROLLO",
+      "model_regex": "^CP\\ 160C$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "PEDROLLO",
+      "model_regex": "^CP\\ 220C$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "PEDROLLO",
+      "model_regex": "^CP\\ 230A$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "PEDROLLO",
+      "model_regex": "^CP\\ 230B$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "PEDROLLO",
+      "model_regex": "^CPM160B$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "PERIPHERAL PUMP",
+      "brand": "PEDROLLO",
+      "model_regex": "^PKM80$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "ROUTER",
+      "category_general": "OTHERS",
+      "family": "ROUTER GLASS",
+      "brand": "ROUTECK",
+      "model_regex": "^JATECK$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "SPERONI",
+      "model_regex": "^CAM\\ 100$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PLASTIC TOOL BOX",
+      "category_general": "OTHERS",
+      "family": "FAN",
+      "brand": "XPG",
+      "model_regex": "^HURRICANE120ARGBPWM$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "COOLING FAN",
+      "category_general": "OTHERS",
+      "family": "FAN",
+      "brand": "ALLE N BRADLEY",
+      "model_regex": "^SK/R1/FAN1/F8$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "BLOWER MOTOR",
+      "brand": "AMETEK",
+      "model_regex": "^116555\\ 13$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "COOLING FAN",
+      "brand": "APISTE",
+      "model_regex": "^ENC\\ GR500L$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "DRAINAGE PUMP",
+      "brand": "ASKOLL",
+      "model_regex": "^EAU61383505$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "FAN",
+      "brand": "ATLAS",
+      "model_regex": "^8436006031$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "BLOWER MOTOR",
+      "brand": "CONYSON",
+      "model_regex": "^C100$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "POWER TOOLS",
+      "brand": "Hitachi",
+      "model_regex": "^DS\\ 18\\ DBL2$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "ENGINE",
+      "brand": "LINDE",
+      "model_regex": "^0009810521$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "CHARGER",
+      "category_general": "OTHERS",
+      "family": "REBAR TYING TOOL",
+      "brand": "MAX",
+      "model_regex": "^RB611T$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "BLOWER MOTOR",
+      "brand": "NISSAN",
+      "model_regex": "^272007SF0A$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "FAN",
+      "brand": "PIAGGIO",
+      "model_regex": "^1A020419$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "BLOWER MOTOR",
+      "brand": "RATIONAL",
+      "model_regex": "^56\\.00\\.918P$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "DRAINAGE PUMP",
+      "brand": "SAMSUNG",
+      "model_regex": "^DC31\\ 00187A$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "BLOWER MOTOR",
+      "brand": "TAYLOR",
+      "model_regex": "^059750\\ 27$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "FAN",
+      "brand": "UNOX",
+      "model_regex": "^KVG1014C$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "FAN",
+      "brand": "YAMAHA",
+      "model_regex": "^BRA\\ E2405\\ 00$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PART",
+      "category_general": "OTHERS",
+      "family": "ENGINE",
+      "brand": "ZONGSHEN",
+      "model_regex": "^XP680$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "LAWN MOWER",
+      "category_general": "OTHERS",
+      "family": "ENGINE",
+      "brand": "VILLA",
+      "model_regex": "^VXV\\ 460$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "SPRAYER",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL PUMP",
+      "brand": "HYPRO",
+      "model_regex": "^9303S_HM1C$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "TILLER",
+      "category_general": "OTHERS",
+      "family": "TILLERS",
+      "brand": "AMAZONE",
+      "model_regex": "^CEUS\\ 5000\\ 2TX$",
+      "aliases": [],
+      "priority": 900
+    },
+    {
+      "primary_type": "PRESSURE WASHER",
+      "category_general": "OTHERS",
+      "family": "PORTABLE WASHER",
+      "brand": "FANTTIK",
+      "model_regex": "^K100\\ FLIP$",
+      "aliases": [],
+      "priority": 900
     }
   ],
   "COMBO_KIT_POLICY": {
