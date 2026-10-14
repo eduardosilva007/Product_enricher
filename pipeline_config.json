@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-09-v4.0.3-clef-required",
+  "VERSION": "2026-10-13-v4.0.4-clef-guardrails",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -188,6 +188,12 @@
       "min_taxonomy_margin": 0.2,
       "min_type_probability": 0.55,
       "min_type_confidence": 0.25
+    },
+    "repair": {
+      "enabled": true,
+      "max_attempts": 1,
+      "max_types": 5,
+      "max_joint_options": 14
     }
   },
   "classification_flow": {
@@ -199,6 +205,9 @@
       "READY_FOR_CLASSIFICATION",
       "PARTIAL_TARGET_EVIDENCE",
       "NO_TARGET_EVIDENCE"
-    ]
+    ],
+    "weak_identity_requires_recollection": false,
+    "repair_type_taxonomy_conflict": true,
+    "max_clef_repair_attempts": 1
   }
 }

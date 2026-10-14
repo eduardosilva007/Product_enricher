@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-13-v3.0.12-manual-taxonomy-gold",
+  "VERSION": "2026-10-13-v3.0.13-manual-taxonomy-gold-2",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -833,6 +833,22 @@
     {
       "category_general": "WATERPUMPS",
       "family": "WATERPUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SUCTION SUBMERSIBLE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BRUSH SANDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WATER PUMP"
     }
   ],
   "PRODUCT_TYPES": {
@@ -8119,6 +8135,105 @@
       "model_regex": "^K100\\ FLIP$",
       "aliases": [],
       "priority": 900
+    },
+    {
+      "primary_type": "GENERATOR",
+      "category_general": "WASHERS",
+      "family": "WASHER",
+      "brand": "BESTOOL",
+      "model_regex": "^HL2500$",
+      "aliases": [],
+      "priority": 925
+    },
+    {
+      "primary_type": "COOLING FAN",
+      "category_general": "PARTS & ACCESSORIES",
+      "family": "PARTS",
+      "brand": "ALLLEN BRADLEY",
+      "model_regex": "^41391/801/01$",
+      "aliases": [],
+      "priority": 925
+    },
+    {
+      "primary_type": "PRESSURE WASHER",
+      "category_general": "SPRAYERS",
+      "family": "SPRAYERS",
+      "brand": "ANNOVI REVERBERI",
+      "model_regex": "^52180\\.$",
+      "aliases": [],
+      "priority": 925
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC PUMP",
+      "brand": "AZCUE",
+      "model_regex": "^MO\\ 19/20$",
+      "aliases": [],
+      "priority": 925
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "WASHERS",
+      "family": "WASHER",
+      "brand": "BELARRA",
+      "model_regex": "^H\\ 6501/1$",
+      "aliases": [],
+      "priority": 925
+    },
+    {
+      "primary_type": "PRESSURE WASHER",
+      "category_general": "WASHERS",
+      "family": "WASHER",
+      "brand": "BLITZ",
+      "model_regex": "^FCHPW20LX$",
+      "aliases": [],
+      "priority": 925
+    },
+    {
+      "primary_type": "LIFT PUMP",
+      "category_general": "OTHERS",
+      "family": "SUCTION SUBMERSIBLE PUMP",
+      "brand": "BRINKMANN PUMPS",
+      "model_regex": "^SGL502/450\\+001$",
+      "aliases": [],
+      "priority": 925
+    },
+    {
+      "primary_type": "BELT SANDER",
+      "category_general": "OTHERS",
+      "family": "BRUSH SANDER",
+      "brand": "BRISTLE BLASTER",
+      "model_regex": "^SE\\ 1399$",
+      "aliases": [],
+      "priority": 925
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "WATER PUMP",
+      "brand": "BRUMBY",
+      "model_regex": "^490B\\ 42004$",
+      "aliases": [],
+      "priority": 925
+    },
+    {
+      "primary_type": "COOLING FAN",
+      "category_general": "PARTS & ACCESSORIES",
+      "family": "PARTS",
+      "brand": "ALLEN BRADLEY",
+      "model_regex": "^41391/801/01$",
+      "aliases": [],
+      "priority": 925
+    },
+    {
+      "primary_type": "COOLING FAN",
+      "category_general": "PARTS & ACCESSORIES",
+      "family": "PARTS",
+      "brand": "ALLE N BRADLEY",
+      "model_regex": "^41391/801/01$",
+      "aliases": [],
+      "priority": 925
     }
   ],
   "COMBO_KIT_POLICY": {

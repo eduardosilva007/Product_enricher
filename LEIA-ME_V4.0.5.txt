@@ -1,0 +1,43 @@
+PIPELINE v4.0.5-clef-routing-fix
+================================
+
+Objetivo desta revisão
+----------------------
+Correção cirúrgica da regressão introduzida na v4.0.4 em que respostas Clef válidas
+podiam ser descartadas como NEEDS_RECOLLECTION quando Stage1.identity_best=WEAK.
+
+Causa raiz
+----------
+Stage1.identity_best mede a identidade das fontes que sustentaram um TYPE no Stage 1.
+Nos casos que dependem justamente de BGE/reranker/Clef, o Stage 1 pode não ter TYPE
+resolvido e esse campo pode permanecer WEAK mesmo havendo evidência target
+PROBABLE/STRONG suficiente para chamar o Clef.
+
+Correção
+--------
+- Remove somente o bloqueio pós-Clef por Stage1.identity_best=WEAK.
+- Mantém o preflight: Clef só é chamado quando existe evidência target mínima
+  PROBABLE/STRONG e não há conflito de múltiplos produtos.
+- Mantém require_strong_identity para AUTO_APROVADO.
+- Resultado Clef válido abaixo do gate AUTO permanece CLASSIFIED_CLEF para double-check.
+- Mantém CLEF_REPAIR para conflito TYPE x TAXONOMIA.
+- Mantém no máximo 1 consulta Search por produto.
+- Não altera BGE-M3, reranker, prompt Clef ou thresholds.
+- Usa a taxonomia v3.0.12-manual-taxonomy-gold sem alterações adicionais.
+
+Validações executadas
+---------------------
+- py_compile: OK
+- regras_negocio.json: 0 erros de validação
+- classification_flow: 0 erros
+- regressão alvo: AMBIGUOUS + target PROBABLE + Stage1 identity WEAK + Clef válido
+  => CLASSIFIED_CLEF / não AUTO / classificação preservada
+
+Próximo teste recomendado
+-------------------------
+Rode novamente um lote de 20 antes de 100. No log, esperamos:
+- clef_classified > 0
+- weak_identity = 0
+- needs_recollection somente para falta real de evidência, Clef insufficient ou repair failure
+
+Não reutilizar a v4.0.4 para novo stress.

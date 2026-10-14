@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.3-clef-required / Collection R9.6p7
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.5-clef-routing-fix / Collection R9.6p7
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -12,7 +12,7 @@ Arquitetura:
     Stage 1.5 - Funil híbrido: regras/aliases + BGE-M3 + BGE reranker
     Stage 2 - Cloudflare Clef: decisão estruturada de TYPE/POWER/TAXONOMY
     Stage 3 - Gate local de consistência, confiança e identidade STRONG
-    Stage 4 - AUTO_APROVADO ou CLASSIFIED_CLEF; coleta insuficiente vira NEEDS_RECOLLECTION
+    Stage 4 - AUTO_APROVADO ou CLASSIFIED_CLEF; somente falta real de evidência vira NEEDS_RECOLLECTION
 
 Princípios:
 - Search RAW do provider selecionado descobre fontes; somente fontes aprovadas no Source Sieve podem ser aprofundadas.
@@ -23,7 +23,7 @@ Princípios:
 - Todo AMBIGUOUS/UNRESOLVED com evidência target utilizável passa obrigatoriamente pelo Clef.
 - BGE/reranker preparam candidatos; nunca encerram sozinhos um caso não resolvido por regra forte.
 - Resultado Clef válido abaixo do gate AUTO é preservado como CLASSIFIED_CLEF para double-check, não apagado em REVISAR.
-- Falta de evidência vira NEEDS_RECOLLECTION; REVIEW humano é exceção operacional/taxonômica, não rota padrão.
+- Falta real de evidência vira NEEDS_RECOLLECTION; Classification Identity=WEAK não descarta resposta Clef válida.
 - Clef nunca inventa Category/FAMILY: somente arbitra entre pares válidos do JSON.
 - Status=Manual/Revisão=MANUAL são FULL LOCK.
 - Revisão B.I=OK é HARD LOCK absoluto e vence inclusive --reprocess.
@@ -55,10 +55,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
 
-PIPELINE_VERSION = "4.0.3-clef-required"
-PROMPT_VERSION = "2026-10-09-v18-clef-required-preserve-classification"
+PIPELINE_VERSION = "4.0.6-classification-cohort-fix"
+PROMPT_VERSION = "2026-10-13-v19-clef-joint-repair-identity-guard"
 DEFAULT_CLEF_MODEL = "clef"
-BUILD_LABEL = "v4.0.3 Clef Required after Funnel + Local BGE + Strong Identity"
+BUILD_LABEL = "v4.0.6 Classification Cohort Fix + Clef Routing + Joint Repair"
 COLLECTION_ENGINE_VERSION = "2026-09-29-r9.6p7-import-noise-taxonomy"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
@@ -4145,6 +4145,7 @@ class ClefFunnelClassifier:
         self.reranker_device_cfg = safe(self.fcfg.get("reranker_device")) or "auto"
 
         self.api_calls = 0
+        self.repair_calls = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
@@ -4892,6 +4893,222 @@ class ClefFunnelClassifier:
         )
         return data, False, usage
 
+
+    def repair_type_taxonomy_conflict(
+        self,
+        key: str,
+        raw_hash: str,
+        brand: str,
+        model: str,
+        s1: Stage1Result,
+        initial_data: Dict[str, Any],
+        initial_usage: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
+        """Uma única correção Clef para conflito TYPE x taxonomia.
+
+        Não faz nova busca, não refaz o BGE/reranker e não inventa labels. O Clef
+        recebe somente combinações TYPE + Category|FAMILY que já são válidas no
+        regras_negocio.json e escolhe uma opção conjunta coerente.
+        """
+        repair_cfg = (self.cfg.get("clef", {}) or {}).get("repair", {}) or {}
+        if not bool(repair_cfg.get("enabled", True)):
+            return {"decision": "INSUFFICIENT_EVIDENCE"}, False, {"clef_repair": False}
+
+        repair_model_id = self.cache_model_id + "|repair:joint-v1"
+        cached = self.db.get_llm(
+            key, raw_hash, self.rules.hash, self.provider, repair_model_id
+        )
+        if cached is not None:
+            data, usage = cached
+            usage = dict(usage or {})
+            usage["clef_repair"] = True
+            usage["clef_repair_cache"] = True
+            return data, True, usage
+
+        if self.max_calls_per_run and self.api_calls >= self.max_calls_per_run:
+            raise OperationalPause("CLEF_RUN_CAP", f"Limite local de {self.max_calls_per_run} chamadas Clef/run atingido.")
+        if self.max_total_tokens_per_run and self.total_tokens >= self.max_total_tokens_per_run:
+            raise OperationalPause("CLEF_LOCAL_TOKEN_CAP", f"Cap local de {self.max_total_tokens_per_run} tokens/run atingido.")
+
+        evidence, refs = self._evidence_text(brand, model, s1)
+        raw_types = [
+            safe(initial_data.get("product_type")),
+            safe(initial_usage.get("clef_type_top2")),
+            *[safe(x) for x in (initial_usage.get("semantic_type_candidates", []) or [])],
+        ]
+        type_candidates: List[str] = []
+        for typ in raw_types:
+            if typ in self.rules.types and typ not in type_candidates:
+                type_candidates.append(typ)
+
+        max_types = max(2, int(repair_cfg.get("max_types", 5) or 5))
+        max_joint = max(4, int(repair_cfg.get("max_joint_options", 14) or 14))
+        type_candidates = type_candidates[:max_types]
+
+        joint_criteria: Dict[str, str] = {}
+        for typ in type_candidates:
+            for pair in sorted(_taxonomy_pairs_for_type(self.rules, typ)):
+                label = f"{typ} || {_pair_label(pair)}"
+                if label in joint_criteria:
+                    continue
+                joint_criteria[label] = (
+                    self._choice_criteria_type(typ, self.rules)
+                    + " "
+                    + self._choice_criteria_taxonomy(_pair_label(pair))
+                )
+                if len(joint_criteria) >= max_joint:
+                    break
+            if len(joint_criteria) >= max_joint:
+                break
+
+        if not joint_criteria:
+            return {"decision": "INSUFFICIENT_EVIDENCE"}, False, {"clef_repair": True}
+
+        joint_criteria["INSUFFICIENT"] = (
+            "The available target evidence is insufficient to choose one coherent physical product type "
+            "and business taxonomy pair reliably."
+        )
+        initial_type = safe(initial_data.get("product_type"))
+        initial_pair = safe(initial_data.get("taxonomy_pair"))
+        payload = {
+            "model": self.model,
+            "state": {
+                "brand": brand,
+                "model": model,
+                "target_evidence": evidence,
+                "previous_type_choice": initial_type,
+                "previous_taxonomy_choice": initial_pair,
+                "repair_reason": "TYPE_TAXONOMY_CONFLICT",
+            },
+            "questions": {
+                "joint_classification": {
+                    "type": "choice",
+                    "instructions": (
+                        "Repair the previous inconsistent result by choosing ONE coherent joint option. "
+                        "Each option contains a canonical PRODUCT_TYPE and a business Category General | FAMILY pair "
+                        "that is valid for that type. Determine whether the target is the complete physical product, "
+                        "a replacement part, accessory, kit, or another canonical type from the evidence. "
+                        "Do not preserve the previous type merely because it was selected before. "
+                        "Use INSUFFICIENT only when the evidence cannot reliably distinguish the coherent options."
+                    ),
+                    "criteria": joint_criteria,
+                }
+            },
+        }
+
+        try:
+            import truststore
+            truststore.inject_into_ssl()
+        except ImportError:
+            pass
+        import requests
+
+        token = os.getenv(self.api_key_env, "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
+        account_id = os.getenv(self.account_id_env, "").strip()
+        slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
+        url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
+        transient = {429, 500, 502, 503, 504}
+        body: Dict[str, Any] = {}
+        last_detail = ""
+        self.api_calls += 1
+        self.repair_calls += 1
+        for attempt in range(self.retry_attempts):
+            self.limiter.wait()
+            try:
+                resp = requests.post(
+                    url,
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=self.timeout_seconds,
+                )
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = {"raw": resp.text}
+                if resp.status_code in transient and attempt < self.retry_attempts - 1:
+                    time.sleep(self.retry_backoff_seconds[min(attempt, len(self.retry_backoff_seconds) - 1)])
+                    continue
+                if not resp.ok:
+                    code = "CLEF_RATE_LIMIT" if resp.status_code == 429 else ("CLEF_TRANSIENT" if resp.status_code in transient else "CLEF_HTTP_ERROR")
+                    raise OperationalPause(code, f"Cloudflare repair HTTP {resp.status_code}: {json.dumps(body, ensure_ascii=False)[:1200]}")
+                if body.get("success") is False:
+                    raise OperationalPause("CLEF_API_ERROR", json.dumps(body, ensure_ascii=False)[:1200])
+                break
+            except requests.RequestException as exc:
+                last_detail = safe(exc)
+                if attempt < self.retry_attempts - 1:
+                    time.sleep(self.retry_backoff_seconds[min(attempt, len(self.retry_backoff_seconds) - 1)])
+                    continue
+                raise OperationalPause("CLEF_TRANSIENT", last_detail) from exc
+        else:
+            raise OperationalPause("CLEF_TRANSIENT", last_detail or "Falha desconhecida Clef repair")
+
+        result = body.get("result") or {}
+        answers = result.get("answers") or {}
+        joint_ans = self._parse_choice(answers, "joint_classification")
+        joint_choice = safe(joint_ans.get("choice"))
+        typ, pair_label = "", ""
+        if "||" in joint_choice:
+            typ, pair_label = [safe(x) for x in joint_choice.split("||", 1)]
+        cg, fam = _split_pair_label(pair_label)
+        compatible = (cg, fam) in _taxonomy_pairs_for_type(self.rules, typ)
+        resolved = (
+            joint_choice != "INSUFFICIENT"
+            and typ in self.rules.types
+            and (cg, fam) in self.rules.valid_pairs
+            and compatible
+        )
+
+        data = {
+            "decision": "RESOLVED" if resolved else "INSUFFICIENT_EVIDENCE",
+            "product_type": typ if resolved else "REVISAR",
+            "power": safe(initial_data.get("power")) if safe(initial_data.get("power")) in self.rules.allowed_powers else "UNKNOWN",
+            "taxonomy_pair": pair_label if resolved else "",
+            "category_general": cg if resolved else "",
+            "family": fam if resolved else "",
+            "evidence_source_ids": refs,
+            "reason_short": (
+                f"Clef joint repair; previous={initial_type} + {initial_pair}; choice={joint_choice or 'NONE'}"
+            ),
+        }
+        usage_raw = result.get("usage") or {}
+        input_tokens = int(usage_raw.get("input_tokens") or 0)
+        output_tokens = int(usage_raw.get("output_tokens") or 0)
+        self.prompt_tokens += input_tokens
+        self.completion_tokens += output_tokens
+        self.total_tokens += input_tokens + output_tokens
+        usage = {
+            "provider": self.provider,
+            "model": self.model,
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "clef_repair": True,
+            "clef_repair_cache": False,
+            "clef_repair_probability": joint_ans["probability"],
+            "clef_repair_confidence": joint_ans["confidence"],
+            "clef_repair_top2": joint_ans["top2"],
+            "clef_repair_margin": joint_ans["margin"],
+            "clef_type_probability": joint_ans["probability"],
+            "clef_type_confidence": joint_ans["confidence"],
+            "clef_type_top2": joint_ans["top2"],
+            "clef_type_margin": joint_ans["margin"],
+            "clef_taxonomy_probability": joint_ans["probability"],
+            "clef_taxonomy_confidence": joint_ans["confidence"],
+            "clef_taxonomy_top2": joint_ans["top2"],
+            "clef_taxonomy_margin": joint_ans["margin"],
+            "semantic_type_candidates": initial_usage.get("semantic_type_candidates", []) or [],
+            "semantic_taxonomy_candidates": initial_usage.get("semantic_taxonomy_candidates", []) or [],
+            "semantic_seconds": 0.0,
+            "rerank_seconds": 0.0,
+        }
+        self.db.put_llm(
+            key, raw_hash, self.rules.hash, self.provider, repair_model_id,
+            data, usage,
+        )
+        return data, False, usage
+
+
 def choose_title(sources: List[Source], refs: Sequence[int]) -> Tuple[str, str]:
     by_id = {s.source_id: s for s in sources}
     ordered = [by_id[x] for x in refs if x in by_id]
@@ -5075,6 +5292,24 @@ def record_for_uncurated_cache(raw: RawEvidence) -> Dict[str, Any]:
         "Clef Completion Tokens": 0,
         "Clef Total Tokens": 0,
     }
+
+
+
+def _merge_clef_usage(initial: Dict[str, Any], repair: Dict[str, Any]) -> Dict[str, Any]:
+    """Combina métricas da primeira decisão Clef com a única chamada de repair."""
+    out = dict(initial or {})
+    rep = dict(repair or {})
+    for key in ["prompt_tokens", "completion_tokens", "total_tokens"]:
+        out[key] = int(initial.get(key, 0) or 0) + int(rep.get(key, 0) or 0)
+    for key in [
+        "clef_type_probability", "clef_type_confidence", "clef_type_top2", "clef_type_margin",
+        "clef_taxonomy_probability", "clef_taxonomy_confidence", "clef_taxonomy_top2", "clef_taxonomy_margin",
+        "clef_repair", "clef_repair_cache", "clef_repair_probability", "clef_repair_confidence",
+        "clef_repair_top2", "clef_repair_margin",
+    ]:
+        if key in rep:
+            out[key] = rep[key]
+    return out
 
 
 def _clef_auto_gate(
@@ -5281,7 +5516,7 @@ def finalize_product(
             "Clef Total Tokens": 0,
         }
 
-    # IMPORTANTE v4.0.3: o funil NÃO fecha casos AMBIGUOUS/UNRESOLVED.
+    # IMPORTANTE v4.0.5: o funil NÃO fecha casos AMBIGUOUS/UNRESOLVED.
     # Mesmo que BGE/regras deixem apenas um candidato, se Stage 1 não foi
     # RESOLVED_RULE o Clef é o adjudicador obrigatório quando há evidência útil.
 
@@ -5386,6 +5621,8 @@ def finalize_product(
             "Clef Taxonomy Confidence": _unit_score(usage.get("clef_taxonomy_confidence")),
             "Clef Taxonomy Top2": safe(usage.get("clef_taxonomy_top2")),
             "Clef Taxonomy Margin": _unit_score(usage.get("clef_taxonomy_margin")),
+            "Clef Repair": "NÃO",
+            "Clef Repair Cache": "",
         }
         clef_valid = (
             safe(data.get("decision")) == "RESOLVED"
@@ -5393,6 +5630,81 @@ def finalize_product(
             and (cg, fam) in rules.valid_pairs
             and (cg, fam) != ("OTHERS", "OTHERS")
         )
+
+        # v4.0.5: NÃO bloquear a classificação Clef por s1.identity_best == WEAK.
+        # Esse campo mede a identidade das fontes que sustentaram um TYPE no Stage 1;
+        # em casos semanticamente ambíguos que dependem de BGE/Clef ele pode permanecer
+        # WEAK mesmo quando existem fontes target PROBABLE/STRONG. O preflight acima já
+        # exige evidência target mínima antes de chamar Clef. A exigência STRONG continua
+        # valendo exclusivamente para AUTO_APROVADO via _clef_auto_gate.
+
+        # Se a primeira resposta selecionou TYPE e taxonomia incompatíveis, uma
+        # única chamada Clef de repair escolhe uma opção CONJUNTA já validada pelo
+        # regras_negocio.json. Não há nova busca nem novo BGE/reranker.
+        repair_cfg = (cfg.get("clef", {}) or {}).get("repair", {}) or {}
+        if clef_valid and gate_reason == "CLEF_TYPE_TAXONOMY_CONFLICT" and bool(repair_cfg.get("enabled", True)):
+            repair_data, repair_cache_hit, repair_usage = clef.repair_type_taxonomy_conflict(
+                key, raw.raw_hash, brand, model, s1, data, usage
+            )
+            if safe(repair_data.get("decision")) == "RESOLVED":
+                data = repair_data
+                usage = _merge_clef_usage(usage, repair_usage)
+                refs = data.get("evidence_source_ids", []) or refs
+                typ = safe(data.get("product_type"))
+                power = safe(data.get("power")) or power
+                cg = safe(data.get("category_general"))
+                fam = safe(data.get("family"))
+                auto_ok, gate_reason = _clef_auto_gate(data, usage, rules, s1, cfg)
+                title, url = _best_target_title(s1, refs, require_strong=auto_ok)
+                title, url = _output_title(title, url)
+                base_clef.update({
+                    "Clef Cache": "SIM" if (cache_hit and repair_cache_hit) else "NÃO",
+                    "Clef Prompt Tokens": int(usage.get("prompt_tokens", 0) or 0),
+                    "Clef Completion Tokens": int(usage.get("completion_tokens", 0) or 0),
+                    "Clef Total Tokens": int(usage.get("total_tokens", 0) or 0),
+                    "Clef Type Probability": _unit_score(usage.get("clef_type_probability")),
+                    "Clef Type Confidence": _unit_score(usage.get("clef_type_confidence")),
+                    "Clef Type Top2": safe(usage.get("clef_type_top2")),
+                    "Clef Type Margin": _unit_score(usage.get("clef_type_margin")),
+                    "Clef Taxonomy Probability": _unit_score(usage.get("clef_taxonomy_probability")),
+                    "Clef Taxonomy Confidence": _unit_score(usage.get("clef_taxonomy_confidence")),
+                    "Clef Taxonomy Top2": safe(usage.get("clef_taxonomy_top2")),
+                    "Clef Taxonomy Margin": _unit_score(usage.get("clef_taxonomy_margin")),
+                    "Clef Repair": "SIM",
+                    "Clef Repair Cache": "SIM" if repair_cache_hit else "NÃO",
+                })
+                clef_valid = (
+                    typ in rules.types
+                    and (cg, fam) in rules.valid_pairs
+                    and (cg, fam) in _taxonomy_pairs_for_type(rules, typ)
+                )
+            else:
+                return {
+                    **base_clef,
+                    "Raw State": "RAW_OK",
+                    "Próxima Ação": "RECOLETA_DIRIGIDA",
+                    "Resolution State": "NEEDS_RECOLLECTION",
+                    "Classification Outcome": "NEEDS_RECOLLECTION",
+                    "Stage": "CLEF_REPAIR_INSUFFICIENT",
+                    "O que é (Tipo)": "REVISAR",
+                    "Alimentação": power if power in rules.allowed_powers else "UNKNOWN",
+                    "Category General": "",
+                    "FAMILY": "",
+                    "Título Real": title,
+                    "Fonte URL": url,
+                    "Review Required": "NÃO",
+                    "Auto Eligible": "NÃO",
+                    "Double Check Priority": "AGUARDAR_RECOLETA",
+                    "Reason Code": "CLEF_REPAIR_INSUFFICIENT",
+                    "Motivo": (
+                        f"Primeira resposta teve TYPE x TAXONOMIA incompatíveis ({typ} + {cg} | {fam}); "
+                        "a única chamada Clef Repair não conseguiu escolher uma combinação coerente. "
+                        "Nenhuma segunda busca automática foi executada."
+                    ),
+                    "Evidence Source IDs": ",".join(map(str, refs)),
+                    "Clef Repair": "SIM",
+                    "Clef Repair Cache": "SIM" if repair_cache_hit else "NÃO",
+                }
         if clef_valid:
             # Resultado estruturado válido é sempre preservado. O gate AUTO apenas
             # define se pode ser aceito sem double-check; não apaga a classificação.
@@ -5405,7 +5717,7 @@ def finalize_product(
                 "Próxima Ação": "CONCLUIDO" if auto_ok else "DOUBLE_CHECK",
                 "Resolution State": "RESOLVED" if auto_ok else "CLASSIFIED_CLEF",
                 "Classification Outcome": "CLEF_CLASSIFIED_AUTO" if auto_ok else "CLEF_CLASSIFIED",
-                "Stage": "CLEF",
+                "Stage": "CLEF_REPAIR" if safe(base_clef.get("Clef Repair")) == "SIM" else "CLEF",
                 "O que é (Tipo)": typ,
                 "Alimentação": power if power in rules.allowed_powers else "UNKNOWN",
                 "Category General": cg,
@@ -6614,6 +6926,89 @@ def export_excel(rows: List[Dict[str, Any]], out_path: Path, summary: Dict[str, 
 # -----------------------------------------------------------------------------
 # Operação
 # -----------------------------------------------------------------------------
+def build_classification_cohort(
+    store: "TavilyReadOnlyStore",
+    processed: set,
+    manual: set,
+    hard_lock: Optional[set] = None,
+    max_items: int = 0,
+    reprocess: bool = False,
+) -> Tuple[List[Tuple[str, str, str]], List[Tuple[str, str, str]], Dict[str, int], str]:
+    """Seleciona itens realmente classificáveis para a opção CLASSIFICAÇÃO.
+
+    v4.0.6: ``--max-items`` passa a significar quantidade de TARGETS que serão
+    classificados, e não as primeiras N linhas lexicográficas do catálogo.
+    HARD LOCK / já processados são removidos ANTES do limite. Itens com
+    READY_FOR_CLASSIFICATION vêm primeiro, seguidos por PARTIAL_TARGET_EVIDENCE.
+    NO_TARGET_EVIDENCE sem curated evidence não consome o piloto de classificação;
+    permanece para a frente específica de coleta/recoleta.
+    """
+    hard_lock = set(hard_lock or manual)
+    ranked: List[Tuple[int, str, str, str, str]] = []
+    stats = {
+        "cohort_size": 0,
+        "cohort_already_classified": 0,
+        "cohort_manual_lock": 0,
+        "cohort_bi_ok_lock": 0,
+        "cohort_pending": 0,
+        "classification_ready_available": 0,
+        "classification_partial_available": 0,
+        "classification_rescue_available": 0,
+        "classification_no_evidence_skipped": 0,
+        "classification_raw_unavailable_skipped": 0,
+    }
+
+    for brand, model, key in store.catalog():
+        if key in hard_lock:
+            if key in manual:
+                stats["cohort_manual_lock"] += 1
+            else:
+                stats["cohort_bi_ok_lock"] += 1
+            continue
+        if not reprocess and key in processed:
+            stats["cohort_already_classified"] += 1
+            continue
+
+        raw = store.get(brand, model)
+        if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+            stats["classification_raw_unavailable_skipped"] += 1
+            continue
+        payload = raw.payload or {}
+        collection = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
+        state = safe(collection.get("state"))
+        curated_count = len([x for x in (collection.get("curated_results", []) or []) if isinstance(x, dict)])
+
+        # READY é o material ideal para o stress do classificador. PARTIAL ainda
+        # possui evidência curada e deve vir em seguida. Estados legados com
+        # curated_results > 0 continuam classificáveis. NO_TARGET_EVIDENCE sem
+        # curated_results fica fora desta fila; não faz sentido gastar o limite
+        # do piloto para apenas produzir NEEDS_RECOLLECTION.
+        if state == "READY_FOR_CLASSIFICATION":
+            priority = 0
+            stats["classification_ready_available"] += 1
+        elif state == "PARTIAL_TARGET_EVIDENCE":
+            priority = 1
+            stats["classification_partial_available"] += 1
+        elif curated_count > 0:
+            priority = 2
+            stats["classification_rescue_available"] += 1
+        else:
+            stats["classification_no_evidence_skipped"] += 1
+            continue
+        ranked.append((priority, business_key(brand, model), brand, model, key))
+
+    ranked.sort(key=lambda x: (x[0], x[1]))
+    if max_items:
+        ranked = ranked[:max_items]
+    targets = [(brand, model, key) for _, _, brand, model, key in ranked]
+    cohort = list(targets)
+    stats["cohort_size"] = len(cohort)
+    stats["cohort_pending"] = len(targets)
+    cohort_material = "\n".join(x[2] for x in cohort)
+    cohort_hash = hashlib.sha256(cohort_material.encode("utf-8")).hexdigest()[:12]
+    return cohort, targets, stats, cohort_hash
+
+
 def build_pilot_cohort(
     catalog: Sequence[Tuple[str, str, str]],
     processed: set,
@@ -7091,14 +7486,24 @@ def run_pipeline(
         stats = defaultdict(int)
 
         if explicit_targets is None:
-            cohort, targets, cohort_stats, cohort_hash = build_pilot_cohort(
-                store.catalog(),
-                processed=processed,
-                manual=manual,
-                hard_lock=hard_lock,
-                max_items=args.max_items,
-                reprocess=args.reprocess,
-            )
+            if args.mode == "classify":
+                cohort, targets, cohort_stats, cohort_hash = build_classification_cohort(
+                    store,
+                    processed=processed,
+                    manual=manual,
+                    hard_lock=hard_lock,
+                    max_items=args.max_items,
+                    reprocess=args.reprocess,
+                )
+            else:
+                cohort, targets, cohort_stats, cohort_hash = build_pilot_cohort(
+                    store.catalog(),
+                    processed=processed,
+                    manual=manual,
+                    hard_lock=hard_lock,
+                    max_items=args.max_items,
+                    reprocess=args.reprocess,
+                )
         else:
             # Cache Recovery já montou pendências + auto-aprovados obsoletos. Revalida o HARD LOCK
             # no instante imediatamente anterior à classificação.
@@ -7143,6 +7548,18 @@ def run_pipeline(
             cohort_stats.get("cohort_bi_ok_lock", 0),
             cohort_hash,
         )
+        if args.mode == "classify" and explicit_targets is None:
+            LOG.info(
+                "CLASSIFICATION QUEUE | targets=%d | ready_disponiveis=%d | partial_disponiveis=%d | "
+                "legacy_curated_disponiveis=%d | no_evidence_fora_da_fila=%d | raw_indisponivel=%d | "
+                "limite_aplicado_apos_filtros=SIM",
+                len(targets),
+                cohort_stats.get("classification_ready_available", 0),
+                cohort_stats.get("classification_partial_available", 0),
+                cohort_stats.get("classification_rescue_available", 0),
+                cohort_stats.get("classification_no_evidence_skipped", 0),
+                cohort_stats.get("classification_raw_unavailable_skipped", 0),
+            )
 
         if use_clef and targets:
             try:
@@ -7262,7 +7679,7 @@ def run_pipeline(
                     stats["clef_cache_hit"] += 1
                 stage_upper = safe(rec.get("Stage")).upper()
                 resolution_upper = safe(rec.get("Resolution State")).upper()
-                if stage_upper == "CLEF":
+                if stage_upper in {"CLEF", "CLEF_REPAIR"}:
                     stats["clef_result"] += 1
                     if safe(rec.get("Reason Code")) == "CLEF_AUTO_APROVADO":
                         stats["clef_auto"] += 1
@@ -7270,6 +7687,12 @@ def run_pipeline(
                         stats["clef_classified"] += 1
                 if resolution_upper == "NEEDS_RECOLLECTION":
                     stats["needs_recollection"] += 1
+                if stage_upper == "CLEF_REPAIR":
+                    stats["clef_repair_success"] += 1
+                if stage_upper == "CLEF_REPAIR_INSUFFICIENT":
+                    stats["clef_repair_insufficient"] += 1
+                if stage_upper == "IDENTITY_GATE":
+                    stats["weak_identity_recollection"] += 1
                 if stage_upper in {"COLLECTION_GATE", "SEMANTIC_FUNNEL_EMPTY"}:
                     stats["clef_blocked_no_evidence"] += 1
 
@@ -7278,14 +7701,14 @@ def run_pipeline(
                     rerank_avg = (clef.rerank_seconds / clef.semantic_calls) if clef is not None and clef.semantic_calls else 0.0
                     LOG.info(
                         "PROGRESSO %d/%d | rule=%d ambiguous=%d unresolved=%d | "
-                        "clef_auto=%d clef_classified=%d clef_api=%d clef_cache=%d | "
-                        "needs_recollection=%d blocked_no_evidence=%d exception_review=%d checkpoint=%d | "
+                        "clef_auto=%d clef_classified=%d clef_api=%d clef_repair=%d clef_cache=%d | "
+                        "needs_recollection=%d weak_identity=%d repair_fail=%d blocked_no_evidence=%d exception_review=%d checkpoint=%d | "
                         "tokens=%d | sem_avg=%.2fs rerank_avg=%.2fs",
                         idx, len(targets),
                         stats["stage1_resolved_rule"], stats["stage1_ambiguous"], stats["stage1_unresolved"],
                         stats["clef_auto"], stats["clef_classified"],
-                        clef.api_calls if clef is not None else 0, stats["clef_cache_hit"],
-                        stats["needs_recollection"], stats["clef_blocked_no_evidence"],
+                        clef.api_calls if clef is not None else 0, clef.repair_calls if clef is not None else 0, stats["clef_cache_hit"],
+                        stats["needs_recollection"], stats["weak_identity_recollection"], stats["clef_repair_insufficient"], stats["clef_blocked_no_evidence"],
                         stats["final_review"], stats["checkpoint_hit"],
                         clef.total_tokens if clef is not None else 0, sem_avg, rerank_avg,
                     )
@@ -7582,7 +8005,7 @@ def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
 
 
 def validate_classification_flow_policy(cfg: Dict[str, Any]) -> List[str]:
-    """Fail-closed para o contrato operacional da v4.0.3.
+    """Fail-closed para o contrato operacional da v4.0.5.
 
     O funil prepara candidatos; Clef decide toda cauda não resolvida por regra
     quando há evidência target utilizável. Resultado Clef válido é preservado
@@ -7594,11 +8017,23 @@ def validate_classification_flow_policy(cfg: Dict[str, Any]) -> List[str]:
         "clef_required_after_non_rule",
         "preserve_valid_clef_classification_below_auto_gate",
         "no_automatic_secondary_search",
+        "repair_type_taxonomy_conflict",
         "review_is_last_resort",
     )
     for key in required_true:
         if not bool(flow.get(key, False)):
             errors.append(f"CLASSIFICATION_FLOW_POLICY: {key} deve ser true")
+    # s1.identity_best mede suporte de TYPE do Stage 1 e não a identidade global
+    # do target; portanto não pode bloquear uma decisão Clef válida.
+    if bool(flow.get("weak_identity_requires_recollection", False)):
+        errors.append("CLASSIFICATION_FLOW_POLICY: weak_identity_requires_recollection deve ser false")
+    if int(flow.get("max_clef_repair_attempts", 0) or 0) != 1:
+        errors.append("CLASSIFICATION_FLOW_POLICY: max_clef_repair_attempts deve ser exatamente 1")
+    repair = (cfg.get("clef", {}) or {}).get("repair", {}) or {}
+    if not bool(repair.get("enabled", False)):
+        errors.append("CLEF_REPAIR_POLICY: clef.repair.enabled deve ser true")
+    if int(repair.get("max_attempts", 0) or 0) != 1:
+        errors.append("CLEF_REPAIR_POLICY: clef.repair.max_attempts deve ser exatamente 1")
     return errors
 
 def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") -> None:
@@ -7614,7 +8049,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
         qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"], qg["real_reference_only"],
     )
 
-    # Contrato operacional v4.0.3: uma consulta automática por produto e Clef
+    # Contrato operacional v4.0.5: uma consulta automática por produto e Clef
     # obrigatório para toda cauda não resolvida por regra com evidência útil.
     cost_errors = validate_collection_cost_policy(cfg)
     if cost_errors:
@@ -7625,10 +8060,10 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
     if flow_errors:
         for e in flow_errors:
             LOG.error(e)
-        raise RuntimeError("Contrato de classificação v4.0.3 inválido; execução bloqueada.")
+        raise RuntimeError("Contrato de classificação v4.0.5 inválido; execução bloqueada.")
     LOG.info(
         "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
-        "preserve_clef_classification=True | review_last_resort=True"
+        "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
     )
 
     sf = cfg.get("semantic_funnel", {}) or {}
@@ -7882,7 +8317,7 @@ def main() -> int:
         )
         LOG.info(
             "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
-            "preserve_clef_classification=True | review_last_resort=True"
+            "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
         )
     if args.mode == "inventory":
         run_pipeline(args, cfg, rules)

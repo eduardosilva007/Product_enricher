@@ -1,0 +1,57 @@
+PIPELINE v4.0.6-classification-cohort-fix
+=========================================
+
+Objetivo desta revisão
+----------------------
+Corrigir a seleção do cohort da opção 2 - CLASSIFICAÇÃO.
+
+Causa raiz observada
+--------------------
+Na v4.0.5, Limite=100 era aplicado às primeiras 100 linhas do catálogo ANTES de
+remover HARD LOCK/BI_OK/já classificados e sem priorizar Collection State.
+No lote observado isso produziu:
+- cohort=100
+- BI_OK=29
+- targets reais=71
+- 68/71 com NO_TARGET_EVIDENCE
+- apenas 3 chamadas Clef
+
+Ou seja, o stress não estava selecionando 100 produtos classificáveis.
+
+Correção v4.0.6
+---------------
+Somente para --mode classify / opção 2:
+- HARD LOCK e já classificados são removidos ANTES de aplicar o limite.
+- Limite=100 passa a significar 100 TARGETS reais de classificação.
+- READY_FOR_CLASSIFICATION tem prioridade 1.
+- PARTIAL_TARGET_EVIDENCE tem prioridade 2.
+- caches legados com curated_results > 0 vêm depois.
+- NO_TARGET_EVIDENCE sem curated evidence não consome o lote de classificação.
+- Novo log CLASSIFICATION QUEUE mostra a composição da fila.
+
+Preservado sem alteração
+------------------------
+- Clef / prompt / thresholds
+- BGE-M3 e reranker
+- CLEF_REPAIR
+- guardrails de AUTO
+- 1 consulta Search por produto
+- regras_negocio v3.0.12 manual-taxonomy-gold
+- pipeline_config.json
+
+Validações executadas
+---------------------
+- python -m py_compile: OK
+- regras_negocio.json: 0 erros de validação
+- teste sintético reproduzindo 29 BI locks + 68 NO_TARGET + 150 READY + 20 PARTIAL:
+  Limite=100 => 100/100 targets READY_FOR_CLASSIFICATION
+
+Próximo teste
+-------------
+Opção 2 - CLASSIFICAÇÃO
+Limite = 20 primeiro.
+
+No início do log, esperar algo como:
+CLASSIFICATION QUEUE | targets=20 | ready_disponiveis=>0 | ... | limite_aplicado_apos_filtros=SIM
+
+Se ready_disponiveis > 0 mas os 20 ainda não chegarem ao BGE/Clef, interrompa e envie o log.
