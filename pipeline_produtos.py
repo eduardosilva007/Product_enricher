@@ -3203,7 +3203,7 @@ def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], r
                 continue
             rebuilt = _curate_existing_payload(brand, model, raw.payload, cfg)
             coll = rebuilt.get("_collection", {}) or {}
-            writer.put(brand, model, rebuilt, archive_reason="CACHE_CURATED_R9_5_NO_TAVILY")
+            writer.put(brand, model, rebuilt, archive_reason="CACHE_CURATED_R9_6P7_2_NO_SEARCH")
             products.append({
                 "Marca": brand, "Modelo": model, "Search Model": coll.get("search_model"),
                 "Collection State": coll.get("state"), "RAW Results": len(rebuilt.get("results", []) or []),
@@ -3223,7 +3223,7 @@ def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], r
                 LOG.info("CURADORIA CACHE %d/%d | salvos=%d", idx, len(catalog), len(products))
                 _export_collection_quality_report(products, sources, queries, report_path)
         _export_collection_quality_report(products, sources, queries, report_path)
-        LOG.info("CURADORIA CACHE R9.5 CONCLUIDA | produtos=%d | creditos Tavily=0 | arquivo=%s", len(products), report_path)
+        LOG.info("CURADORIA CACHE R9.6p7.2 CONCLUIDA | produtos=%d | creditos Tavily=0 | arquivo=%s", len(products), report_path)
     finally:
         store.close()
         writer.close()
@@ -8449,7 +8449,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -8461,6 +8461,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", default="")
     p.add_argument("--inventory-output", default="")
     p.add_argument("--precollection-output", default="")
+    p.add_argument("--evidence-output", default="")
     p.add_argument("--clef-model", dest="clef_model", default="")
     p.add_argument("--no-clef", dest="no_clef", action="store_true")
     p.add_argument("--no-checkpoint", action="store_true")
@@ -8512,7 +8513,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
     print("5 - AUDITORIA / REPARO BASE (SEM CLEF)")
     print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
-    print("7 - SAIR")
+    print("7 - EXPORTAR EVIDENCE BUNDLE (SEM BUSCA / 0 CRÉDITOS)")
+    print("8 - SAIR")
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
@@ -8557,7 +8559,101 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
+    if op == "7":
+        limite = _menu_limit("Limite de produtos para exportar (ENTER = todos): ")
+        argv = ["--mode", "evidence-export"]
+        if limite:
+            argv += ["--max-items", str(limite)]
+        return parser.parse_args(argv)
     raise SystemExit(0)
+
+
+
+def validate_release_contract(cfg: Dict[str, Any], rules: Any, policy: Dict[str, Any]) -> List[str]:
+    """Fail-closed para impedir mistura silenciosa de código/config/policy/rules."""
+    contract = cfg.get("release_contract", {}) or {}
+    actual = {
+        "pipeline_version": PIPELINE_VERSION,
+        "collection_engine_version": COLLECTION_ENGINE_VERSION,
+        "collection_policy_version": safe(policy.get("VERSION")),
+        "rules_version": safe(getattr(rules, "version", "")),
+        "evidence_cache_schema": EVIDENCE_CACHE_SCHEMA_VERSION,
+    }
+    errors: List[str] = []
+    for key, value in actual.items():
+        expected = safe(contract.get(key))
+        if not expected:
+            errors.append(f"RELEASE_CONTRACT: {key} ausente no pipeline_config.json")
+        elif expected != safe(value):
+            errors.append(f"RELEASE_CONTRACT: {key} esperado={expected} atual={value}")
+    return errors
+
+
+def export_evidence_bundle(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
+    """Exporta JSONL reutilizável por chat/LLM sem Search e sem classificação."""
+    cache_path = Path(args.cache or cfg["files"]["cache"])
+    output_path = Path(
+        args.evidence_output
+        or (cfg.get("files", {}) or {}).get("evidence_export_jsonl", "Evidence_Bundle_v4_0_7.jsonl")
+    )
+    store = TavilyReadOnlyStore(cache_path)
+    tmp = output_path.with_suffix(output_path.suffix + ".tmp")
+    exported = 0
+    with_sources = 0
+    try:
+        catalog = store.catalog()
+        if args.max_items:
+            catalog = catalog[:int(args.max_items)]
+        with tmp.open("w", encoding="utf-8", newline="\n") as fh:
+            for brand, model, key in catalog:
+                raw = store.get(brand, model)
+                if raw.state not in {"RAW_OK", "RAW_OK_MERGED"} or not raw.payload:
+                    continue
+                payload = raw.payload
+                collection = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
+                entries = [x for x in (collection.get("evidence_cache", []) or []) if isinstance(x, dict)]
+                if not entries:
+                    entries = _build_evidence_cache_entries(
+                        brand,
+                        derive_search_model(brand, model, cfg),
+                        [x for x in (payload.get("results", []) or []) if isinstance(x, dict)],
+                        [x for x in (collection.get("source_audit", []) or []) if isinstance(x, dict)],
+                        [x for x in (collection.get("curated_results", []) or []) if isinstance(x, dict)],
+                        cfg,
+                        safe(collection.get("provider"))
+                        or safe((payload.get("_search_meta") or {}).get("provider"))
+                        or "cache",
+                    )
+                quality = _evidence_cache_quality(entries)
+                if entries:
+                    with_sources += 1
+                bundle = {
+                    "schema": "product-evidence-bundle-v1",
+                    "pipeline_version": PIPELINE_VERSION,
+                    "brand": brand,
+                    "model": model,
+                    "business_key": key,
+                    "raw_state": raw.state,
+                    "collection_state": safe(collection.get("state")),
+                    "search_query": safe((payload.get("_search_meta") or {}).get("query")),
+                    "quality": quality,
+                    "sources": entries,
+                    "llm_context": _llm_evidence_context(brand, model, entries, max_sources=6),
+                }
+                fh.write(json.dumps(bundle, ensure_ascii=False, separators=(",", ":")) + "\n")
+                exported += 1
+        os.replace(tmp, output_path)
+        LOG.info(
+            "EVIDENCE EXPORT | produtos=%d | com_fontes=%d | search_calls=0 | arquivo=%s",
+            exported, with_sources, output_path,
+        )
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        store.close()
 
 
 def run_baseline_repair(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
@@ -8621,6 +8717,11 @@ def main() -> int:
             LOG.error(e)
         return 2
     rules = Rules(rules_path)
+    release_errors = validate_release_contract(cfg, rules, collection_policy)
+    if release_errors:
+        for e in release_errors:
+            LOG.error(e)
+        return 2
 
     if env_info["exists"]:
         LOG.info(
@@ -8646,6 +8747,9 @@ def main() -> int:
         return 0
     if args.mode == "repair":
         run_baseline_repair(args, cfg, rules)
+        return 0
+    if args.mode == "evidence-export":
+        export_evidence_bundle(args, cfg)
         return 0
     if args.mode in {"classify", "full", "recover"}:
         qg = run_quality_gates(rules, cfg)
