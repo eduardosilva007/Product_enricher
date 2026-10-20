@@ -2844,52 +2844,98 @@ def search_product_once(
 
 
 def _curate_existing_payload(brand: str, model: str, payload: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Aplica R9.5 ao cache legado sem nova chamada Tavily.
-
-    Usa raw_content quando existente; caso contrario, usa somente os chunks de
-    Search ja persistidos. Nunca inventa conteudo faltante.
-    """
+    """Recuradoria local do cache legado; zero Search e zero conteúdo inventado."""
     policy = _collection_policy(cfg)
     search_model = derive_search_model(brand, model, cfg)
     raw_results = [x for x in (payload.get("results", []) or []) if isinstance(x, dict)]
     curated: List[Dict[str, Any]] = []
     audit: List[Dict[str, Any]] = []
+
     for res in raw_results:
         identity = _source_identity_for_result(brand, search_model, res, cfg)
         raw_content = safe(res.get("raw_content"))
+        snippet = _clean_semantic_text(safe(res.get("content")), policy)
+        evidence_text = _clean_semantic_text(raw_content or snippet, policy)
+        evidence_text = _cap_evidence_text(evidence_text, search_model, cfg)
         isolation = _isolate_target_block(
-            brand, search_model, safe(res.get("title")), safe(res.get("url")),
-            raw_content, safe(res.get("content")), cfg, policy,
+            brand,
+            search_model,
+            _clean_semantic_text(safe(res.get("title")), policy),
+            safe(res.get("url")),
+            evidence_text if raw_content else "",
+            snippet,
+            cfg,
+            policy,
         )
         decision = safe(isolation.get("decision"))
         if decision.startswith("ACCEPT_"):
-            row = _make_curated_result(res, isolation, "CACHE_RAW", "CACHE_REBUILD_NO_TAVILY")
+            row = _make_curated_result(res, isolation, "CACHE_RAW", "CACHE_REBUILD_NO_SEARCH")
             row["_collection_identity"] = _source_identity_for_result(brand, search_model, row, cfg)["level"]
             curated.append(row)
         audit.append({
-            "url": safe(res.get("url")), "title": safe(res.get("title")), "tavily_score": res.get("score"),
-            "identity_before": identity["level"], "model_match_field_before": identity["model_match_field"],
-            "decision": decision, "reason": safe(isolation.get("reason")),
-            "quality_flags": list(isolation.get("flags", []) or []), "other_skus": list(isolation.get("other_skus", []) or []),
-            "isolated_chars": len(safe(isolation.get("content"))), "extract_depth": "CACHE_RAW",
-            "source_mode": "CACHE_REBUILD_NO_TAVILY",
+            "url": safe(res.get("url")),
+            "title": _clean_semantic_text(safe(res.get("title")), policy),
+            "tavily_score": res.get("score"),
+            "identity_before": identity["level"],
+            "identity_after": identity["level"],
+            "model_match_field_before": identity["model_match_field"],
+            "sieve_decision": decision,
+            "decision": decision,
+            "reason": safe(isolation.get("reason")),
+            "quality_flags": list(isolation.get("flags", []) or []),
+            "other_skus": list(isolation.get("other_skus", []) or []),
+            "isolated_chars": len(safe(isolation.get("content"))),
+            "extract_depth": "CACHE_RAW",
+            "source_mode": "CACHE_REBUILD_NO_SEARCH",
         })
+
     curated = _dedupe_curated(curated)
-    curated.sort(key=lambda x: (safe(x.get("_collection_identity")) != "STRONG", -float(x.get("score", 0) or 0)))
+    curated.sort(key=lambda x: (
+        safe(x.get("_collection_identity")) != "STRONG",
+        -float(x.get("score", 0) or 0),
+    ))
+    curated = curated[:max(1, int((cfg.get("evidence", {}) or {}).get("max_results", 5) or 5))]
     state = _collection_state(brand, search_model, curated, cfg, policy)
+    provider = safe(
+        ((payload.get("_search_meta") or {}) if isinstance(payload.get("_search_meta"), dict) else {}).get("provider")
+    ) or "cache"
+    evidence_cache = _build_evidence_cache_entries(
+        brand, search_model, raw_results, audit, curated, cfg, provider
+    )
+    quality = _evidence_cache_quality(evidence_cache)
+
     out = dict(payload)
+    out["results"] = _prepare_results_for_persistence(raw_results, cfg)
     out["_collection"] = {
-        "version": safe(policy.get("VERSION")) or "R9.5",
+        "version": safe(policy.get("VERSION")) or "R9.6p7.2",
+        "engine_version": COLLECTION_ENGINE_VERSION,
+        "provider": provider,
         "state": state,
         "search_model": search_model,
-        "curated_results": curated[:max(1, int((cfg.get("evidence", {}) or {}).get("max_results", 5) or 5))],
+        "curated_results": curated,
+        "evidence_cache_schema": EVIDENCE_CACHE_SCHEMA_VERSION,
+        "evidence_cache": evidence_cache,
+        "evidence_cache_quality": quality,
         "source_audit": audit,
-        "query_audit": [{"stage": "CACHE_REBUILD", "query": "", "search_depth": "CACHE_RAW", "results": len(raw_results), "extract_candidates": 0, "accepted_total_after_stage": len(curated), "collection_state_after_stage": state, "search_credits_total": 0, "extract_credits_total": 0}],
+        "query_audit": [{
+            "stage": "CACHE_REBUILD",
+            "query": "",
+            "search_depth": "CACHE_RAW",
+            "results": len(raw_results),
+            "accepted_total_after_stage": len(curated),
+            "collection_state_after_stage": state,
+            "evidence_cache_sources": quality["sources"],
+            "evidence_cache_primary": quality["primary"],
+            "evidence_cache_auxiliary": quality["auxiliary"],
+            "evidence_cache_rejected": quality["rejected"],
+            "evidence_cache_chars": quality["evidence_chars_total"],
+            "search_credits_total": 0,
+            "extract_credits_total": 0,
+        }],
         "raw_extract_results": [],
         "credits": {"search": 0, "extract": 0, "total": 0},
     }
     return out
-
 
 def _export_collection_quality_report(products: List[Dict[str, Any]], sources: List[Dict[str, Any]], queries: List[Dict[str, Any]], path: Path) -> None:
     import pandas as pd
