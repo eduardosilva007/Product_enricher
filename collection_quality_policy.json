@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-09-30-r9.6p7.1a-evidence-retention-safe-hints",
+  "VERSION": "2026-10-20-r9.6p7.2-evidence-cache-hardening",
   "DESIGN_PRINCIPLES": [
     "Uma unica Search por produto: sem fallback, rescue, retry automatico, provider Extract ou provider failover.",
     "Busca 100% aberta: sem include_domains, country, language filter ou exact_match.",
@@ -137,12 +137,46 @@
     "require_brand_near_model": true,
     "max_identity_level": "PROBABLE",
     "block_compatibility_only": true,
-    "block_related_only": true
+    "block_related_only": true,
+    "brand_model_max_distance_chars": 500
   },
   "persistence": {
     "persist_target_evidence_window": true,
     "target_evidence_window_chars": 5000,
     "raw_content_full_persisted": false,
-    "persist_local_enrichment_window": true
+    "persist_local_enrichment_window": true,
+    "evidence_excerpt_chars": 1200,
+    "max_cached_sources": 10
+  },
+  "cleaning": {
+    "drop_duplicate_lines": true,
+    "max_boilerplate_line_chars": 180,
+    "evidence_excerpt_chars": 1200,
+    "max_target_occurrences": 2,
+    "boilerplate_terms": [
+      "cookie policy",
+      "privacy policy",
+      "terms and conditions",
+      "all rights reserved",
+      "sign in",
+      "log in",
+      "register",
+      "newsletter",
+      "subscribe",
+      "shopping cart",
+      "add to cart",
+      "contact us",
+      "follow us",
+      "menu",
+      "home",
+      "back to top"
+    ],
+    "boilerplate_line_regexes": [
+      "^©\\s*\\d{4}",
+      "^copyright\\b",
+      "^accept (all )?cookies?$",
+      "^manage cookies?$",
+      "^skip to (main )?content$"
+    ]
   }
 }
