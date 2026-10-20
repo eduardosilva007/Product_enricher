@@ -3228,7 +3228,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
 
 
 def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
-    """Migra/curta RAW legado para R9.5 sem consumir creditos Tavily."""
+    """Recuradoria RAW legado para R9.6p7.2 sem consumir créditos de Search."""
     cache_path = Path(args.cache or cfg["files"]["cache"])
     report_path = Path(cfg.get("files", {}).get("collection_report_cache_rebuild", "Curadoria_Cache_R9_5.xlsx"))
     store = TavilyReadOnlyStore(cache_path)
@@ -8394,7 +8394,7 @@ def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
 
 
 def validate_classification_flow_policy(cfg: Dict[str, Any]) -> List[str]:
-    """Fail-closed para o contrato operacional da v4.0.5.
+    """Fail-closed para o contrato operacional da v4.0.7.
 
     O funil prepara candidatos; Clef decide toda cauda não resolvida por regra
     quando há evidência target utilizável. Resultado Clef válido é preservado
@@ -8438,7 +8438,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
         qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"], qg["real_reference_only"],
     )
 
-    # Contrato operacional v4.0.5: uma consulta automática por produto e Clef
+    # Contrato operacional v4.0.7: uma consulta automática por produto e Clef
     # obrigatório para toda cauda não resolvida por regra com evidência útil.
     cost_errors = validate_collection_cost_policy(cfg)
     if cost_errors:
@@ -8449,7 +8449,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
     if flow_errors:
         for e in flow_errors:
             LOG.error(e)
-        raise RuntimeError("Contrato de classificação v4.0.5 inválido; execução bloqueada.")
+        raise RuntimeError("Contrato de classificação v4.0.7 inválido; execução bloqueada.")
     LOG.info(
         "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
         "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
@@ -8553,7 +8553,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print(" COLLECTION HARD RULE: 1 produto = no máximo 1 request | sem retry/fallback/extract/advanced")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 86)
-    print("1 - COLETA / EXTRAÇÃO R9.6 (1 REQUEST/PRODUTO)")
+    print("1 - COLETA / EXTRAÇÃO R9.6p7.2 (1 REQUEST/PRODUTO)")
     print("2 - CLASSIFICAÇÃO")
     print("3 - PROCESSO COMPLETO")
     print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
