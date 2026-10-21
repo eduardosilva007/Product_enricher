@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-13-v4.0.4-clef-guardrails",
+  "VERSION": "2026-10-20-v4.0.7-evidence-cache-hardening",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -15,7 +15,8 @@
     "baseline_backup_dir": "Backups_Baseline",
     "baseline_audit": "Auditoria_Baseline_R9_5.csv",
     "collection_policy": "collection_quality_policy.json",
-    "collection_report_cache_rebuild": "Curadoria_Cache_R9_6.xlsx"
+    "collection_report_cache_rebuild": "Curadoria_Cache_R9_6.xlsx",
+    "evidence_export_jsonl": "Evidence_Bundle_v4_0_7.jsonl"
   },
   "evidence": {
     "max_results": 5,
@@ -177,7 +178,7 @@
       5,
       10
     ],
-    "operational_requests_per_minute": 10.0,
+    "operational_requests_per_minute": 10,
     "max_api_calls_per_run": 0,
     "max_total_tokens_per_run": 0,
     "auto_approval": {
@@ -209,5 +210,12 @@
     "weak_identity_requires_recollection": false,
     "repair_type_taxonomy_conflict": true,
     "max_clef_repair_attempts": 1
+  },
+  "release_contract": {
+    "pipeline_version": "4.0.7-evidence-cache-hardening",
+    "collection_engine_version": "2026-10-20-r9.6p7.2-evidence-cache-hardening",
+    "collection_policy_version": "2026-10-20-r9.6p7.2-evidence-cache-hardening",
+    "rules_version": "2026-10-13-v3.0.13-manual-taxonomy-gold-2",
+    "evidence_cache_schema": "1"
   }
 }

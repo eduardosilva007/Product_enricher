@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.5-clef-routing-fix / Collection R9.6p7
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.7-evidence-cache-hardening / Collection R9.6p7.2
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import html
 import json
 import logging
 import os
@@ -55,11 +56,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
 
-PIPELINE_VERSION = "4.0.6-classification-cohort-fix"
+PIPELINE_VERSION = "4.0.7-evidence-cache-hardening"
 PROMPT_VERSION = "2026-10-13-v19-clef-joint-repair-identity-guard"
 DEFAULT_CLEF_MODEL = "clef"
-BUILD_LABEL = "v4.0.6 Classification Cohort Fix + Clef Routing + Joint Repair"
-COLLECTION_ENGINE_VERSION = "2026-09-29-r9.6p7-import-noise-taxonomy"
+BUILD_LABEL = "v4.0.7 Evidence Cache Hardening + v4.0.6 Cohort Fix"
+COLLECTION_ENGINE_VERSION = "2026-10-20-r9.6p7.2-evidence-cache-hardening"
+EVIDENCE_CACHE_SCHEMA_VERSION = "1"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
 
@@ -1296,6 +1298,23 @@ def validate_collection_policy(policy: Dict[str, Any]) -> List[str]:
     missing = sorted(required - decisions)
     if missing:
         errors.append(f"COLLECTION_POLICY.source_decisions faltando={missing}")
+    persistence = policy.get("persistence", {}) or {}
+    cleaning = policy.get("cleaning", {}) or {}
+    body_rescue = policy.get("body_identity_rescue", {}) or {}
+    if bool(persistence.get("raw_content_full_persisted", True)):
+        errors.append("COLLECTION_POLICY.persistence.raw_content_full_persisted deve ser false")
+    if not bool(persistence.get("persist_target_evidence_window", False)):
+        errors.append("COLLECTION_POLICY.persistence.persist_target_evidence_window deve ser true")
+    excerpt_chars = int(persistence.get("evidence_excerpt_chars", 0) or 0)
+    if excerpt_chars < 300 or excerpt_chars > 4000:
+        errors.append("COLLECTION_POLICY.persistence.evidence_excerpt_chars deve ficar entre 300 e 4000")
+    max_cached_sources = int(persistence.get("max_cached_sources", 0) or 0)
+    if max_cached_sources < 1 or max_cached_sources > 20:
+        errors.append("COLLECTION_POLICY.persistence.max_cached_sources deve ficar entre 1 e 20")
+    if not isinstance(cleaning.get("boilerplate_line_regexes", []), list):
+        errors.append("COLLECTION_POLICY.cleaning.boilerplate_line_regexes deve ser lista")
+    if bool(body_rescue.get("enabled", False)) and safe(body_rescue.get("max_identity_level")) != "PROBABLE":
+        errors.append("COLLECTION_POLICY.body_identity_rescue.max_identity_level deve ser PROBABLE")
     return errors
 
 
@@ -1911,6 +1930,305 @@ def _query_identity_gate(
     return False, "QUERY_IDENTITY_DRIFT", flags
 
 
+
+def _clean_semantic_text(text: str, policy: Dict[str, Any]) -> str:
+    """Remove markup/boilerplate de forma conservadora e auditável."""
+    value = safe(text)
+    if not value:
+        return ""
+    cleaning = policy.get("cleaning", {}) or {}
+    value = html.unescape(value)
+    value = re.sub(r"(?is)<!--.*?-->", " ", value)
+    value = re.sub(
+        r"(?is)<(script|style|noscript|svg|iframe|nav|footer|header|form)\b[^>]*>.*?</\1\s*>",
+        "\n",
+        value,
+    )
+    value = re.sub(r"(?s)<[^>]+>", " ", value)
+    value = value.replace("\u00a0", " ").replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", value)
+
+    terms = [norm_text(x) for x in (cleaning.get("boilerplate_terms", []) or []) if norm_text(x)]
+    patterns: List[re.Pattern] = []
+    for raw_pattern in (cleaning.get("boilerplate_line_regexes", []) or []):
+        try:
+            patterns.append(re.compile(safe(raw_pattern), re.I))
+        except re.error:
+            continue
+
+    max_boilerplate_chars = max(20, int(cleaning.get("max_boilerplate_line_chars", 180) or 180))
+    drop_duplicates = bool(cleaning.get("drop_duplicate_lines", True))
+    kept: List[str] = []
+    seen = set()
+    for raw_line in value.split("\n"):
+        line = re.sub(r"[ \t]+", " ", raw_line).strip(" \t|")
+        if not line:
+            continue
+        normalized = norm_text(line)
+        if any(p.search(line) for p in patterns):
+            continue
+        if len(line) <= max_boilerplate_chars and any(term in normalized for term in terms):
+            continue
+        if drop_duplicates and normalized and normalized in seen:
+            continue
+        if normalized:
+            seen.add(normalized)
+        kept.append(line)
+
+    cleaned = "\n".join(kept)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def _target_evidence_excerpt(
+    text: str,
+    model: str,
+    cfg: Dict[str, Any],
+    policy: Dict[str, Any],
+    max_chars: Optional[int] = None,
+) -> str:
+    """Retém uma janela limpa em torno do SKU; sem SKU, no máximo um snippet limpo."""
+    cleaned = _clean_semantic_text(text, policy)
+    if not cleaned:
+        return ""
+    persistence = policy.get("persistence", {}) or {}
+    cleaning = policy.get("cleaning", {}) or {}
+    limit = int(max_chars or persistence.get("evidence_excerpt_chars") or cleaning.get("evidence_excerpt_chars") or 1200)
+    limit = max(300, min(4000, limit))
+    spans = _target_spans(cleaned, model, cfg)
+    if not spans:
+        return cleaned[:limit].strip()
+
+    max_occurrences = max(1, int(cleaning.get("max_target_occurrences", 2) or 2))
+    per_window = max(300, limit // min(max_occurrences, len(spans)))
+    regions: List[str] = []
+    seen = set()
+    for a, b in spans[:max_occurrences]:
+        half = max(150, per_window // 2)
+        region = cleaned[max(0, a-half):min(len(cleaned), b+half)].strip(" \n\t|;,-")
+        region = _cut_related_tail(region, policy)
+        key = norm_text(region)
+        if region and key not in seen:
+            seen.add(key)
+            regions.append(region)
+    return "\n[...]\n".join(regions)[:limit].strip()
+
+
+def _body_identity_rescue(
+    brand: str,
+    model: str,
+    raw_content: str,
+    cfg: Dict[str, Any],
+    policy: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Permite BODY rescue apenas com Marca+Modelo próximos; teto = PROBABLE."""
+    rescue = policy.get("body_identity_rescue", {}) or {}
+    if not bool(rescue.get("enabled", False)):
+        return None
+    cleaned = _clean_semantic_text(raw_content, policy)
+    if not cleaned:
+        return None
+    window_chars = max(500, int(rescue.get("identity_window_chars", 2400) or 2400))
+    excerpt = _target_evidence_excerpt(cleaned, model, cfg, policy, max_chars=window_chars)
+    spans = _target_spans(excerpt, model, cfg)
+    if not spans:
+        return None
+    if bool(rescue.get("block_compatibility_only", True)) and _target_context_has_only_relation(
+        excerpt, model, cfg, policy.get("compatibility_terms", []) or [], window=220
+    ):
+        return None
+    if bool(rescue.get("block_related_only", True)) and _target_context_has_only_relation(
+        excerpt, model, cfg, policy.get("related_section_terms", []) or [], window=220
+    ):
+        return None
+
+    require_brand = bool(rescue.get("require_brand_near_model", True))
+    max_distance = max(120, int(rescue.get("brand_model_max_distance_chars", 500) or 500))
+    brand_variants = [x for x in _brand_identity_variants(brand) if x]
+    brand_near = False
+    for a, b in spans:
+        local_c = compact(excerpt[max(0, a-max_distance):min(len(excerpt), b+max_distance)])
+        if any(v in local_c for v in brand_variants):
+            brand_near = True
+            break
+    if require_brand and not brand_near:
+        return None
+    return {
+        "level": "PROBABLE",
+        "score": 76,
+        "model_match": "EXACT",
+        "model_match_field": "BODY",
+        "source_weight": 0.68,
+        "identity_origin": "BODY_RESCUE",
+        "rescue_excerpt": excerpt,
+    }
+
+
+def _evidence_domain(url: str) -> str:
+    try:
+        host = (urlparse(safe(url)).hostname or "").casefold().strip()
+    except Exception:
+        host = ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def _build_evidence_cache_entries(
+    brand: str,
+    model: str,
+    rows: Sequence[Dict[str, Any]],
+    audits: Sequence[Dict[str, Any]],
+    curated: Sequence[Dict[str, Any]],
+    cfg: Dict[str, Any],
+    provider: str,
+) -> List[Dict[str, Any]]:
+    """Materializa evidência compacta, limpa e rastreável para fallback/revisão."""
+    policy = _collection_policy(cfg)
+    persistence = policy.get("persistence", {}) or {}
+    max_sources = max(1, min(20, int(persistence.get("max_cached_sources", 10) or 10)))
+    excerpt_chars = max(300, min(4000, int(persistence.get("evidence_excerpt_chars", 1200) or 1200)))
+
+    audit_by_url: Dict[str, Dict[str, Any]] = {}
+    for audit in audits:
+        if isinstance(audit, dict):
+            key = _url_key(audit.get("url", ""))
+            if key and key not in audit_by_url:
+                audit_by_url[key] = audit
+    curated_by_url: Dict[str, Dict[str, Any]] = {}
+    for item in curated:
+        if isinstance(item, dict):
+            key = _url_key(item.get("url", ""))
+            if key and key not in curated_by_url:
+                curated_by_url[key] = item
+
+    rank = {"STRONG": 4, "PROBABLE": 3, "CONTEXTUAL": 2, "WEAK": 1}
+    tier_rank = {"PRIMARY": 0, "AUXILIARY_REVIEW_ONLY": 1, "REJECTED": 2}
+    entries: List[Dict[str, Any]] = []
+    seen_payloads = set()
+
+    for idx, row in enumerate([x for x in rows if isinstance(x, dict)], 1):
+        url = safe(row.get("url"))
+        key = _url_key(url)
+        audit = audit_by_url.get(key, {})
+        curated_row = curated_by_url.get(key)
+        title = _clean_semantic_text(safe(row.get("title")), policy)
+        snippet = _clean_semantic_text(safe(row.get("content")), policy)
+        identity = safe(
+            (curated_row or {}).get("_collection_identity")
+            or audit.get("identity_after")
+            or audit.get("identity_before")
+        ) or "WEAK"
+        decision = safe(audit.get("decision") or audit.get("sieve_decision"))
+        flags = [safe(x) for x in (audit.get("quality_flags", []) or []) if safe(x)]
+
+        if curated_row is not None:
+            excerpt = _clean_semantic_text(safe(curated_row.get("content")), policy)[:excerpt_chars]
+            tier = "PRIMARY" if excerpt else "REJECTED"
+            origin = safe(curated_row.get("_collection_source_mode")) or "CURATED"
+        else:
+            raw_content = safe(row.get("raw_content"))
+            excerpt = _target_evidence_excerpt(raw_content or snippet, model, cfg, policy, max_chars=excerpt_chars)
+            tier = "AUXILIARY_REVIEW_ONLY" if identity in {"STRONG", "PROBABLE"} and excerpt else "REJECTED"
+            origin = "TAVILY_RAW_WINDOW" if raw_content else "SEARCH_SNIPPET"
+
+        digest = ""
+        excerpt_key = norm_text(excerpt)
+        if excerpt_key:
+            digest = hashlib.sha256(excerpt_key.encode("utf-8")).hexdigest()[:20]
+            if digest in seen_payloads and tier != "PRIMARY":
+                continue
+            seen_payloads.add(digest)
+
+        try:
+            provider_score = float(row.get("score", 0) or 0)
+        except Exception:
+            provider_score = 0.0
+        try:
+            provider_position = int(row.get("_provider_position") or idx)
+        except Exception:
+            provider_position = idx
+
+        entries.append({
+            "source_id": provider_position,
+            "title": title,
+            "url": url,
+            "domain": _evidence_domain(url),
+            "provider": provider,
+            "provider_score": provider_score,
+            "identity": identity,
+            "decision": decision,
+            "quality_flags": flags,
+            "tier": tier,
+            "eligible_for_classification": tier == "PRIMARY",
+            "eligible_for_llm_rescue": tier in {"PRIMARY", "AUXILIARY_REVIEW_ONLY"},
+            "content_origin": origin,
+            "snippet": snippet[:700],
+            "evidence_excerpt": excerpt,
+            "evidence_chars": len(excerpt),
+            "evidence_hash": digest,
+            "raw_content_available": bool(safe(row.get("raw_content"))),
+        })
+    entries.sort(key=lambda x: (
+        tier_rank.get(safe(x.get("tier")), 9),
+        -rank.get(safe(x.get("identity")), 0),
+        -float(x.get("provider_score", 0) or 0),
+        int(x.get("source_id", 9999) or 9999),
+    ))
+    return entries[:max_sources]
+
+
+def _evidence_cache_quality(entries: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    rows = [x for x in entries if isinstance(x, dict)]
+    return {
+        "schema_version": EVIDENCE_CACHE_SCHEMA_VERSION,
+        "sources": len(rows),
+        "primary": sum(1 for x in rows if safe(x.get("tier")) == "PRIMARY"),
+        "auxiliary": sum(1 for x in rows if safe(x.get("tier")) == "AUXILIARY_REVIEW_ONLY"),
+        "rejected": sum(1 for x in rows if safe(x.get("tier")) == "REJECTED"),
+        "strong": sum(1 for x in rows if safe(x.get("identity")) == "STRONG"),
+        "probable": sum(1 for x in rows if safe(x.get("identity")) == "PROBABLE"),
+        "evidence_chars_total": sum(int(x.get("evidence_chars", 0) or 0) for x in rows),
+    }
+
+
+def _prepare_results_for_persistence(rows: Sequence[Dict[str, Any]], cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Persiste Search metadata + snippet limpo; raw_content integral é descartado."""
+    policy = _collection_policy(cfg)
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        r = dict(row)
+        original = safe(r.get("content"))
+        r["title"] = _clean_semantic_text(safe(r.get("title")), policy)
+        r["content"] = _clean_semantic_text(original, policy)
+        r["_snippet_original_chars"] = len(original)
+        r["_snippet_clean_chars"] = len(safe(r.get("content")))
+        r["_raw_content_available"] = bool(safe(r.get("raw_content")))
+        r["raw_content"] = None
+        out.append(r)
+    return out
+
+
+def _llm_evidence_context(brand: str, model: str, entries: Sequence[Dict[str, Any]], max_sources: int = 6) -> str:
+    """Contexto pronto para chat/LLM; REJECTED fica fora por padrão."""
+    usable = [
+        x for x in entries
+        if isinstance(x, dict)
+        and safe(x.get("tier")) in {"PRIMARY", "AUXILIARY_REVIEW_ONLY"}
+        and safe(x.get("evidence_excerpt"))
+    ][:max(1, int(max_sources or 6))]
+    lines = [f"PRODUCT: {brand} | {model}"]
+    for idx, row in enumerate(usable, 1):
+        lines.extend([
+            f"SOURCE {idx} [{safe(row.get('tier'))}] [{safe(row.get('identity'))}]",
+            f"TITLE: {safe(row.get('title'))}",
+            f"URL: {safe(row.get('url'))}",
+            f"EVIDENCE: {safe(row.get('evidence_excerpt'))}",
+        ])
+    return "\n".join(lines).strip()
+
+
 def _source_sieve(
     brand: str,
     search_model: str,
@@ -1932,15 +2250,27 @@ def _source_sieve(
     for row in rows:
         if not isinstance(row, dict):
             continue
-        identity = _source_identity_for_result(brand, search_model, row, cfg)
-        title = safe(row.get("title"))
-        snippet = safe(row.get("content"))
+        identity_initial = _source_identity_for_result(brand, search_model, row, cfg)
+        identity = dict(identity_initial)
+        identity_origin = "TITLE_URL_SNIPPET"
+        title = _clean_semantic_text(safe(row.get("title")), policy)
+        snippet = _clean_semantic_text(safe(row.get("content")), policy)
         url = safe(row.get("url"))
+        raw_content = safe(row.get("raw_content"))
+        if identity["level"] not in {"STRONG", "PROBABLE"} and raw_content:
+            body_rescue = _body_identity_rescue(brand, search_model, raw_content, cfg, policy)
+            if body_rescue is not None:
+                identity = dict(body_rescue)
+                identity_origin = "BODY_RESCUE"
         search_text = f"{title}\n{snippet}".strip()
         flags: List[str] = []
 
-        decision = "ACCEPT_SOURCE_SIEVE"
-        reason = "Identidade target STRONG/PROBABLE e sem propósito negativo detectado"
+        decision = "ACCEPT_SOURCE_SIEVE_BODY_RESCUE" if identity_origin == "BODY_RESCUE" else "ACCEPT_SOURCE_SIEVE"
+        reason = (
+            "Identidade target PROBABLE resgatada no BODY com Marca+Modelo próximos"
+            if identity_origin == "BODY_RESCUE"
+            else "Identidade target STRONG/PROBABLE e sem propósito negativo detectado"
+        )
         if identity["level"] not in {"STRONG", "PROBABLE"}:
             decision = "REJECT_WEAK_IDENTITY"
             reason = f"Identity={identity['level']} abaixo de PROBABLE"
@@ -1961,6 +2291,8 @@ def _source_sieve(
             "title": title,
             "tavily_score": row.get("score"),
             "identity_before": identity["level"],
+            "identity_initial": identity_initial["level"],
+            "identity_origin": identity_origin,
             "model_match_field_before": identity["model_match_field"],
             "sieve_decision": decision,
             "sieve_reason": reason,
@@ -1980,6 +2312,7 @@ def _source_sieve(
         if decision.startswith("ACCEPT_"):
             row2 = dict(row)
             row2["_collection_identity"] = identity["level"]
+            row2["_collection_identity_origin"] = identity_origin
             row2["_sieve_audit_index"] = len(audits) - 1
             accepted.append(row2)
 
@@ -2122,7 +2455,7 @@ def _curate_after_source_sieve(
     for res in accepted:
         audit_idx = int(res.pop("_sieve_audit_index"))
         audit = audits[audit_idx]
-        snippet = safe(res.get("content"))
+        snippet = _clean_semantic_text(safe(res.get("content")), policy)
         raw_content = safe(res.get("raw_content"))
         evidence_text = ""
         evidence_mode = "SEARCH_SNIPPET"
@@ -2148,6 +2481,7 @@ def _curate_after_source_sieve(
         if not evidence_text:
             evidence_text = snippet
 
+        evidence_text = _clean_semantic_text(evidence_text, policy)
         evidence_text = _cap_evidence_text(evidence_text, search_model, cfg)
         isolation = _isolate_target_block(
             brand, search_model, safe(res.get("title")), safe(res.get("url")),
@@ -2171,6 +2505,7 @@ def _curate_after_source_sieve(
         if decision.startswith("ACCEPT_"):
             row = _make_curated_result(res, isolation, evidence_mode, evidence_mode)
             row["_collection_identity"] = safe(res.get("_collection_identity"))
+            row["_collection_identity_origin"] = safe(res.get("_collection_identity_origin"))
             row["raw_content"] = None
             curated.append(row)
 
@@ -2428,15 +2763,20 @@ def search_product_once(
         "raw_content_requested": bool(usage.get("raw_content_requested")),
     }]
 
-    # Não persistir raw_content integral da Tavily no RAW cache: ele pode ser muito
-    # grande. O trecho target-isolado já está em curated_results e é suficiente para
-    # classificação/auditoria. Mantemos apenas o indicador de disponibilidade.
-    persisted_results: List[Dict[str, Any]] = []
-    for row in normalized:
-        r = dict(row)
-        r["_raw_content_available"] = bool(safe(r.get("raw_content")))
-        r["raw_content"] = None
-        persisted_results.append(r)
+    # v4.0.7: cria Evidence Cache antes de descartar raw_content integral.
+    evidence_cache = _build_evidence_cache_entries(
+        brand, search_model, normalized, audits, curated, cfg, provider
+    )
+    evidence_cache_quality = _evidence_cache_quality(evidence_cache)
+    if query_audit:
+        query_audit[0].update({
+            "evidence_cache_sources": evidence_cache_quality["sources"],
+            "evidence_cache_primary": evidence_cache_quality["primary"],
+            "evidence_cache_auxiliary": evidence_cache_quality["auxiliary"],
+            "evidence_cache_rejected": evidence_cache_quality["rejected"],
+            "evidence_cache_chars": evidence_cache_quality["evidence_chars_total"],
+        })
+    persisted_results = _prepare_results_for_persistence(normalized, cfg)
 
     tavily_credits = float(usage.get("reported_credits") or 0.0) if provider == "tavily" else 0.0
     return {
@@ -2473,6 +2813,9 @@ def search_product_once(
             "state": state,
             "search_model": search_model,
             "curated_results": curated,
+            "evidence_cache_schema": EVIDENCE_CACHE_SCHEMA_VERSION,
+            "evidence_cache": evidence_cache,
+            "evidence_cache_quality": evidence_cache_quality,
             "source_audit": audits,
             "query_audit": query_audit,
             "raw_extract_results": [],
@@ -2501,52 +2844,98 @@ def search_product_once(
 
 
 def _curate_existing_payload(brand: str, model: str, payload: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Aplica R9.5 ao cache legado sem nova chamada Tavily.
-
-    Usa raw_content quando existente; caso contrario, usa somente os chunks de
-    Search ja persistidos. Nunca inventa conteudo faltante.
-    """
+    """Recuradoria local do cache legado; zero Search e zero conteúdo inventado."""
     policy = _collection_policy(cfg)
     search_model = derive_search_model(brand, model, cfg)
     raw_results = [x for x in (payload.get("results", []) or []) if isinstance(x, dict)]
     curated: List[Dict[str, Any]] = []
     audit: List[Dict[str, Any]] = []
+
     for res in raw_results:
         identity = _source_identity_for_result(brand, search_model, res, cfg)
         raw_content = safe(res.get("raw_content"))
+        snippet = _clean_semantic_text(safe(res.get("content")), policy)
+        evidence_text = _clean_semantic_text(raw_content or snippet, policy)
+        evidence_text = _cap_evidence_text(evidence_text, search_model, cfg)
         isolation = _isolate_target_block(
-            brand, search_model, safe(res.get("title")), safe(res.get("url")),
-            raw_content, safe(res.get("content")), cfg, policy,
+            brand,
+            search_model,
+            _clean_semantic_text(safe(res.get("title")), policy),
+            safe(res.get("url")),
+            evidence_text if raw_content else "",
+            snippet,
+            cfg,
+            policy,
         )
         decision = safe(isolation.get("decision"))
         if decision.startswith("ACCEPT_"):
-            row = _make_curated_result(res, isolation, "CACHE_RAW", "CACHE_REBUILD_NO_TAVILY")
+            row = _make_curated_result(res, isolation, "CACHE_RAW", "CACHE_REBUILD_NO_SEARCH")
             row["_collection_identity"] = _source_identity_for_result(brand, search_model, row, cfg)["level"]
             curated.append(row)
         audit.append({
-            "url": safe(res.get("url")), "title": safe(res.get("title")), "tavily_score": res.get("score"),
-            "identity_before": identity["level"], "model_match_field_before": identity["model_match_field"],
-            "decision": decision, "reason": safe(isolation.get("reason")),
-            "quality_flags": list(isolation.get("flags", []) or []), "other_skus": list(isolation.get("other_skus", []) or []),
-            "isolated_chars": len(safe(isolation.get("content"))), "extract_depth": "CACHE_RAW",
-            "source_mode": "CACHE_REBUILD_NO_TAVILY",
+            "url": safe(res.get("url")),
+            "title": _clean_semantic_text(safe(res.get("title")), policy),
+            "tavily_score": res.get("score"),
+            "identity_before": identity["level"],
+            "identity_after": identity["level"],
+            "model_match_field_before": identity["model_match_field"],
+            "sieve_decision": decision,
+            "decision": decision,
+            "reason": safe(isolation.get("reason")),
+            "quality_flags": list(isolation.get("flags", []) or []),
+            "other_skus": list(isolation.get("other_skus", []) or []),
+            "isolated_chars": len(safe(isolation.get("content"))),
+            "extract_depth": "CACHE_RAW",
+            "source_mode": "CACHE_REBUILD_NO_SEARCH",
         })
+
     curated = _dedupe_curated(curated)
-    curated.sort(key=lambda x: (safe(x.get("_collection_identity")) != "STRONG", -float(x.get("score", 0) or 0)))
+    curated.sort(key=lambda x: (
+        safe(x.get("_collection_identity")) != "STRONG",
+        -float(x.get("score", 0) or 0),
+    ))
+    curated = curated[:max(1, int((cfg.get("evidence", {}) or {}).get("max_results", 5) or 5))]
     state = _collection_state(brand, search_model, curated, cfg, policy)
+    provider = safe(
+        ((payload.get("_search_meta") or {}) if isinstance(payload.get("_search_meta"), dict) else {}).get("provider")
+    ) or "cache"
+    evidence_cache = _build_evidence_cache_entries(
+        brand, search_model, raw_results, audit, curated, cfg, provider
+    )
+    quality = _evidence_cache_quality(evidence_cache)
+
     out = dict(payload)
+    out["results"] = _prepare_results_for_persistence(raw_results, cfg)
     out["_collection"] = {
-        "version": safe(policy.get("VERSION")) or "R9.5",
+        "version": safe(policy.get("VERSION")) or "R9.6p7.2",
+        "engine_version": COLLECTION_ENGINE_VERSION,
+        "provider": provider,
         "state": state,
         "search_model": search_model,
-        "curated_results": curated[:max(1, int((cfg.get("evidence", {}) or {}).get("max_results", 5) or 5))],
+        "curated_results": curated,
+        "evidence_cache_schema": EVIDENCE_CACHE_SCHEMA_VERSION,
+        "evidence_cache": evidence_cache,
+        "evidence_cache_quality": quality,
         "source_audit": audit,
-        "query_audit": [{"stage": "CACHE_REBUILD", "query": "", "search_depth": "CACHE_RAW", "results": len(raw_results), "extract_candidates": 0, "accepted_total_after_stage": len(curated), "collection_state_after_stage": state, "search_credits_total": 0, "extract_credits_total": 0}],
+        "query_audit": [{
+            "stage": "CACHE_REBUILD",
+            "query": "",
+            "search_depth": "CACHE_RAW",
+            "results": len(raw_results),
+            "accepted_total_after_stage": len(curated),
+            "collection_state_after_stage": state,
+            "evidence_cache_sources": quality["sources"],
+            "evidence_cache_primary": quality["primary"],
+            "evidence_cache_auxiliary": quality["auxiliary"],
+            "evidence_cache_rejected": quality["rejected"],
+            "evidence_cache_chars": quality["evidence_chars_total"],
+            "search_credits_total": 0,
+            "extract_credits_total": 0,
+        }],
         "raw_extract_results": [],
         "credits": {"search": 0, "extract": 0, "total": 0},
     }
     return out
-
 
 def _export_collection_quality_report(products: List[Dict[str, Any]], sources: List[Dict[str, Any]], queries: List[Dict[str, Any]], path: Path) -> None:
     import pandas as pd
@@ -2839,7 +3228,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
 
 
 def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
-    """Migra/curta RAW legado para R9.5 sem consumir creditos Tavily."""
+    """Recuradoria RAW legado para R9.6p7.2 sem consumir créditos de Search."""
     cache_path = Path(args.cache or cfg["files"]["cache"])
     report_path = Path(cfg.get("files", {}).get("collection_report_cache_rebuild", "Curadoria_Cache_R9_5.xlsx"))
     store = TavilyReadOnlyStore(cache_path)
@@ -2860,7 +3249,7 @@ def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], r
                 continue
             rebuilt = _curate_existing_payload(brand, model, raw.payload, cfg)
             coll = rebuilt.get("_collection", {}) or {}
-            writer.put(brand, model, rebuilt, archive_reason="CACHE_CURATED_R9_5_NO_TAVILY")
+            writer.put(brand, model, rebuilt, archive_reason="CACHE_CURATED_R9_6P7_2_NO_SEARCH")
             products.append({
                 "Marca": brand, "Modelo": model, "Search Model": coll.get("search_model"),
                 "Collection State": coll.get("state"), "RAW Results": len(rebuilt.get("results", []) or []),
@@ -2880,7 +3269,7 @@ def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], r
                 LOG.info("CURADORIA CACHE %d/%d | salvos=%d", idx, len(catalog), len(products))
                 _export_collection_quality_report(products, sources, queries, report_path)
         _export_collection_quality_report(products, sources, queries, report_path)
-        LOG.info("CURADORIA CACHE R9.5 CONCLUIDA | produtos=%d | creditos Tavily=0 | arquivo=%s", len(products), report_path)
+        LOG.info("CURADORIA CACHE R9.6p7.2 CONCLUIDA | produtos=%d | creditos Tavily=0 | arquivo=%s", len(products), report_path)
     finally:
         store.close()
         writer.close()
@@ -8005,7 +8394,7 @@ def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
 
 
 def validate_classification_flow_policy(cfg: Dict[str, Any]) -> List[str]:
-    """Fail-closed para o contrato operacional da v4.0.5.
+    """Fail-closed para o contrato operacional da v4.0.7.
 
     O funil prepara candidatos; Clef decide toda cauda não resolvida por regra
     quando há evidência target utilizável. Resultado Clef válido é preservado
@@ -8049,7 +8438,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
         qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"], qg["real_reference_only"],
     )
 
-    # Contrato operacional v4.0.5: uma consulta automática por produto e Clef
+    # Contrato operacional v4.0.7: uma consulta automática por produto e Clef
     # obrigatório para toda cauda não resolvida por regra com evidência útil.
     cost_errors = validate_collection_cost_policy(cfg)
     if cost_errors:
@@ -8060,7 +8449,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
     if flow_errors:
         for e in flow_errors:
             LOG.error(e)
-        raise RuntimeError("Contrato de classificação v4.0.5 inválido; execução bloqueada.")
+        raise RuntimeError("Contrato de classificação v4.0.7 inválido; execução bloqueada.")
     LOG.info(
         "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
         "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
@@ -8106,7 +8495,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -8118,6 +8507,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", default="")
     p.add_argument("--inventory-output", default="")
     p.add_argument("--precollection-output", default="")
+    p.add_argument("--evidence-output", default="")
     p.add_argument("--clef-model", dest="clef_model", default="")
     p.add_argument("--no-clef", dest="no_clef", action="store_true")
     p.add_argument("--no-checkpoint", action="store_true")
@@ -8163,13 +8553,14 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print(" COLLECTION HARD RULE: 1 produto = no máximo 1 request | sem retry/fallback/extract/advanced")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 86)
-    print("1 - COLETA / EXTRAÇÃO R9.6 (1 REQUEST/PRODUTO)")
+    print("1 - COLETA / EXTRAÇÃO R9.6p7.2 (1 REQUEST/PRODUTO)")
     print("2 - CLASSIFICAÇÃO")
     print("3 - PROCESSO COMPLETO")
     print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
     print("5 - AUDITORIA / REPARO BASE (SEM CLEF)")
     print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
-    print("7 - SAIR")
+    print("7 - EXPORTAR EVIDENCE BUNDLE (SEM BUSCA / 0 CRÉDITOS)")
+    print("8 - SAIR")
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
@@ -8214,7 +8605,101 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
+    if op == "7":
+        limite = _menu_limit("Limite de produtos para exportar (ENTER = todos): ")
+        argv = ["--mode", "evidence-export"]
+        if limite:
+            argv += ["--max-items", str(limite)]
+        return parser.parse_args(argv)
     raise SystemExit(0)
+
+
+
+def validate_release_contract(cfg: Dict[str, Any], rules: Any, policy: Dict[str, Any]) -> List[str]:
+    """Fail-closed para impedir mistura silenciosa de código/config/policy/rules."""
+    contract = cfg.get("release_contract", {}) or {}
+    actual = {
+        "pipeline_version": PIPELINE_VERSION,
+        "collection_engine_version": COLLECTION_ENGINE_VERSION,
+        "collection_policy_version": safe(policy.get("VERSION")),
+        "rules_version": safe(getattr(rules, "version", "")),
+        "evidence_cache_schema": EVIDENCE_CACHE_SCHEMA_VERSION,
+    }
+    errors: List[str] = []
+    for key, value in actual.items():
+        expected = safe(contract.get(key))
+        if not expected:
+            errors.append(f"RELEASE_CONTRACT: {key} ausente no pipeline_config.json")
+        elif expected != safe(value):
+            errors.append(f"RELEASE_CONTRACT: {key} esperado={expected} atual={value}")
+    return errors
+
+
+def export_evidence_bundle(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
+    """Exporta JSONL reutilizável por chat/LLM sem Search e sem classificação."""
+    cache_path = Path(args.cache or cfg["files"]["cache"])
+    output_path = Path(
+        args.evidence_output
+        or (cfg.get("files", {}) or {}).get("evidence_export_jsonl", "Evidence_Bundle_v4_0_7.jsonl")
+    )
+    store = TavilyReadOnlyStore(cache_path)
+    tmp = output_path.with_suffix(output_path.suffix + ".tmp")
+    exported = 0
+    with_sources = 0
+    try:
+        catalog = store.catalog()
+        if args.max_items:
+            catalog = catalog[:int(args.max_items)]
+        with tmp.open("w", encoding="utf-8", newline="\n") as fh:
+            for brand, model, key in catalog:
+                raw = store.get(brand, model)
+                if raw.state not in {"RAW_OK", "RAW_OK_MERGED"} or not raw.payload:
+                    continue
+                payload = raw.payload
+                collection = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
+                entries = [x for x in (collection.get("evidence_cache", []) or []) if isinstance(x, dict)]
+                if not entries:
+                    entries = _build_evidence_cache_entries(
+                        brand,
+                        derive_search_model(brand, model, cfg),
+                        [x for x in (payload.get("results", []) or []) if isinstance(x, dict)],
+                        [x for x in (collection.get("source_audit", []) or []) if isinstance(x, dict)],
+                        [x for x in (collection.get("curated_results", []) or []) if isinstance(x, dict)],
+                        cfg,
+                        safe(collection.get("provider"))
+                        or safe((payload.get("_search_meta") or {}).get("provider"))
+                        or "cache",
+                    )
+                quality = _evidence_cache_quality(entries)
+                if entries:
+                    with_sources += 1
+                bundle = {
+                    "schema": "product-evidence-bundle-v1",
+                    "pipeline_version": PIPELINE_VERSION,
+                    "brand": brand,
+                    "model": model,
+                    "business_key": key,
+                    "raw_state": raw.state,
+                    "collection_state": safe(collection.get("state")),
+                    "search_query": safe((payload.get("_search_meta") or {}).get("query")),
+                    "quality": quality,
+                    "sources": entries,
+                    "llm_context": _llm_evidence_context(brand, model, entries, max_sources=6),
+                }
+                fh.write(json.dumps(bundle, ensure_ascii=False, separators=(",", ":")) + "\n")
+                exported += 1
+        os.replace(tmp, output_path)
+        LOG.info(
+            "EVIDENCE EXPORT | produtos=%d | com_fontes=%d | search_calls=0 | arquivo=%s",
+            exported, with_sources, output_path,
+        )
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        store.close()
 
 
 def run_baseline_repair(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
@@ -8278,6 +8763,11 @@ def main() -> int:
             LOG.error(e)
         return 2
     rules = Rules(rules_path)
+    release_errors = validate_release_contract(cfg, rules, collection_policy)
+    if release_errors:
+        for e in release_errors:
+            LOG.error(e)
+        return 2
 
     if env_info["exists"]:
         LOG.info(
@@ -8303,6 +8793,9 @@ def main() -> int:
         return 0
     if args.mode == "repair":
         run_baseline_repair(args, cfg, rules)
+        return 0
+    if args.mode == "evidence-export":
+        export_evidence_bundle(args, cfg)
         return 0
     if args.mode in {"classify", "full", "recover"}:
         qg = run_quality_gates(rules, cfg)
