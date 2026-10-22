@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.7-evidence-cache-hardening / Collection R9.6p7.2
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.7.1-identity-rescue-fix / Collection R9.6p7.2.1
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -56,11 +56,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
 
-PIPELINE_VERSION = "4.0.7-evidence-cache-hardening"
+PIPELINE_VERSION = "4.0.7.1-identity-rescue-fix"
 PROMPT_VERSION = "2026-10-13-v19-clef-joint-repair-identity-guard"
 DEFAULT_CLEF_MODEL = "clef"
-BUILD_LABEL = "v4.0.7 Evidence Cache Hardening + v4.0.6 Cohort Fix"
-COLLECTION_ENGINE_VERSION = "2026-10-20-r9.6p7.2-evidence-cache-hardening"
+BUILD_LABEL = "v4.0.7.1 Identity Rescue Fix + Evidence Cache Hardening"
+COLLECTION_ENGINE_VERSION = "2026-10-22-r9.6p7.2.1-identity-rescue"
+COLLECTION_LABEL = "R9.6p7.2.1"
 EVIDENCE_CACHE_SCHEMA_VERSION = "1"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
@@ -158,6 +159,27 @@ def derive_search_model(brand: str, model: str, cfg: Dict[str, Any]) -> str:
     tokens = work.split()
     if len(tokens) > 1 and canonical_display(tokens[-1]) in suffixes:
         work = " ".join(tokens[:-1]).strip()
+
+    # Regras estruturais brand-specific para formatos publicados de SKU.
+    # Fail-safe: a regra só roda para a marca explicitamente configurada e exige
+    # fullmatch do código compactado. Não há fuzzy/edit-distance nem aproximação.
+    rewrite_map = icfg.get("search_model_rewrite_rules_by_brand", {}) or {}
+    brand_compact_key = compact(brand).upper()
+    compact_work = compact(work).upper()
+    for rule in (rewrite_map.get(brand_compact_key, []) or []):
+        if not isinstance(rule, dict):
+            continue
+        expr = safe(rule.get("pattern"))
+        replacement = safe(rule.get("replacement"))
+        if not expr or not replacement:
+            continue
+        try:
+            match = re.fullmatch(expr, compact_work, flags=re.I)
+        except re.error:
+            continue
+        if match:
+            work = match.expand(replacement).strip()
+            break
 
     # Especificacoes operacionais anexadas ao final do campo Modelo (ex.:
     # ``DJG02 355 220V``) nao fazem parte do SKU publicado. A remocao e
@@ -1416,13 +1438,51 @@ def _target_spans(text: str, model: str, cfg: Dict[str, Any]) -> List[Tuple[int,
     return dedup
 
 
-def _looks_like_other_sku_token(token: str, start: int, text: str, model: str, policy: Dict[str, Any]) -> bool:
+def _same_target_sku_token(
+    brand: str,
+    model: str,
+    token: str,
+    cfg: Dict[str, Any],
+) -> bool:
+    """Equivalência estrutural estrita para impedir que o próprio SKU vire contaminante."""
+    compact_token = compact(token)
+    if not compact_token:
+        return False
+    suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
+    target_compacts = {x[0] for x in _model_identity_variants(model, suffixes)}
+    if compact_token in target_compacts:
+        return True
+
+    # Briggs publica Model-Type-Trim (ex.: 40U777-0010-G1), enquanto algumas
+    # bases internas trazem somente Model+Type (40U7770010). Um sufixo de TRIM
+    # letra+dígito é equivalente apenas para esta marca e somente sobre o mesmo
+    # prefixo exato de 10 caracteres. Isso não aceita SKU "parecido".
+    if compact(brand) == "briggsstratton":
+        for target in target_compacts:
+            extra = compact_token[len(target):] if compact_token.startswith(target) else ""
+            if (
+                len(target) == 10
+                and len(compact_token) == 12
+                and re.fullmatch(r"[a-z]\d", extra, flags=re.I)
+            ):
+                return True
+    return False
+
+
+def _looks_like_other_sku_token(
+    token: str,
+    start: int,
+    text: str,
+    brand: str,
+    model: str,
+    cfg: Dict[str, Any],
+    policy: Dict[str, Any],
+) -> bool:
     raw = safe(token).upper().strip(".,:;()[]{}")
     compact_token = compact(raw)
     if not compact_token:
         return False
-    target_compacts = {x[0] for x in _model_identity_variants(model, [])}
-    if compact_token in target_compacts:
+    if _same_target_sku_token(brand, model, raw, cfg):
         return False
     for expr in policy.get("model_token_ignore_regexes", []) or []:
         try:
@@ -1440,12 +1500,18 @@ def _looks_like_other_sku_token(token: str, start: int, text: str, model: str, p
     return False
 
 
-def _other_sku_spans(text: str, model: str, policy: Dict[str, Any]) -> List[Tuple[int, int, str]]:
+def _other_sku_spans(
+    text: str,
+    brand: str,
+    model: str,
+    cfg: Dict[str, Any],
+    policy: Dict[str, Any],
+) -> List[Tuple[int, int, str]]:
     out: List[Tuple[int, int, str]] = []
     # Conservador: so tokens com estrutura de codigo; palavras comuns nao viram fronteira.
     for m in re.finditer(r"(?<![A-Za-z0-9])([A-Za-z0-9][A-Za-z0-9._/-]{4,})(?![A-Za-z0-9])", safe(text)):
         token = m.group(1)
-        if _looks_like_other_sku_token(token, m.start(), text, model, policy):
+        if _looks_like_other_sku_token(token, m.start(), text, brand, model, cfg, policy):
             out.append((m.start(), m.end(), token))
     return out
 
@@ -1506,7 +1572,7 @@ def _isolate_target_block(
     if not (title_url_target or body_target or search_target):
         return {"decision": "REJECT_WRONG_MODEL", "reason": "SKU alvo nao aparece em TITLE/URL/conteudo extraido", "content": "", "flags": ["NO_TARGET_MODEL"], "other_skus": []}
 
-    other_spans = _other_sku_spans(raw, model, policy)
+    other_spans = _other_sku_spans(raw, brand, model, cfg, policy)
     generic = _term_present(f"{title}\n{url}\n{raw[:1200]}", generic_terms)
     multi = bool(other_spans)
     flags: List[str] = []
@@ -1544,10 +1610,10 @@ def _isolate_target_block(
             # Em fonte dedicada, Extract pode omitir o SKU no chunk; aceita apenas
             # chunk sem outro SKU e sem heading de related/compatibilidade.
             if title_url_target and bool(iso.get("allow_dedicated_page_chunks_without_repeated_sku", True)):
-                if not _other_sku_spans(chunk, model, policy) and not _term_present(chunk, related_terms):
+                if not _other_sku_spans(chunk, brand, model, cfg, policy) and not _term_present(chunk, related_terms):
                     isolated_regions.append(chunk)
             continue
-        other = _other_sku_spans(chunk, model, policy)
+        other = _other_sku_spans(chunk, brand, model, cfg, policy)
         for a, b in target_spans:
             left = max(0, a - window)
             right = min(len(chunk), b + window)
@@ -1576,7 +1642,7 @@ def _isolate_target_block(
     if not isolated:
         return {"decision": "REJECT_NON_ISOLATABLE", "reason": "SKU existe, mas nao foi possivel separar bloco target confiavel", "content": "", "flags": flags + ["TARGET_ISOLATION_FAILED"], "other_skus": [x[2] for x in other_spans]}
 
-    residual_other = _other_sku_spans(isolated, model, policy)
+    residual_other = _other_sku_spans(isolated, brand, model, cfg, policy)
     if len(residual_other) > max_other:
         return {"decision": "REJECT_NON_ISOLATABLE", "reason": f"Bloco isolado ainda contem {len(residual_other)} SKU(s) concorrente(s)", "content": "", "flags": flags + ["RESIDUAL_OTHER_SKU"], "other_skus": [x[2] for x in residual_other]}
 
@@ -2211,7 +2277,7 @@ def _prepare_results_for_persistence(rows: Sequence[Dict[str, Any]], cfg: Dict[s
 
 
 def _llm_evidence_context(brand: str, model: str, entries: Sequence[Dict[str, Any]], max_sources: int = 6) -> str:
-    """Contexto pronto para chat/LLM; REJECTED fica fora por padrão."""
+    """Contexto confirmado/auxiliar para LLM; REJECTED nunca entra aqui."""
     usable = [
         x for x in entries
         if isinstance(x, dict)
@@ -2222,6 +2288,46 @@ def _llm_evidence_context(brand: str, model: str, entries: Sequence[Dict[str, An
     for idx, row in enumerate(usable, 1):
         lines.extend([
             f"SOURCE {idx} [{safe(row.get('tier'))}] [{safe(row.get('identity'))}]",
+            f"TITLE: {safe(row.get('title'))}",
+            f"URL: {safe(row.get('url'))}",
+            f"EVIDENCE: {safe(row.get('evidence_excerpt'))}",
+        ])
+    return "\n".join(lines).strip()
+
+
+def _llm_unverified_review_context(
+    brand: str,
+    model: str,
+    entries: Sequence[Dict[str, Any]],
+    max_sources: int = 4,
+) -> str:
+    """Contexto separado para investigação humana/LLM; nunca autoriza classificação.
+
+    Só inclui rejeições por identidade/isolamento. Wrong-model, compatibility-only
+    e related-only ficam fora para reduzir risco de falso positivo.
+    """
+    allowed_decisions = {
+        "REJECT_WEAK_IDENTITY",
+        "REJECT_GENERIC_NO_TARGET_BLOCK",
+        "REJECT_NON_ISOLATABLE",
+    }
+    usable = [
+        x for x in entries
+        if isinstance(x, dict)
+        and safe(x.get("tier")) == "REJECTED"
+        and safe(x.get("decision")) in allowed_decisions
+        and safe(x.get("evidence_excerpt"))
+    ][:max(0, int(max_sources or 0))]
+    if not usable:
+        return ""
+    lines = [
+        f"PRODUCT: {brand} | {model}",
+        "WARNING: UNVERIFIED REVIEW CONTEXT. These sources failed automatic identity/isolation.",
+        "Use them only to investigate the product; do not treat them as confirmed identity.",
+    ]
+    for idx, row in enumerate(usable, 1):
+        lines.extend([
+            f"REVIEW SOURCE {idx} [{safe(row.get('decision'))}] [{safe(row.get('identity'))}]",
             f"TITLE: {safe(row.get('title'))}",
             f"URL: {safe(row.get('url'))}",
             f"EVIDENCE: {safe(row.get('evidence_excerpt'))}",
@@ -3065,7 +3171,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
 
     print()
     print("=" * 86)
-    print(" R9.6p6 PRÉ-COLETA — 1 SEARCH / SOURCE SIEVE / EVIDENCE ENRICHMENT")
+    print(f" {COLLECTION_LABEL} PRÉ-COLETA — 1 SEARCH / SOURCE SIEVE / EVIDENCE ENRICHMENT")
     print("=" * 86)
     for label in [
         "Linhas recebidas", "Linhas válidas", "Linhas inválidas", "Produtos únicos por business_key",
@@ -3102,7 +3208,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     pcfg = _provider_cfg(cfg, provider)
     limiter = RateLimiter(float(pcfg.get("requests_per_minute", 30) or 30))
     db = ClassificationDB(db_path)
-    run_id = db.start_run("collect", rules.hash, f"SEARCH_R9_6:{provider}")
+    run_id = db.start_run("collect", rules.hash, f"SEARCH_{COLLECTION_LABEL}:{provider}")
     writer = TavilyWritableStore(cache_path)  # nome legado; payload agora registra provider explicitamente
     product_rows: List[Dict[str, Any]] = []
     source_rows: List[Dict[str, Any]] = []
@@ -3126,9 +3232,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 writer.put(
                     brand, model, payload,
                     archive_reason=(
-                        f"RECOLLECT_{provider.upper()}_R9_6"
+                        f"RECOLLECT_{provider.upper()}_{COLLECTION_LABEL}"
                         if prior_state in {"RAW_OK", "RAW_OK_MERGED"}
-                        else f"COLLECT_{provider.upper()}_R9_6"
+                        else f"COLLECT_{provider.upper()}_{COLLECTION_LABEL}"
                     ),
                 )
                 curated = coll.get("curated_results", []) or []
@@ -3163,11 +3269,11 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 for q in coll.get("query_audit", []) or []:
                     query_rows.append({"Marca": brand, "Modelo": model, **q})
                 db.event(
-                    run_id, key, "SEARCH_R9_6_SAVED",
+                    run_id, key, f"SEARCH_{COLLECTION_LABEL}_SAVED",
                     f"provider={provider}; state={state}; raw={raw_n}; curated={len(curated)}; requests={req_count}; credits={reported_credits}",
                 )
                 LOG.info(
-                    "COLETA R9.6 %d/%d | %s %s | provider=%s | state=%s | raw=%d curated=%d | requests=%d | credits=%s",
+                    f"COLETA {COLLECTION_LABEL} %d/%d | %s %s | provider=%s | state=%s | raw=%d curated=%d | requests=%d | credits=%s",
                     idx, len(candidates), brand, model, provider, state, raw_n, len(curated), req_count,
                     (reported_credits if reported_credits is not None else "N/A"),
                 )
@@ -3192,9 +3298,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 failure = _failed_collection_payload(
                     brand, model, provider, cfg, "REQUEST_ATTEMPTED_NO_AUTO_RETRY", safe(exc)
                 )
-                writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_REQUEST_ERROR_R9_6")
+                writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_REQUEST_ERROR_{COLLECTION_LABEL}")
                 total_requests += 1
-                db.event(run_id, key, "SEARCH_R9_6_ERROR_NO_RETRY", safe(exc))
+                db.event(run_id, key, f"SEARCH_{COLLECTION_LABEL}_ERROR_NO_RETRY", safe(exc))
                 product_rows.append({
                     "Marca": brand, "Modelo": model, "Provider": provider,
                     "Estado Anterior": prior_state, "Collection State": "REQUEST_ATTEMPTED_NO_AUTO_RETRY",
@@ -3210,7 +3316,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             f"executados={len(product_rows)} planejados={len(candidates)} requests={total_requests} provider={provider}",
         )
         LOG.info(
-            "COLLECTION R9.6 FINAL | provider=%s | produtos=%d | requests=%d | hard_cap=%d/produto | relatório=%s",
+            f"COLLECTION {COLLECTION_LABEL} FINAL | provider=%s | produtos=%d | requests=%d | hard_cap=%d/produto | relatório=%s",
             provider, len(product_rows), total_requests, MAX_COLLECTION_REQUESTS_PER_PRODUCT, report_path,
         )
         return completed
@@ -7322,6 +7428,8 @@ def build_classification_cohort(
     hard_lock: Optional[set] = None,
     max_items: int = 0,
     reprocess: bool = False,
+    allowed_keys: Optional[set] = None,
+    allow_safe_auxiliary_rescue: bool = True,
 ) -> Tuple[List[Tuple[str, str, str]], List[Tuple[str, str, str]], Dict[str, int], str]:
     """Seleciona itens realmente classificáveis para a opção CLASSIFICAÇÃO.
 
@@ -7343,11 +7451,17 @@ def build_classification_cohort(
         "classification_ready_available": 0,
         "classification_partial_available": 0,
         "classification_rescue_available": 0,
+        "classification_safe_aux_rescue_available": 0,
+        "classification_outside_input_skipped": 0,
         "classification_no_evidence_skipped": 0,
         "classification_raw_unavailable_skipped": 0,
     }
 
+    allowed_keys = set(allowed_keys or [])
     for brand, model, key in store.catalog():
+        if allowed_keys and key not in allowed_keys:
+            stats["classification_outside_input_skipped"] += 1
+            continue
         if key in hard_lock:
             if key in manual:
                 stats["cohort_manual_lock"] += 1
@@ -7366,6 +7480,16 @@ def build_classification_cohort(
         collection = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
         state = safe(collection.get("state"))
         curated_count = len([x for x in (collection.get("curated_results", []) or []) if isinstance(x, dict)])
+        evidence_cache = [x for x in (collection.get("evidence_cache", []) or []) if isinstance(x, dict)]
+        safe_aux_count = sum(
+            1 for x in evidence_cache
+            if safe(x.get("tier")) == "AUXILIARY_REVIEW_ONLY"
+            and safe(x.get("identity")) in {"STRONG", "PROBABLE"}
+            and bool(x.get("eligible_for_llm_rescue", True))
+            and safe(x.get("decision")) not in {
+                "REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY"
+            }
+        )
 
         # READY é o material ideal para o stress do classificador. PARTIAL ainda
         # possui evidência curada e deve vir em seguida. Estados legados com
@@ -7381,6 +7505,11 @@ def build_classification_cohort(
         elif curated_count > 0:
             priority = 2
             stats["classification_rescue_available"] += 1
+        elif allow_safe_auxiliary_rescue and safe_aux_count > 0:
+            # Somente rota de rescue: Stage 1 poderá usar TITLE_ONLY_RESCUE.
+            # Isso não transforma AUXILIARY em PRIMARY e não reduz o gate STRONG de AUTO.
+            priority = 3
+            stats["classification_safe_aux_rescue_available"] += 1
         else:
             stats["classification_no_evidence_skipped"] += 1
             continue
@@ -7876,6 +8005,23 @@ def run_pipeline(
 
         if explicit_targets is None:
             if args.mode == "classify":
+                flow_cfg = cfg.get("classification_flow", {}) or {}
+                restrict_to_input = bool(flow_cfg.get("restrict_classify_to_input", True))
+                allowed_keys: Optional[set] = None
+                if restrict_to_input:
+                    if input_path is None or not input_path.exists():
+                        raise RuntimeError(
+                            "CLASSIFICATION_INPUT_SCOPE: arquivo de entrada não encontrado; "
+                            "classificação foi bloqueada para não consumir itens históricos do cache."
+                        )
+                    allowed_keys = {
+                        row.key for row in read_input_rows(input_path)
+                        if row.valid and row.key
+                    }
+                    LOG.info(
+                        "CLASSIFICATION INPUT SCOPE | arquivo=%s | business_keys=%d | historico_cache_excluido=SIM",
+                        input_path, len(allowed_keys),
+                    )
                 cohort, targets, cohort_stats, cohort_hash = build_classification_cohort(
                     store,
                     processed=processed,
@@ -7883,6 +8029,8 @@ def run_pipeline(
                     hard_lock=hard_lock,
                     max_items=args.max_items,
                     reprocess=args.reprocess,
+                    allowed_keys=allowed_keys,
+                    allow_safe_auxiliary_rescue=bool(flow_cfg.get("allow_safe_auxiliary_rescue", True)),
                 )
             else:
                 cohort, targets, cohort_stats, cohort_hash = build_pilot_cohort(
@@ -7939,13 +8087,15 @@ def run_pipeline(
         )
         if args.mode == "classify" and explicit_targets is None:
             LOG.info(
-                "CLASSIFICATION QUEUE | targets=%d | ready_disponiveis=%d | partial_disponiveis=%d | "
-                "legacy_curated_disponiveis=%d | no_evidence_fora_da_fila=%d | raw_indisponivel=%d | "
+                "CLASSIFICATION QUEUE | targets=%d | ready=%d | partial=%d | legacy_curated=%d | "
+                "safe_aux_rescue=%d | fora_input=%d | no_evidence_fora_da_fila=%d | raw_indisponivel=%d | "
                 "limite_aplicado_apos_filtros=SIM",
                 len(targets),
                 cohort_stats.get("classification_ready_available", 0),
                 cohort_stats.get("classification_partial_available", 0),
                 cohort_stats.get("classification_rescue_available", 0),
+                cohort_stats.get("classification_safe_aux_rescue_available", 0),
+                cohort_stats.get("classification_outside_input_skipped", 0),
                 cohort_stats.get("classification_no_evidence_skipped", 0),
                 cohort_stats.get("classification_raw_unavailable_skipped", 0),
             )
@@ -8408,6 +8558,8 @@ def validate_classification_flow_policy(cfg: Dict[str, Any]) -> List[str]:
         "no_automatic_secondary_search",
         "repair_type_taxonomy_conflict",
         "review_is_last_resort",
+        "restrict_classify_to_input",
+        "allow_safe_auxiliary_rescue",
     )
     for key in required_true:
         if not bool(flow.get(key, False)):
@@ -8553,7 +8705,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print(" COLLECTION HARD RULE: 1 produto = no máximo 1 request | sem retry/fallback/extract/advanced")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 86)
-    print("1 - COLETA / EXTRAÇÃO R9.6p7.2 (1 REQUEST/PRODUTO)")
+    print(f"1 - COLETA / EXTRAÇÃO {COLLECTION_LABEL} (1 REQUEST/PRODUTO)")
     print("2 - CLASSIFICAÇÃO")
     print("3 - PROCESSO COMPLETO")
     print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
@@ -8640,7 +8792,7 @@ def export_evidence_bundle(args: argparse.Namespace, cfg: Dict[str, Any]) -> Non
     cache_path = Path(args.cache or cfg["files"]["cache"])
     output_path = Path(
         args.evidence_output
-        or (cfg.get("files", {}) or {}).get("evidence_export_jsonl", "Evidence_Bundle_v4_0_7.jsonl")
+        or (cfg.get("files", {}) or {}).get("evidence_export_jsonl", "Evidence_Bundle_v4_0_7_1.jsonl")
     )
     store = TavilyReadOnlyStore(cache_path)
     tmp = output_path.with_suffix(output_path.suffix + ".tmp")
@@ -8685,6 +8837,12 @@ def export_evidence_bundle(args: argparse.Namespace, cfg: Dict[str, Any]) -> Non
                     "quality": quality,
                     "sources": entries,
                     "llm_context": _llm_evidence_context(brand, model, entries, max_sources=6),
+                    "review_context_unverified": _llm_unverified_review_context(
+                        brand,
+                        model,
+                        entries,
+                        max_sources=int((cfg.get("classification_flow", {}) or {}).get("max_unverified_review_sources", 4) or 4),
+                    ),
                 }
                 fh.write(json.dumps(bundle, ensure_ascii=False, separators=(",", ":")) + "\n")
                 exported += 1
