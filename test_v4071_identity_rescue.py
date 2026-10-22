@@ -25,15 +25,12 @@ class FakeStore:
 
 
 class IdentityRescueV4071Tests(unittest.TestCase):
-    def test_anthbot_eu_suffix_is_search_only(self):
-        self.assertEqual(
-            p.derive_search_model("ANTHBOT", "GENIE 1000 EU", CFG),
-            "GENIE 1000",
-        )
-        self.assertEqual(
-            p.derive_search_model("ANTHBOT", "GENIE 3000 EU", CFG),
-            "GENIE 3000",
-        )
+    def test_anthbot_eu_suffix_is_structural_identity_core(self):
+        suffixes = CFG["identity"].get("regional_suffixes", [])
+        v1000 = dict(p._model_identity_variants("GENIE 1000 EU", suffixes))
+        v3000 = dict(p._model_identity_variants("GENIE 3000 EU", suffixes))
+        self.assertEqual(v1000["genie1000"], "STRUCTURAL_EDGE_DECORATOR")
+        self.assertEqual(v3000["genie3000"], "STRUCTURAL_EDGE_DECORATOR")
 
     def test_anthbot_compact_published_title_becomes_strong(self):
         model = p.derive_search_model("ANTHBOT", "GENIE 1000 EU", CFG)
@@ -64,9 +61,8 @@ class IdentityRescueV4071Tests(unittest.TestCase):
         )
         self.assertNotIn(meta["level"], {"STRONG", "PROBABLE"})
 
-    def test_milwaukee_platform_suffix_is_not_part_of_sku_identity(self):
-        model = p.derive_search_model("MILWAUKEE", "2446 21XC M12", CFG)
-        self.assertEqual(model, "2446 21XC")
+    def test_milwaukee_platform_suffix_is_not_required_for_sku_identity(self):
+        model = "2446 21XC M12"
         meta = p._source_identity_for_result(
             "MILWAUKEE",
             model,

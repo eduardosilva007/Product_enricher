@@ -16,17 +16,27 @@ class IdentityRuntimeGuardV4072Tests(unittest.TestCase):
     def test_runtime_contract_passes_release_config(self):
         self.assertEqual(p.validate_identity_runtime_contract(CFG), [])
 
-    def test_milwaukee_hidden_brand_character_still_gets_platform_suffix_removed(self):
-        self.assertEqual(
-            p.derive_search_model("MILWAUKEE\u200b", "2446 21XC M12", CFG),
-            "2446 21XC",
+    def test_milwaukee_hidden_brand_character_does_not_break_structural_identity(self):
+        meta = p._source_identity_for_result(
+            "MILWAUKEE\u200b",
+            "2446 21XC M12",
+            {
+                "title": "Milwaukee M12 2446-21XC Grease Gun Kit",
+                "url": "https://example.com/2446-21xc",
+                "content": "",
+            },
+            CFG,
         )
+        self.assertEqual(meta["level"], "STRONG")
 
-    def test_milwaukee_runtime_contract_fails_if_suffix_rule_drifts(self):
+    def test_milwaukee_runtime_contract_fails_if_structural_profile_drifts(self):
         bad = copy.deepcopy(CFG)
-        bad["identity"]["operational_suffixes_by_brand"]["MILWAUKEE"] = []
+        bad["identity"]["structural_sku_core"]["edge_decorator_regexes"] = [
+            x for x in bad["identity"]["structural_sku_core"]["edge_decorator_regexes"]
+            if "M(?:12|18)" not in x
+        ]
         errors = p.validate_identity_runtime_contract(bad)
-        self.assertTrue(any("2446 21XC M12" in x for x in errors))
+        self.assertTrue(any("edge_decorator_regexes" in x for x in errors))
 
     def test_body_target_is_rejected_when_title_is_another_explicit_sku(self):
         result = p._isolate_target_block(

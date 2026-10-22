@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.7.2-identity-runtime-guard / Collection R9.6p7.2.2
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.7.3-structural-sku-core / Collection R9.6p7.2.3
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -56,14 +56,25 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
 
-PIPELINE_VERSION = "4.0.7.2-identity-runtime-guard"
+PIPELINE_VERSION = "4.0.7.3-structural-sku-core"
 PROMPT_VERSION = "2026-10-13-v19-clef-joint-repair-identity-guard"
 DEFAULT_CLEF_MODEL = "clef"
-BUILD_LABEL = "v4.0.7.2 Identity Runtime Guard + Evidence Cache Hardening"
-COLLECTION_ENGINE_VERSION = "2026-10-22-r9.6p7.2.2-identity-runtime-guard"
-COLLECTION_LABEL = "R9.6p7.2.2"
-IDENTITY_PROFILE_VERSION = "2026-10-22-safe-brand-key-v2"
+BUILD_LABEL = "v4.0.7.3 Structural SKU Core + Evidence Cache Hardening"
+COLLECTION_ENGINE_VERSION = "2026-10-22-r9.6p7.2.3-structural-sku-core"
+COLLECTION_LABEL = "R9.6p7.2.3"
+IDENTITY_PROFILE_VERSION = "2026-10-22-structural-sku-core-v3"
 EVIDENCE_CACHE_SCHEMA_VERSION = "1"
+
+DEFAULT_STRUCTURAL_EDGE_DECORATOR_REGEXES = (
+    r"^M(?:12|18)$",
+    r"^(?:EU|US|UK|AU)$",
+    r"^\d+(?:[.,]\d+)?V(?:AC|DC)?$",
+    r"^\d+(?:[.,]\d+)?AH$",
+    r"^\d+(?:[.,]\d+)?HZ$",
+    r"^\d+(?:[.,]\d+)?W$",
+)
+STRUCTURAL_CORE_MIN_COMPACT_CHARS = 6
+STRUCTURAL_CORE_MAX_EDGE_DECORATORS = 2
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
 
@@ -2805,6 +2816,14 @@ def _dedupe_curated(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return list(by_url.values())
 
 
+def _identity_variants_audit(model: str, cfg: Dict[str, Any]) -> str:
+    suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
+    return " | ".join(
+        f"{value}[{reason}]"
+        for value, reason in _model_identity_variants(model, suffixes)
+    )
+
+
 def search_product_once(
     brand: str,
     model: str,
@@ -2828,6 +2847,7 @@ def search_product_once(
 
     provider = provider.casefold().strip()
     search_model = derive_search_model(brand, model, cfg)
+    identity_variants_audit = _identity_variants_audit(model, cfg)
     query_model = derive_query_model(brand, model, cfg)
     ccfg = _collection_runtime_cfg(cfg)
     template = safe(ccfg.get("query_template")) or "{brand} {search_model}"
@@ -2939,6 +2959,7 @@ def search_product_once(
         "reported_credits": usage.get("reported_credits"),
         "max_results_requested": usage.get("max_results_requested"),
         "raw_content_requested": bool(usage.get("raw_content_requested")),
+        "identity_variants": identity_variants_audit,
     }]
 
     # v4.0.7: cria Evidence Cache antes de descartar raw_content integral.
@@ -2965,6 +2986,7 @@ def search_product_once(
             "brand_original": brand,
             "model_original": model,
             "search_model": search_model,
+            "identity_variants": identity_variants_audit,
             "query": query,
             "query_integrity": query_decision,
             "query_flags": query_flags,
@@ -2990,6 +3012,7 @@ def search_product_once(
             "provider": provider,
             "state": state,
             "search_model": search_model,
+            "identity_variants": identity_variants_audit,
             "curated_results": curated,
             "evidence_cache_schema": EVIDENCE_CACHE_SCHEMA_VERSION,
             "evidence_cache": evidence_cache,
@@ -3314,6 +3337,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 reported_credits = usage.get("reported_credits")
                 product_rows.append({
                     "Marca": brand, "Modelo": model, "Search Model": safe(coll.get("search_model")),
+                    "Identity Variants": safe(coll.get("identity_variants")),
                     "Provider": provider, "Estado Anterior": prior_state, "Collection State": state,
                     "RAW Results": raw_n, "Curated Sources": len(curated),
                     "Provider Requests": req_count, "Provider Units": usage.get("provider_units"),
@@ -3326,6 +3350,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 for s in coll.get("source_audit", []) or []:
                     source_rows.append({
                         "Marca": brand, "Modelo": model, "Search Model": safe(coll.get("search_model")),
+                        "Identity Variants": safe(coll.get("identity_variants")),
                         "Provider": provider,
                         "URL": s.get("url"), "Title": s.get("title"), "Provider Rank Score": s.get("tavily_score"),
                         "Identity Before": s.get("identity_before"), "Model Field": s.get("model_match_field_before"),
@@ -3550,12 +3575,51 @@ def _model_identity_norm(value: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _structural_core_is_specific(tokens: Sequence[str]) -> bool:
+    """Garante que remover um decorator não transforme o alvo em código genérico."""
+    parts = [safe(x) for x in tokens if safe(x)]
+    if len(parts) < 2:
+        return False
+    compact_core = compact(" ".join(parts))
+    if len(compact_core) < STRUCTURAL_CORE_MIN_COMPACT_CHARS:
+        return False
+    if not re.search(r"\d", compact_core):
+        return False
+
+    mixed_token = any(
+        bool(re.search(r"[a-z]", compact(tok), flags=re.I))
+        and bool(re.search(r"\d", compact(tok)))
+        for tok in parts
+    )
+    long_numeric_plus_alpha = (
+        any(compact(tok).isdigit() and len(compact(tok)) >= 4 for tok in parts)
+        and any(bool(re.search(r"[a-z]", compact(tok), flags=re.I)) for tok in parts)
+    )
+    return mixed_token or long_numeric_plus_alpha
+
+
+def _is_structural_edge_decorator(token: str, regional_suffixes: Sequence[str]) -> bool:
+    raw = canonical_display(token)
+    if not raw:
+        return False
+    suffixes = {compact(x) for x in regional_suffixes if compact(x)}
+    if compact(raw) in suffixes:
+        return True
+    for expr in DEFAULT_STRUCTURAL_EDGE_DECORATOR_REGEXES:
+        try:
+            if re.fullmatch(expr, raw, flags=re.I):
+                return True
+        except re.error:
+            continue
+    return False
+
+
 def _model_identity_variants(model: str, regional_suffixes: Sequence[str]) -> List[Tuple[str, str]]:
     """Variações equivalentes de SKU sem fuzzy/edit-distance.
 
-    Mantém o comportamento estável R5 e acrescenta apenas equivalências
-    estruturais determinísticas: separadores, sufixo regional e revisão decimal.
-    Retorna (compact_variant, reason).
+    O SKU original é sempre preservado. Variantes CORE removem apenas decorators
+    estruturais nas bordas (plataforma/região/especificação) quando o restante
+    continua sendo um identificador suficientemente específico.
     """
     raw = _model_identity_norm(model)
     if not raw:
@@ -3570,6 +3634,32 @@ def _model_identity_variants(model: str, regional_suffixes: Sequence[str]) -> Li
     add(raw, "EXACT")
     suffixes = {compact(x) for x in regional_suffixes if compact(x)}
     tokens = raw.split()
+
+    # Structural SKU Core: remove somente decorators nas bordas, no máximo dois,
+    # preservando o modelo original como EXACT. Isso resolve casos como
+    # "2446 21XC M12" -> "2446 21XC" e "GENIE 1000 EU" -> "GENIE 1000"
+    # sem aceitar aproximação textual.
+    queue: List[Tuple[List[str], int]] = [(list(tokens), 0)]
+    seen_states = {tuple(tokens)}
+    while queue:
+        parts, removed = queue.pop(0)
+        if removed >= STRUCTURAL_CORE_MAX_EDGE_DECORATORS or len(parts) < 3:
+            continue
+        candidates: List[List[str]] = []
+        if _is_structural_edge_decorator(parts[-1], regional_suffixes):
+            candidates.append(parts[:-1])
+        if _is_structural_edge_decorator(parts[0], regional_suffixes):
+            candidates.append(parts[1:])
+        for core_parts in candidates:
+            state = tuple(core_parts)
+            if state in seen_states:
+                continue
+            seen_states.add(state)
+            if not _structural_core_is_specific(core_parts):
+                continue
+            add(" ".join(core_parts), "STRUCTURAL_EDGE_DECORATOR")
+            queue.append((core_parts, removed + 1))
+
     if len(tokens) > 1 and compact(tokens[-1]) in suffixes:
         add(" ".join(tokens[:-1]), "REGIONAL_SUFFIX")
 
@@ -8686,7 +8776,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
         qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"], qg["real_reference_only"],
     )
 
-    # Contrato operacional v4.0.7: uma consulta automática por produto e Clef
+    # Contrato operacional v4.0.7.3: uma consulta automática por produto e Clef
     # obrigatório para toda cauda não resolvida por regra com evidência útil.
     cost_errors = validate_collection_cost_policy(cfg)
     if cost_errors:
@@ -8697,7 +8787,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
     if flow_errors:
         for e in flow_errors:
             LOG.error(e)
-        raise RuntimeError("Contrato de classificação v4.0.7 inválido; execução bloqueada.")
+        raise RuntimeError("Contrato de classificação v4.0.7.3 inválido; execução bloqueada.")
     LOG.info(
         "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
         "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
@@ -8864,27 +8954,71 @@ def interactive_menu(base: Path) -> argparse.Namespace:
 
 
 def validate_identity_runtime_contract(cfg: Dict[str, Any]) -> List[str]:
-    """Valida regressões de Search Model antes de qualquer consumo de Search."""
+    """Valida Search Model e identidade estrutural antes de consumir Search."""
     identity = cfg.get("identity", {}) or {}
     cases = identity.get("runtime_regression_contract", []) or []
     if not isinstance(cases, list) or not cases:
         return ["IDENTITY_RUNTIME_CONTRACT: runtime_regression_contract ausente/vazio"]
+
+    structural_cfg = identity.get("structural_sku_core", {}) or {}
+    configured_regexes = tuple(safe(x) for x in (structural_cfg.get("edge_decorator_regexes", []) or []) if safe(x))
+    if configured_regexes and configured_regexes != DEFAULT_STRUCTURAL_EDGE_DECORATOR_REGEXES:
+        return [
+            "IDENTITY_RUNTIME_CONTRACT: edge_decorator_regexes diverge do perfil estrutural versionado"
+        ]
+    if bool(structural_cfg.get("fuzzy_matching", False)):
+        return ["IDENTITY_RUNTIME_CONTRACT: fuzzy_matching deve permanecer false"]
+
     errors: List[str] = []
+    suffixes = identity.get("regional_suffixes", []) or []
+    rank = {"WEAK": 0, "CONTEXTUAL": 1, "PROBABLE": 2, "STRONG": 3}
     for idx, case in enumerate(cases, 1):
         if not isinstance(case, dict):
             errors.append(f"IDENTITY_RUNTIME_CONTRACT[{idx}]: caso inválido")
             continue
         brand = safe(case.get("brand"))
         model = safe(case.get("model"))
-        expected = safe(case.get("expected_search_model"))
-        if not brand or not model or not expected:
-            errors.append(f"IDENTITY_RUNTIME_CONTRACT[{idx}]: brand/model/expected ausente")
+        if not brand or not model:
+            errors.append(f"IDENTITY_RUNTIME_CONTRACT[{idx}]: brand/model ausente")
             continue
-        actual = derive_search_model(brand, model, cfg)
-        if canonical_display(actual) != canonical_display(expected):
-            errors.append(
-                f"IDENTITY_RUNTIME_CONTRACT[{idx}]: {brand} {model} esperado={expected} atual={actual}"
-            )
+
+        expected_search = safe(case.get("expected_search_model"))
+        if expected_search:
+            actual_search = derive_search_model(brand, model, cfg)
+            if canonical_display(actual_search) != canonical_display(expected_search):
+                errors.append(
+                    f"IDENTITY_RUNTIME_CONTRACT[{idx}]: SearchModel {brand} {model} "
+                    f"esperado={expected_search} atual={actual_search}"
+                )
+
+        expected_variant = safe(case.get("expected_identity_variant"))
+        if expected_variant:
+            variants = {value for value, _ in _model_identity_variants(model, suffixes)}
+            if compact(expected_variant) not in variants:
+                errors.append(
+                    f"IDENTITY_RUNTIME_CONTRACT[{idx}]: CORE {brand} {model} "
+                    f"esperado={expected_variant} variantes={sorted(variants)}"
+                )
+
+        expected_identity = safe(case.get("expected_source_identity"))
+        expected_identity_max = safe(case.get("expected_source_identity_max"))
+        if expected_identity or expected_identity_max:
+            res = {
+                "title": safe(case.get("title")),
+                "url": safe(case.get("url")),
+                "content": safe(case.get("content")),
+            }
+            meta = _source_identity_for_result(brand, model, res, cfg)
+            actual_level = safe(meta.get("level")) or "WEAK"
+            if expected_identity and actual_level != expected_identity:
+                errors.append(
+                    f"IDENTITY_RUNTIME_CONTRACT[{idx}]: identity esperado={expected_identity} atual={actual_level}"
+                )
+            if expected_identity_max and rank.get(actual_level, 0) > rank.get(expected_identity_max, 0):
+                errors.append(
+                    f"IDENTITY_RUNTIME_CONTRACT[{idx}]: identity máximo={expected_identity_max} atual={actual_level}"
+                )
+
     return errors
 
 
@@ -8914,7 +9048,7 @@ def export_evidence_bundle(args: argparse.Namespace, cfg: Dict[str, Any]) -> Non
     cache_path = Path(args.cache or cfg["files"]["cache"])
     output_path = Path(
         args.evidence_output
-        or (cfg.get("files", {}) or {}).get("evidence_export_jsonl", "Evidence_Bundle_v4_0_7_2.jsonl")
+        or (cfg.get("files", {}) or {}).get("evidence_export_jsonl", "Evidence_Bundle_v4_0_7_3.jsonl")
     )
     store = TavilyReadOnlyStore(cache_path)
     tmp = output_path.with_suffix(output_path.suffix + ".tmp")
