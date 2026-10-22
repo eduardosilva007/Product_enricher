@@ -68,10 +68,10 @@ EVIDENCE_CACHE_SCHEMA_VERSION = "1"
 DEFAULT_STRUCTURAL_EDGE_DECORATOR_REGEXES = (
     r"^M(?:12|18)$",
     r"^(?:EU|US|UK|AU)$",
-    r"^\\d+(?:[.,]\\d+)?V(?:AC|DC)?$",
-    r"^\\d+(?:[.,]\\d+)?AH$",
-    r"^\\d+(?:[.,]\\d+)?HZ$",
-    r"^\\d+(?:[.,]\\d+)?W$",
+    r"^\d+(?:[.,]\d+)?V(?:AC|DC)?$",
+    r"^\d+(?:[.,]\d+)?AH$",
+    r"^\d+(?:[.,]\d+)?HZ$",
+    r"^\d+(?:[.,]\d+)?W$",
 )
 STRUCTURAL_CORE_MIN_COMPACT_CHARS = 6
 STRUCTURAL_CORE_MAX_EDGE_DECORATORS = 2
