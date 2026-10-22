@@ -5904,9 +5904,16 @@ def finalize_product(
     curated_count = len([x for x in (collection.get("curated_results", []) or []) if isinstance(x, dict)])
     raw_result_count = len([x for x in ((raw.payload or {}).get("results", []) or []) if isinstance(x, dict)])
     title_rescue_count = sum(1 for src in s1.sources if safe(src.collection_decision) == "ACCEPT_TITLE_ONLY_RESCUE")
+    rescue_only = (
+        curated_count == 0
+        and title_rescue_count > 0
+        and collection_state in {"NO_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE", "PARTIAL_TARGET_EVIDENCE"}
+    )
     consensus_cg, consensus_fam, consensus_reason = taxonomy_consensus_for_review(rules, s1, brand, model)
-    if s1.state == "RESOLVED_RULE":
+    if s1.state == "RESOLVED_RULE" and not rescue_only:
         next_action = "CONCLUIDO"
+    elif s1.state == "RESOLVED_RULE" and rescue_only:
+        next_action = "CLEF_RESCUE_DOUBLE_CHECK"
     elif not s1.type_candidates and ref_identity in {"STRONG", "PROBABLE"}:
         next_action = "JSON_GAP_OU_CLEF_GAP"
     elif not s1.type_candidates and raw_result_count:
@@ -5980,7 +5987,7 @@ def finalize_product(
             "Clef Total Tokens": 0,
         }
 
-    if s1.state == "RESOLVED_RULE":
+    if s1.state == "RESOLVED_RULE" and not rescue_only:
         typ = s1.product_type or "REVISAR"
         power = s1.power or "UNKNOWN"
         tax_evidence = taxonomy_evidence_text(s1.sources, typ)
@@ -6095,6 +6102,9 @@ def finalize_product(
         cg = safe(data.get("category_general"))
         fam = safe(data.get("family"))
         auto_ok, gate_reason = _clef_auto_gate(data, usage, rules, s1, cfg)
+        if rescue_only and auto_ok:
+            auto_ok = False
+            gate_reason = "CLEF_RESCUE_ONLY_DOUBLE_CHECK"
         title, url = _best_target_title(s1, refs, require_strong=auto_ok)
         title, url = _output_title(title, url)
 
@@ -6150,6 +6160,9 @@ def finalize_product(
                 cg = safe(data.get("category_general"))
                 fam = safe(data.get("family"))
                 auto_ok, gate_reason = _clef_auto_gate(data, usage, rules, s1, cfg)
+                if rescue_only and auto_ok:
+                    auto_ok = False
+                    gate_reason = "CLEF_RESCUE_ONLY_DOUBLE_CHECK"
                 title, url = _best_target_title(s1, refs, require_strong=auto_ok)
                 title, url = _output_title(title, url)
                 base_clef.update({
@@ -7457,9 +7470,9 @@ def build_classification_cohort(
         "classification_raw_unavailable_skipped": 0,
     }
 
-    allowed_keys = set(allowed_keys or [])
+    allowed_filter = None if allowed_keys is None else set(allowed_keys)
     for brand, model, key in store.catalog():
-        if allowed_keys and key not in allowed_keys:
+        if allowed_filter is not None and key not in allowed_filter:
             stats["classification_outside_input_skipped"] += 1
             continue
         if key in hard_lock:
@@ -8018,6 +8031,10 @@ def run_pipeline(
                         row.key for row in read_input_rows(input_path)
                         if row.valid and row.key
                     }
+                    if not allowed_keys:
+                        raise RuntimeError(
+                            "CLASSIFICATION_INPUT_SCOPE: arquivo de entrada não possui nenhuma Marca+Modelo válida."
+                        )
                     LOG.info(
                         "CLASSIFICATION INPUT SCOPE | arquivo=%s | business_keys=%d | historico_cache_excluido=SIM",
                         input_path, len(allowed_keys),
