@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-22-r9.6p7.2.2-identity-runtime-guard",
+  "VERSION": "2026-10-22-r9.6p7.2.3-structural-sku-core",
   "DESIGN_PRINCIPLES": [
     "Uma unica Search por produto: sem fallback, rescue, retry automatico, provider Extract ou provider failover.",
     "Busca 100% aberta: sem include_domains, country, language filter ou exact_match.",
@@ -25,7 +25,12 @@
     "Classificação deve respeitar o arquivo de entrada atual quando restrict_classify_to_input=true; cache histórico não pode consumir o piloto.",
     "Brand keys de configuração são resolvidas por identidade compacta, evitando falha por pontuação/espaço/caractere invisível.",
     "Se o target aparece somente no BODY e o TITLE contém outro SKU explícito, a fonte é rejeitada para classificação automática.",
-    "Cada execução valida um contrato de regressão de Search Model antes de consumir qualquer crédito."
+    "Cada execução valida um contrato de regressão de Search Model antes de consumir qualquer crédito.",
+    "Identidade do produto usa SKU original + variantes CORE estruturais; decorators de borda nunca substituem o Modelo original.",
+    "Structural SKU Core é global e determinístico: sem fuzzy, edit-distance ou regra específica por marca para plataformas/regiões comuns.",
+    "Uma variante CORE só existe quando, após remover decorator de borda permitido, sobra identificador suficientemente específico.",
+    "Search query e Identity Core são conceitos separados: uma consulta pode manter tokens úteis enquanto o matcher reconhece o SKU publicado.",
+    "Todos os gates de identidade, Target Isolation, Evidence Cache e Title Rescue usam a mesma família de variantes estruturais."
   ],
   "identity": {
     "direct_accept_levels": [
@@ -40,7 +45,14 @@
     "safe_auxiliary_rescue_levels": [
       "STRONG",
       "PROBABLE"
-    ]
+    ],
+    "structural_sku_core": {
+      "enabled": true,
+      "fuzzy_matching": false,
+      "edge_only": true,
+      "original_variant_always_preserved": true,
+      "secondary_core_never_overrides_original_business_key": true
+    }
   },
   "isolation": {
     "chunk_separator_regex": "\\s*\\[\\.\\.\\.\\]\\s*",
