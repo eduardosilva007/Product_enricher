@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-22-r9.6p7.2.1-identity-rescue",
+  "VERSION": "2026-10-22-r9.6p7.2.2-identity-runtime-guard",
   "DESIGN_PRINCIPLES": [
     "Uma unica Search por produto: sem fallback, rescue, retry automatico, provider Extract ou provider failover.",
     "Busca 100% aberta: sem include_domains, country, language filter ou exact_match.",
@@ -22,7 +22,10 @@
     "Normalização de identidade adicional é somente brand-specific e estrutural; não usa fuzzy/edit-distance.",
     "NO_TARGET_EVIDENCE com título/evidência auxiliar STRONG/PROBABLE pode entrar apenas na rota de rescue; isso nunca torna a fonte PRIMARY nem satisfaz AUTO.",
     "Evidence Bundle pode expor REVIEW_CONTEXT_UNVERIFIED separado; compatibility/related/wrong-model permanecem fora desse contexto por padrão.",
-    "Classificação deve respeitar o arquivo de entrada atual quando restrict_classify_to_input=true; cache histórico não pode consumir o piloto."
+    "Classificação deve respeitar o arquivo de entrada atual quando restrict_classify_to_input=true; cache histórico não pode consumir o piloto.",
+    "Brand keys de configuração são resolvidas por identidade compacta, evitando falha por pontuação/espaço/caractere invisível.",
+    "Se o target aparece somente no BODY e o TITLE contém outro SKU explícito, a fonte é rejeitada para classificação automática.",
+    "Cada execução valida um contrato de regressão de Search Model antes de consumir qualquer crédito."
   ],
   "identity": {
     "direct_accept_levels": [
@@ -138,7 +141,8 @@
     "REJECT_EXTRACT_FAILED",
     "ACCEPT_SOURCE_SIEVE",
     "REJECT_QUERY_IDENTITY_DRIFT",
-    "ACCEPT_SOURCE_SIEVE_BODY_RESCUE"
+    "ACCEPT_SOURCE_SIEVE_BODY_RESCUE",
+    "REJECT_TITLE_OTHER_SKU_BODY_ONLY"
   ],
   "body_identity_rescue": {
     "enabled": true,
