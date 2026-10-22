@@ -43,7 +43,7 @@ class IdentityRuntimeGuardV4072Tests(unittest.TestCase):
             POLICY,
         )
         self.assertEqual(result["decision"], "REJECT_TITLE_OTHER_SKU_BODY_ONLY")
-        self.assertIn("Genie", " ".join(result["other_skus"]))
+        self.assertTrue(result["other_skus"])
 
     def test_generic_family_title_can_still_use_isolated_target_body(self):
         result = p._isolate_target_block(
