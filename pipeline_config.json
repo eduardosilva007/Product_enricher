@@ -124,7 +124,7 @@
         "brand": "MILWAUKEE",
         "model": "2446 21XC M12",
         "title": "Milwaukee 2446-20 M12 Grease Gun",
-        "expected_source_identity_max": "WEAK"
+        "expected_source_identity_max": "CONTEXTUAL"
       },
       {
         "brand": "BRIGGS & STRATTON",
