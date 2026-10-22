@@ -3583,12 +3583,12 @@ def _structural_core_is_specific(tokens: Sequence[str]) -> bool:
     compact_core = compact(" ".join(parts))
     if len(compact_core) < STRUCTURAL_CORE_MIN_COMPACT_CHARS:
         return False
-    if not re.search(r"\\d", compact_core):
+    if not re.search(r"\d", compact_core):
         return False
 
     mixed_token = any(
         bool(re.search(r"[a-z]", compact(tok), flags=re.I))
-        and bool(re.search(r"\\d", compact(tok)))
+        and bool(re.search(r"\d", compact(tok)))
         for tok in parts
     )
     long_numeric_plus_alpha = (
