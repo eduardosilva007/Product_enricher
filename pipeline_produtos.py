@@ -1564,6 +1564,39 @@ def _target_context_has_only_relation(text: str, model: str, cfg: Dict[str, Any]
     return relation_hits == len(spans)
 
 
+def _title_has_conflicting_family_sku(title: str, model: str) -> bool:
+    """Detecta variante explícita da mesma família no TITLE sem fuzzy matching.
+
+    Exemplos bloqueados:
+    - target GENIE 3000; title GENIE 600 / GENIE600
+    - target 2446 21XC; title 2446-20
+
+    A regra só dispara quando o primeiro token estrutural do target é repetido
+    no título e o token de variante imediatamente seguinte é diferente.
+    """
+    normalized_title = strip_accents(safe(title)).casefold()
+    model_tokens = re.findall(r"[A-Za-z]+\d*|\d+[A-Za-z]*", strip_accents(safe(model)))
+    model_tokens = [t for t in model_tokens if compact(t)]
+    if len(model_tokens) < 2:
+        return False
+
+    family = re.escape(model_tokens[0].casefold())
+    expected_variant = compact(model_tokens[1])
+    if not expected_variant:
+        return False
+
+    if re.fullmatch(r"[A-Za-z]+", model_tokens[0]):
+        pattern = rf"(?<![a-z0-9]){family}[\s._/-]*([0-9][a-z0-9]*)"
+    else:
+        pattern = rf"(?<![a-z0-9]){family}[\s._/-]+([a-z0-9]+)"
+
+    for m in re.finditer(pattern, normalized_title, flags=re.I):
+        found = compact(m.group(1))
+        if found and found != expected_variant and any(ch.isdigit() for ch in found):
+            return True
+    return False
+
+
 def _isolate_target_block(
     brand: str,
     model: str,
@@ -1598,13 +1631,17 @@ def _isolate_target_block(
         return {"decision": "REJECT_WRONG_MODEL", "reason": "SKU alvo nao aparece em TITLE/URL/conteudo extraido", "content": "", "flags": ["NO_TARGET_MODEL"], "other_skus": []}
 
     title_other_spans = _other_sku_spans(title, brand, model, cfg, policy)
-    if not title_target and body_target and title_other_spans:
+    title_family_conflict = _title_has_conflicting_family_sku(title, model)
+    if not title_target and body_target and (title_other_spans or title_family_conflict):
+        other_title_tokens = [x[2] for x in title_other_spans]
+        if title_family_conflict and not other_title_tokens:
+            other_title_tokens = ["SAME_FAMILY_DIFFERENT_VARIANT"]
         return {
             "decision": "REJECT_TITLE_OTHER_SKU_BODY_ONLY",
-            "reason": "TITLE aponta para outro SKU; target aparece somente no BODY",
+            "reason": "TITLE aponta para outro SKU/variante; target aparece somente no BODY",
             "content": "",
             "flags": ["TITLE_OTHER_SKU", "BODY_ONLY_TARGET"],
-            "other_skus": [x[2] for x in title_other_spans],
+            "other_skus": other_title_tokens,
         }
 
     other_spans = _other_sku_spans(raw, brand, model, cfg, policy)
