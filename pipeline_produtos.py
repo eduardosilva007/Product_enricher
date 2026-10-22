@@ -56,10 +56,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
 
-PIPELINE_VERSION = "4.0.7.3-structural-sku-core"
+PIPELINE_VERSION = "4.0.7.3.1-input-scoped-recuration"
 PROMPT_VERSION = "2026-10-13-v19-clef-joint-repair-identity-guard"
 DEFAULT_CLEF_MODEL = "clef"
-BUILD_LABEL = "v4.0.7.3 Structural SKU Core + Evidence Cache Hardening"
+BUILD_LABEL = "v4.0.7.3.1 Structural SKU Core + Input-Scoped Recuration"
 COLLECTION_ENGINE_VERSION = "2026-10-22-r9.6p7.2.3-structural-sku-core"
 COLLECTION_LABEL = "R9.6p7.2.3"
 IDENTITY_PROFILE_VERSION = "2026-10-22-structural-sku-core-v3"
@@ -3113,6 +3113,7 @@ def _curate_existing_payload(brand: str, model: str, payload: Dict[str, Any], cf
         "provider": provider,
         "state": state,
         "search_model": search_model,
+        "identity_variants": _identity_variants_audit(model, cfg),
         "curated_results": curated,
         "evidence_cache_schema": EVIDENCE_CACHE_SCHEMA_VERSION,
         "evidence_cache": evidence_cache,
@@ -3431,9 +3432,10 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
 
 
 def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
-    """Recuradoria RAW legado para R9.6p7.2 sem consumir créditos de Search."""
+    """Recuradoria local do cache sem Search; por padrão, escopo = arquivo de entrada atual."""
     cache_path = Path(args.cache or cfg["files"]["cache"])
     report_path = Path(cfg.get("files", {}).get("collection_report_cache_rebuild", "Curadoria_Cache_R9_5.xlsx"))
+    input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
     store = TavilyReadOnlyStore(cache_path)
     writer = TavilyWritableStore(cache_path)
     products: List[Dict[str, Any]] = []
@@ -3441,6 +3443,26 @@ def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], r
     queries: List[Dict[str, Any]] = []
     try:
         catalog = store.catalog()
+        if not bool(getattr(args, "curate_all_cache", False)):
+            if not input_path.exists():
+                raise RuntimeError(
+                    f"CURATION_INPUT_SCOPE: arquivo de entrada não encontrado: {input_path}. "
+                    "Use --curate-all-cache somente quando quiser explicitamente percorrer todo o cache."
+                )
+            allowed_keys = {
+                row.key for row in read_input_rows(input_path)
+                if row.valid and row.key
+            }
+            if not allowed_keys:
+                raise RuntimeError("CURATION_INPUT_SCOPE: arquivo de entrada não possui Marca+Modelo válida.")
+            before = len(catalog)
+            catalog = [row for row in catalog if row[2] in allowed_keys]
+            LOG.info(
+                "CURATION INPUT SCOPE | arquivo=%s | business_keys=%d | cache_total=%d | selecionados=%d | Search=0",
+                input_path, len(allowed_keys), before, len(catalog),
+            )
+        else:
+            LOG.warning("CURATION ALL CACHE | produtos=%d | Search=0 | escopo explícito=TODO_CACHE", len(catalog))
         if args.max_items:
             catalog = catalog[:int(args.max_items)]
         for idx, (brand, model, key) in enumerate(catalog, 1):
@@ -3455,12 +3477,15 @@ def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], r
             writer.put(brand, model, rebuilt, archive_reason="CACHE_CURATED_R9_6P7_2_NO_SEARCH")
             products.append({
                 "Marca": brand, "Modelo": model, "Search Model": coll.get("search_model"),
+                "Identity Variants": coll.get("identity_variants") or _identity_variants_audit(model, cfg),
                 "Collection State": coll.get("state"), "RAW Results": len(rebuilt.get("results", []) or []),
                 "Curated Sources": len(coll.get("curated_results", []) or []), "Tavily Credits": 0, "Data": now_iso(),
             })
             for s in coll.get("source_audit", []) or []:
                 sources.append({
-                    "Marca": brand, "Modelo": model, "URL": s.get("url"), "Title": s.get("title"),
+                    "Marca": brand, "Modelo": model,
+                    "Identity Variants": coll.get("identity_variants") or _identity_variants_audit(model, cfg),
+                    "URL": s.get("url"), "Title": s.get("title"),
                     "Tavily Score": s.get("tavily_score"), "Identity Before": s.get("identity_before"),
                     "Model Field": s.get("model_match_field_before"), "Decision": s.get("decision"), "Reason": s.get("reason"),
                     "Quality Flags": " | ".join(s.get("quality_flags", []) or []), "Other SKUs": " | ".join(s.get("other_skus", []) or []),
@@ -3472,7 +3497,7 @@ def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], r
                 LOG.info("CURADORIA CACHE %d/%d | salvos=%d", idx, len(catalog), len(products))
                 _export_collection_quality_report(products, sources, queries, report_path)
         _export_collection_quality_report(products, sources, queries, report_path)
-        LOG.info("CURADORIA CACHE R9.6p7.2 CONCLUIDA | produtos=%d | creditos Tavily=0 | arquivo=%s", len(products), report_path)
+        LOG.info("CURADORIA CACHE CONCLUIDA | produtos=%d | Search=0 | arquivo=%s", len(products), report_path)
     finally:
         store.close()
         writer.close()
@@ -8855,6 +8880,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata"], default="")
     p.add_argument("--recollect-empty", action="store_true")
     p.add_argument("--recollect-low-evidence", action="store_true")
+    p.add_argument("--curate-all-cache", action="store_true", help="No modo curate, ignora o arquivo de entrada e percorre todo o cache")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p
@@ -8938,8 +8964,11 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     if op == "5":
         return parser.parse_args(["--mode", "repair"])
     if op == "6":
-        limite = _menu_limit("Limite de produtos do cache para piloto (ENTER = todos): ")
+        limite = _menu_limit("Limite de produtos do arquivo de entrada (ENTER = todos): ")
         argv = ["--mode", "curate"]
+        all_cache = input("Curar TODO o cache em vez do arquivo de entrada atual? (S/N, ENTER = N): ").strip().upper()
+        if all_cache == "S":
+            argv += ["--curate-all-cache"]
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
