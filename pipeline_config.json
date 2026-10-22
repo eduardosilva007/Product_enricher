@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-20-v4.0.7-evidence-cache-hardening",
+  "VERSION": "2026-10-22-v4.0.7.1-identity-rescue-fix",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -8,15 +8,15 @@
     "output": "Classificacao_v3.xlsx",
     "inventory_output": "Inventario_v3.xlsx",
     "input": "Base de Produtos.xlsx",
-    "collection_report": "Coleta_Search_R9_6.xlsx",
-    "precollection_report": "Pre_Coleta_R9_6.xlsx",
+    "collection_report": "Coleta_Search_R9_6p7_2_1.xlsx",
+    "precollection_report": "Pre_Coleta_R9_6p7_2_1.xlsx",
     "pending_with_cache": "Pendentes_Com_Cache.xlsx",
     "pending_without_cache": "Pendentes_Sem_Cache.xlsx",
     "baseline_backup_dir": "Backups_Baseline",
     "baseline_audit": "Auditoria_Baseline_R9_5.csv",
     "collection_policy": "collection_quality_policy.json",
-    "collection_report_cache_rebuild": "Curadoria_Cache_R9_6.xlsx",
-    "evidence_export_jsonl": "Evidence_Bundle_v4_0_7.jsonl"
+    "collection_report_cache_rebuild": "Curadoria_Cache_R9_6p7_2_1.xlsx",
+    "evidence_export_jsonl": "Evidence_Bundle_v4_0_7_1.jsonl"
   },
   "evidence": {
     "max_results": 5,
@@ -52,6 +52,17 @@
       ],
       "DONG CHENG": [
         "220V"
+      ],
+      "ANTHBOT": [
+        "EU"
+      ],
+      "MILWAUKEE": [
+        "M12",
+        "M18"
+      ],
+      "MILWAUKEE ELECTRIC T": [
+        "M12",
+        "M18"
       ]
     },
     "embedded_sku_brands": [
@@ -78,7 +89,26 @@
       "\\s+TYPE\\s+[A-Z0-9]{1,4}$"
     ],
     "auto_approval_requires_strong_identity": true,
-    "strong_identity_requires_brand_in_primary_field": true
+    "strong_identity_requires_brand_in_primary_field": true,
+    "search_model_rewrite_rules_by_brand": {
+      "BRIGGSSTRATTON": [
+        {
+          "pattern": "^([A-Z0-9]{6})([A-Z0-9]{4})([A-Z][0-9])([A-Z]{1,2}[0-9]{4})$",
+          "replacement": "\\1 \\2 \\3",
+          "reason": "BRIGGS_MODEL_TYPE_TRIM_PLUS_ASSEMBLY"
+        },
+        {
+          "pattern": "^([A-Z0-9]{6})([A-Z0-9]{4})([A-Z][0-9])$",
+          "replacement": "\\1 \\2 \\3",
+          "reason": "BRIGGS_MODEL_TYPE_TRIM"
+        },
+        {
+          "pattern": "^([A-Z0-9]{6})([A-Z0-9]{4})$",
+          "replacement": "\\1 \\2",
+          "reason": "BRIGGS_MODEL_TYPE"
+        }
+      ]
+    }
   },
   "recovery": {
     "reprocess_stale_auto_approved": true,
@@ -209,12 +239,15 @@
     ],
     "weak_identity_requires_recollection": false,
     "repair_type_taxonomy_conflict": true,
-    "max_clef_repair_attempts": 1
+    "max_clef_repair_attempts": 1,
+    "restrict_classify_to_input": true,
+    "allow_safe_auxiliary_rescue": true,
+    "max_unverified_review_sources": 4
   },
   "release_contract": {
-    "pipeline_version": "4.0.7-evidence-cache-hardening",
-    "collection_engine_version": "2026-10-20-r9.6p7.2-evidence-cache-hardening",
-    "collection_policy_version": "2026-10-20-r9.6p7.2-evidence-cache-hardening",
+    "pipeline_version": "4.0.7.1-identity-rescue-fix",
+    "collection_engine_version": "2026-10-22-r9.6p7.2.1-identity-rescue",
+    "collection_policy_version": "2026-10-22-r9.6p7.2.1-identity-rescue",
     "rules_version": "2026-10-13-v3.0.13-manual-taxonomy-gold-2",
     "evidence_cache_schema": "1"
   }

@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-20-r9.6p7.2-evidence-cache-hardening",
+  "VERSION": "2026-10-22-r9.6p7.2.1-identity-rescue",
   "DESIGN_PRINCIPLES": [
     "Uma unica Search por produto: sem fallback, rescue, retry automatico, provider Extract ou provider failover.",
     "Busca 100% aberta: sem include_domains, country, language filter ou exact_match.",
@@ -18,7 +18,11 @@
     "Fonte PROBABLE pode ser enriquecida/retida para revisão, mas aprovação automática de classificação exige fonte STRONG com Marca+Modelo no TITLE/URL.",
     "Coletas novas persistem somente uma janela target-anchored auditável do raw_content; o corpo integral continua descartado.",
     "Serper/Bright Data: qualquer fetch local útil preserva uma janela target-anchored no cache para reavaliação sem nova Search.",
-    "Modelo e títulos de Search podem gerar TYPE hints de revisão, mas nunca satisfazem sozinhos o gate STRONG de AUTO/LLM final."
+    "Modelo e títulos de Search podem gerar TYPE hints de revisão, mas nunca satisfazem sozinhos o gate STRONG de AUTO/LLM final.",
+    "Normalização de identidade adicional é somente brand-specific e estrutural; não usa fuzzy/edit-distance.",
+    "NO_TARGET_EVIDENCE com título/evidência auxiliar STRONG/PROBABLE pode entrar apenas na rota de rescue; isso nunca torna a fonte PRIMARY nem satisfaz AUTO.",
+    "Evidence Bundle pode expor REVIEW_CONTEXT_UNVERIFIED separado; compatibility/related/wrong-model permanecem fora desse contexto por padrão.",
+    "Classificação deve respeitar o arquivo de entrada atual quando restrict_classify_to_input=true; cache histórico não pode consumir o piloto."
   ],
   "identity": {
     "direct_accept_levels": [
@@ -28,7 +32,12 @@
     "allow_contextual_extract_rescue": false,
     "ready_if_strong_sources": 1,
     "ready_if_probable_sources": 2,
-    "ready_if_exact_isolated_sources": 1
+    "ready_if_exact_isolated_sources": 1,
+    "brand_specific_structural_rewrites": true,
+    "safe_auxiliary_rescue_levels": [
+      "STRONG",
+      "PROBABLE"
+    ]
   },
   "isolation": {
     "chunk_separator_regex": "\\s*\\[\\.\\.\\.\\]\\s*",
@@ -146,7 +155,8 @@
     "raw_content_full_persisted": false,
     "persist_local_enrichment_window": true,
     "evidence_excerpt_chars": 1200,
-    "max_cached_sources": 10
+    "max_cached_sources": 10,
+    "max_unverified_review_sources": 4
   },
   "cleaning": {
     "drop_duplicate_lines": true,

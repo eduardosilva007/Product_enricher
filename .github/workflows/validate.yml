@@ -1,0 +1,35 @@
+name: Validate Product Enricher
+
+on:
+  push:
+    branches:
+      - main
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate-python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile pipeline
+        run: python -m py_compile pipeline_produtos.py
+
+      - name: Run evidence cache regressions
+        run: python -m unittest test_v407_evidence_cache.py test_v4071_identity_rescue.py -v
+
+      - name: Validate JSON syntax
+        run: |
+          python -m json.tool pipeline_config.json > /dev/null
+          python -m json.tool collection_quality_policy.json > /dev/null
+          python -m json.tool regras_negocio.json > /dev/null
