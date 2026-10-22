@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.7.1-identity-rescue-fix / Collection R9.6p7.2.1
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.7.2-identity-runtime-guard / Collection R9.6p7.2.2
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -56,12 +56,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
 
-PIPELINE_VERSION = "4.0.7.1-identity-rescue-fix"
+PIPELINE_VERSION = "4.0.7.2-identity-runtime-guard"
 PROMPT_VERSION = "2026-10-13-v19-clef-joint-repair-identity-guard"
 DEFAULT_CLEF_MODEL = "clef"
-BUILD_LABEL = "v4.0.7.1 Identity Rescue Fix + Evidence Cache Hardening"
-COLLECTION_ENGINE_VERSION = "2026-10-22-r9.6p7.2.1-identity-rescue"
-COLLECTION_LABEL = "R9.6p7.2.1"
+BUILD_LABEL = "v4.0.7.2 Identity Runtime Guard + Evidence Cache Hardening"
+COLLECTION_ENGINE_VERSION = "2026-10-22-r9.6p7.2.2-identity-runtime-guard"
+COLLECTION_LABEL = "R9.6p7.2.2"
+IDENTITY_PROFILE_VERSION = "2026-10-22-safe-brand-key-v2"
 EVIDENCE_CACHE_SCHEMA_VERSION = "1"
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
 ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
@@ -139,6 +140,27 @@ def business_key(brand: str, model: str) -> str:
     return f"{compact(brand)}|{compact(model)}"
 
 
+def _brand_config_list(mapping: Dict[str, Any], brand: str) -> List[Any]:
+    """Busca configuração de marca por chave visual ou compacta.
+
+    Isso evita drift por &, espaços, pontuação ou caracteres invisíveis no nome
+    da marca sem introduzir fuzzy matching.
+    """
+    if not isinstance(mapping, dict) or not mapping:
+        return []
+    visual = canonical_display(brand)
+    direct = mapping.get(visual)
+    if isinstance(direct, list):
+        return direct
+    target = compact(brand)
+    if not target:
+        return []
+    for key, value in mapping.items():
+        if compact(key) == target and isinstance(value, list):
+            return value
+    return []
+
+
 def derive_search_model(brand: str, model: str, cfg: Dict[str, Any]) -> str:
     """Deriva uma âncora técnica para busca/identidade sem alterar o Modelo original.
 
@@ -153,7 +175,7 @@ def derive_search_model(brand: str, model: str, cfg: Dict[str, Any]) -> str:
     icfg = cfg.get("identity", {}) or {}
     brand_key = canonical_display(brand)
     suffix_map = icfg.get("operational_suffixes_by_brand", {}) or {}
-    suffixes = {canonical_display(x) for x in (suffix_map.get(brand_key, []) or []) if safe(x)}
+    suffixes = {canonical_display(x) for x in _brand_config_list(suffix_map, brand) if safe(x)}
 
     work = re.sub(r"\s+", " ", original).strip()
     tokens = work.split()
@@ -230,7 +252,7 @@ def derive_search_model(brand: str, model: str, cfg: Dict[str, Any]) -> str:
     # Revisões anexadas ao SKU, somente por marca explicitamente configurada.
     revision_map = icfg.get("revision_suffixes_by_brand", {}) or {}
     revision_suffixes = sorted(
-        [safe(x) for x in (revision_map.get(brand_key, []) or []) if safe(x)],
+        [safe(x) for x in _brand_config_list(revision_map, brand) if safe(x)],
         key=lambda x: len(compact(x)),
         reverse=True,
     )
@@ -242,9 +264,9 @@ def derive_search_model(brand: str, model: str, cfg: Dict[str, Any]) -> str:
             work = re.sub(re.escape(suffix) + r"$", "", work, flags=re.I).rstrip(" -_./")
             break
 
-    embedded_brands = {canonical_display(x) for x in (icfg.get("embedded_sku_brands", []) or [])}
+    embedded_brands = {compact(x) for x in (icfg.get("embedded_sku_brands", []) or []) if compact(x)}
     min_len = int(icfg.get("embedded_sku_min_length", 5) or 5)
-    if brand_key in embedded_brands:
+    if compact(brand) in embedded_brands:
         folded = canonical_display(work)
         looks_descriptive = brand_key in folded or len(work.split()) >= 5 or "/" in work
         if looks_descriptive:
@@ -1315,6 +1337,7 @@ def validate_collection_policy(policy: Dict[str, Any]) -> List[str]:
         "ACCEPT_TARGET_CLEAN", "ACCEPT_TARGET_ISOLATED", "REJECT_WRONG_MODEL",
         "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY",
         "REJECT_GENERIC_NO_TARGET_BLOCK", "REJECT_NON_ISOLATABLE",
+        "REJECT_TITLE_OTHER_SKU_BODY_ONLY",
         "REJECT_WEAK_IDENTITY", "REJECT_EXTRACT_FAILED",
     }
     missing = sorted(required - decisions)
@@ -1541,6 +1564,39 @@ def _target_context_has_only_relation(text: str, model: str, cfg: Dict[str, Any]
     return relation_hits == len(spans)
 
 
+def _title_has_conflicting_family_sku(title: str, model: str) -> bool:
+    """Detecta variante explícita da mesma família no TITLE sem fuzzy matching.
+
+    Exemplos bloqueados:
+    - target GENIE 3000; title GENIE 600 / GENIE600
+    - target 2446 21XC; title 2446-20
+
+    A regra só dispara quando o primeiro token estrutural do target é repetido
+    no título e o token de variante imediatamente seguinte é diferente.
+    """
+    normalized_title = strip_accents(safe(title)).casefold()
+    model_tokens = re.findall(r"[A-Za-z]+\d*|\d+[A-Za-z]*", strip_accents(safe(model)))
+    model_tokens = [t for t in model_tokens if compact(t)]
+    if len(model_tokens) < 2:
+        return False
+
+    family = re.escape(model_tokens[0].casefold())
+    expected_variant = compact(model_tokens[1])
+    if not expected_variant:
+        return False
+
+    if re.fullmatch(r"[A-Za-z]+", model_tokens[0]):
+        pattern = rf"(?<![a-z0-9]){family}[\s._/-]*([0-9][a-z0-9]*)"
+    else:
+        pattern = rf"(?<![a-z0-9]){family}[\s._/-]+([a-z0-9]+)"
+
+    for m in re.finditer(pattern, normalized_title, flags=re.I):
+        found = compact(m.group(1))
+        if found and found != expected_variant and any(ch.isdigit() for ch in found):
+            return True
+    return False
+
+
 def _isolate_target_block(
     brand: str,
     model: str,
@@ -1566,11 +1622,27 @@ def _isolate_target_block(
     max_other = int(iso.get("max_other_skus_after_isolation", 0) or 0)
 
     raw = safe(extracted_text) or safe(search_content)
-    title_url_target = bool(_target_spans(f"{title}\n{url}", model, cfg))
+    title_target = bool(_target_spans(title, model, cfg))
+    url_target = bool(_target_spans(url, model, cfg))
+    title_url_target = title_target or url_target
     body_target = bool(_target_spans(raw, model, cfg))
     search_target = bool(_target_spans(search_content, model, cfg))
     if not (title_url_target or body_target or search_target):
         return {"decision": "REJECT_WRONG_MODEL", "reason": "SKU alvo nao aparece em TITLE/URL/conteudo extraido", "content": "", "flags": ["NO_TARGET_MODEL"], "other_skus": []}
+
+    title_other_spans = _other_sku_spans(title, brand, model, cfg, policy)
+    title_family_conflict = _title_has_conflicting_family_sku(title, model)
+    if not title_target and body_target and (title_other_spans or title_family_conflict):
+        other_title_tokens = [x[2] for x in title_other_spans]
+        if title_family_conflict and not other_title_tokens:
+            other_title_tokens = ["SAME_FAMILY_DIFFERENT_VARIANT"]
+        return {
+            "decision": "REJECT_TITLE_OTHER_SKU_BODY_ONLY",
+            "reason": "TITLE aponta para outro SKU/variante; target aparece somente no BODY",
+            "content": "",
+            "flags": ["TITLE_OTHER_SKU", "BODY_ONLY_TARGET"],
+            "other_skus": other_title_tokens,
+        }
 
     other_spans = _other_sku_spans(raw, brand, model, cfg, policy)
     generic = _term_present(f"{title}\n{url}\n{raw[:1200]}", generic_terms)
@@ -8601,6 +8673,13 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
             LOG.error(e)
         raise RuntimeError(f"Validação falhou: {len(errors)} erro(s)")
 
+    identity_runtime_errors = validate_identity_runtime_contract(cfg)
+    if identity_runtime_errors:
+        for e in identity_runtime_errors:
+            LOG.error(e)
+        raise RuntimeError("Contrato runtime de identidade inválido; execução bloqueada.")
+    LOG.info("IDENTITY RUNTIME CONTRACT OK | cases=%d | profile=%s", len((cfg.get("identity", {}) or {}).get("runtime_regression_contract", []) or []), IDENTITY_PROFILE_VERSION)
+
     qg = run_quality_gates(rules, cfg)
     LOG.info(
         "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | reference_only=%d",
@@ -8784,6 +8863,31 @@ def interactive_menu(base: Path) -> argparse.Namespace:
 
 
 
+def validate_identity_runtime_contract(cfg: Dict[str, Any]) -> List[str]:
+    """Valida regressões de Search Model antes de qualquer consumo de Search."""
+    identity = cfg.get("identity", {}) or {}
+    cases = identity.get("runtime_regression_contract", []) or []
+    if not isinstance(cases, list) or not cases:
+        return ["IDENTITY_RUNTIME_CONTRACT: runtime_regression_contract ausente/vazio"]
+    errors: List[str] = []
+    for idx, case in enumerate(cases, 1):
+        if not isinstance(case, dict):
+            errors.append(f"IDENTITY_RUNTIME_CONTRACT[{idx}]: caso inválido")
+            continue
+        brand = safe(case.get("brand"))
+        model = safe(case.get("model"))
+        expected = safe(case.get("expected_search_model"))
+        if not brand or not model or not expected:
+            errors.append(f"IDENTITY_RUNTIME_CONTRACT[{idx}]: brand/model/expected ausente")
+            continue
+        actual = derive_search_model(brand, model, cfg)
+        if canonical_display(actual) != canonical_display(expected):
+            errors.append(
+                f"IDENTITY_RUNTIME_CONTRACT[{idx}]: {brand} {model} esperado={expected} atual={actual}"
+            )
+    return errors
+
+
 def validate_release_contract(cfg: Dict[str, Any], rules: Any, policy: Dict[str, Any]) -> List[str]:
     """Fail-closed para impedir mistura silenciosa de código/config/policy/rules."""
     contract = cfg.get("release_contract", {}) or {}
@@ -8792,6 +8896,7 @@ def validate_release_contract(cfg: Dict[str, Any], rules: Any, policy: Dict[str,
         "collection_engine_version": COLLECTION_ENGINE_VERSION,
         "collection_policy_version": safe(policy.get("VERSION")),
         "rules_version": safe(getattr(rules, "version", "")),
+        "identity_profile_version": IDENTITY_PROFILE_VERSION,
         "evidence_cache_schema": EVIDENCE_CACHE_SCHEMA_VERSION,
     }
     errors: List[str] = []
@@ -8809,7 +8914,7 @@ def export_evidence_bundle(args: argparse.Namespace, cfg: Dict[str, Any]) -> Non
     cache_path = Path(args.cache or cfg["files"]["cache"])
     output_path = Path(
         args.evidence_output
-        or (cfg.get("files", {}) or {}).get("evidence_export_jsonl", "Evidence_Bundle_v4_0_7_1.jsonl")
+        or (cfg.get("files", {}) or {}).get("evidence_export_jsonl", "Evidence_Bundle_v4_0_7_2.jsonl")
     )
     store = TavilyReadOnlyStore(cache_path)
     tmp = output_path.with_suffix(output_path.suffix + ".tmp")
@@ -8941,6 +9046,11 @@ def main() -> int:
     release_errors = validate_release_contract(cfg, rules, collection_policy)
     if release_errors:
         for e in release_errors:
+            LOG.error(e)
+        return 2
+    identity_runtime_errors = validate_identity_runtime_contract(cfg)
+    if identity_runtime_errors:
+        for e in identity_runtime_errors:
             LOG.error(e)
         return 2
 

@@ -26,7 +26,7 @@ jobs:
         run: python -m py_compile pipeline_produtos.py
 
       - name: Run evidence cache regressions
-        run: python -m unittest test_v407_evidence_cache.py test_v4071_identity_rescue.py -v
+        run: python -m unittest test_v407_evidence_cache.py test_v4071_identity_rescue.py test_v4072_identity_runtime_guard.py -v
 
       - name: Validate JSON syntax
         run: |
