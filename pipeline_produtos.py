@@ -3253,6 +3253,98 @@ def _failed_collection_payload(
     }
 
 
+def _collection_manifest_path(args: argparse.Namespace, cfg: Dict[str, Any]) -> Path:
+    explicit = safe(getattr(args, "collection_manifest", ""))
+    return Path(explicit or (cfg.get("files", {}) or {}).get(
+        "collection_manifest_json", "Collection_Cohort_Manifest_v4_0_8.json"
+    ))
+
+
+def _build_collection_manifest(
+    plan: PreCollectionPlan,
+    cfg: Dict[str, Any],
+    status: str,
+    provider: str,
+    run_id: str = "",
+    completed_search_keys: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    products = []
+    for row in plan.representatives:
+        if not row.valid or not row.key:
+            continue
+        products.append({
+            "business_key": row.key,
+            "brand": row.brand_original,
+            "model": row.model_original,
+            "precollection_action": row.action,
+            "raw_state_at_plan": row.raw_state,
+        })
+    products.sort(key=lambda x: x["business_key"])
+    keys = [x["business_key"] for x in products]
+    material = "\n".join(keys)
+    cohort_hash = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    candidate_keys = sorted({row.key for row in plan.candidates if row.key})
+    completed = sorted(set(completed_search_keys or []))
+    input_hash = file_hash(plan.input_path) if plan.input_path.exists() else ""
+    cohort_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{cohort_hash[:12]}"
+    return {
+        "schema_version": COHORT_MANIFEST_SCHEMA_VERSION,
+        "cohort_id": cohort_id,
+        "status": safe(status).upper(),
+        "created_at": now_iso(),
+        "pipeline_version": PIPELINE_VERSION,
+        "collection_engine_version": COLLECTION_ENGINE_VERSION,
+        "classification_semantic_version": CLASSIFICATION_SEMANTIC_VERSION,
+        "provider": provider,
+        "run_id": run_id,
+        "input_path": str(plan.input_path),
+        "input_sha256": input_hash,
+        "cohort_hash": cohort_hash,
+        "business_keys": keys,
+        "products": products,
+        "search_candidate_keys": candidate_keys,
+        "completed_search_keys": completed,
+        "search_requests_planned": len(candidate_keys),
+        "search_requests_completed": len(completed),
+    }
+
+
+def _write_collection_manifest(path: Path, manifest: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".tmp_{os.getpid()}")
+    tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _load_collection_manifest(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise RuntimeError(
+            f"COLLECTION_COHORT_MANIFEST_MISSING: {path}. "
+            "Execute a coleta/pre-coleta do lote antes de classificar."
+        )
+    data = read_json(path)
+    if safe(data.get("schema_version")) != COHORT_MANIFEST_SCHEMA_VERSION:
+        raise RuntimeError(
+            "COLLECTION_COHORT_MANIFEST_SCHEMA_MISMATCH: "
+            f"esperado={COHORT_MANIFEST_SCHEMA_VERSION} atual={safe(data.get('schema_version'))}"
+        )
+    status = safe(data.get("status")).upper()
+    if status not in {"COMPLETED", "NO_SEARCH_NEEDED"}:
+        raise RuntimeError(
+            f"COLLECTION_COHORT_MANIFEST_NOT_COMPLETE: status={status or 'EMPTY'}"
+        )
+    products = [x for x in (data.get("products") or []) if isinstance(x, dict)]
+    keys = [safe(x.get("business_key")) for x in products if safe(x.get("business_key"))]
+    if not keys:
+        raise RuntimeError("COLLECTION_COHORT_MANIFEST_EMPTY: nenhum business_key")
+    if len(keys) != len(set(keys)):
+        raise RuntimeError("COLLECTION_COHORT_MANIFEST_INVALID: business_key duplicada")
+    expected_hash = hashlib.sha256("\n".join(sorted(keys)).encode("utf-8")).hexdigest()
+    if safe(data.get("cohort_hash")) != expected_hash:
+        raise RuntimeError("COLLECTION_COHORT_MANIFEST_HASH_MISMATCH")
+    return data
+
+
 def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> bool:
     provider = _resolve_search_provider(args, cfg)
     policy_errors = validate_collection_cost_policy(cfg)
@@ -3272,6 +3364,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         cfg=cfg, max_tavily_new=int(args.max_tavily_new or 0),
     )
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
+    manifest_path = _collection_manifest_path(args, cfg)
 
     print()
     print("=" * 86)
@@ -3301,7 +3394,14 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     print("=" * 86)
 
     if not candidates:
-        LOG.info("Nenhuma nova consulta Search necessária.")
+        manifest = _build_collection_manifest(
+            plan, cfg, status="NO_SEARCH_NEEDED", provider=provider
+        )
+        _write_collection_manifest(manifest_path, manifest)
+        LOG.info(
+            "Nenhuma nova consulta Search necessária. COHORT MANIFEST=%s | produtos=%d | cohort=%s",
+            manifest_path, len(manifest.get("business_keys", [])), safe(manifest.get("cohort_hash"))[:12],
+        )
         return True
     if not args.yes:
         print(f"Fila real desta execução: {len(candidates)} produto(s) = no máximo {len(candidates)} request(s).")
@@ -3313,12 +3413,17 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     limiter = RateLimiter(float(pcfg.get("requests_per_minute", 30) or 30))
     db = ClassificationDB(db_path)
     run_id = db.start_run("collect", rules.hash, f"SEARCH_{COLLECTION_LABEL}:{provider}")
+    running_manifest = _build_collection_manifest(
+        plan, cfg, status="RUNNING", provider=provider, run_id=run_id
+    )
+    _write_collection_manifest(manifest_path, running_manifest)
     writer = TavilyWritableStore(cache_path)  # nome legado; payload agora registra provider explicitamente
     product_rows: List[Dict[str, Any]] = []
     source_rows: List[Dict[str, Any]] = []
     query_rows: List[Dict[str, Any]] = []
     completed = True
     total_requests = 0
+    completed_search_keys: List[str] = []
     try:
         for idx, (brand, model, prior_state) in enumerate(candidates, 1):
             key = business_key(brand, model)
@@ -3332,6 +3437,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                         f"REQUEST COUNT INVALIDO: {brand} {model} retornou requests={req_count}"
                     )
                 total_requests += req_count
+                completed_search_keys.append(key)
                 state = safe(coll.get("state")) or "NO_TARGET_EVIDENCE"
                 writer.put(
                     brand, model, payload,
@@ -3420,6 +3526,20 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             run_id,
             "COMPLETED" if completed else "PAUSED",
             f"executados={len(product_rows)} planejados={len(candidates)} requests={total_requests} provider={provider}",
+        )
+        final_manifest = _build_collection_manifest(
+            plan, cfg,
+            status="COMPLETED" if completed else "PAUSED",
+            provider=provider,
+            run_id=run_id,
+            completed_search_keys=completed_search_keys,
+        )
+        _write_collection_manifest(manifest_path, final_manifest)
+        LOG.info(
+            "COHORT MANIFEST | status=%s | produtos=%d | search=%d/%d | cohort=%s | arquivo=%s",
+            final_manifest["status"], len(final_manifest["business_keys"]),
+            final_manifest["search_requests_completed"], final_manifest["search_requests_planned"],
+            final_manifest["cohort_hash"][:12], manifest_path,
         )
         LOG.info(
             f"COLLECTION {COLLECTION_LABEL} FINAL | provider=%s | produtos=%d | requests=%d | hard_cap=%d/produto | relatório=%s",
@@ -8915,6 +9035,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--inventory-output", default="")
     p.add_argument("--precollection-output", default="")
     p.add_argument("--evidence-output", default="")
+    p.add_argument("--collection-manifest", default="")
+    p.add_argument("--classification-use-current-input", action="store_true")
     p.add_argument("--clef-model", dest="clef_model", default="")
     p.add_argument("--no-clef", dest="no_clef", action="store_true")
     p.add_argument("--no-checkpoint", action="store_true")
