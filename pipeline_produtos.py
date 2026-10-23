@@ -4278,11 +4278,13 @@ class DeterministicEngine:
         else:
             reasons.append("POWER_UNRESOLVED")
 
-        # Se a taxonomia do TYPE independe de alimentação, UNKNOWN é uma decisão
-        # válida e não motivo para chamar Clef.
+        # Conflito explícito de alimentação exige adjudicação; não aprovar UNKNOWN.
         if product_type and power is None and not self._type_requires_specific_power(product_type):
-            power = "UNKNOWN"
-            reasons.append("POWER_UNKNOWN_ALLOWED_BY_TAXONOMY")
+            if len(power_candidates) > 1:
+                reasons.append("POWER_CONFLICT_REQUIRES_ADJUDICATION")
+            else:
+                power = "UNKNOWN"
+                reasons.append("POWER_UNKNOWN_ALLOWED_BY_TAXONOMY")
 
         if product_type:
             tax_evidence = taxonomy_evidence_text(sources, product_type)
@@ -4292,7 +4294,8 @@ class DeterministicEngine:
         else:
             cg, fam, tax_reason = "", "", ""
 
-        if product_type and power is not None and (cg, fam) in self.rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS"):
+        if (product_type and power is not None and len(power_candidates) <= 1
+                and (cg, fam) in self.rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS")):
             state = "RESOLVED_RULE"
         elif type_candidates:
             state = "AMBIGUOUS"
