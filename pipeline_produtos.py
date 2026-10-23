@@ -4113,7 +4113,10 @@ class DeterministicEngine:
         em 100% de classificacao manual.
         """
         out: List[Source] = []
-        identity_model = derive_search_model(brand, model, self.cfg)
+        identity_models = [model]
+        search_identity_model = derive_search_model(brand, model, self.cfg)
+        if compact(search_identity_model) != compact(model):
+            identity_models.append(search_identity_model)
         if isinstance(payload.get("_collection"), dict):
             curated = [x for x in (payload.get("_collection", {}).get("curated_results", []) or []) if isinstance(x, dict)]
             rescue = self._title_only_rescue_rows(brand, model, payload)
@@ -4126,10 +4129,27 @@ class DeterministicEngine:
             title = safe(res.get("title"))
             content = safe(res.get("content"))[: self.content_chars]
             url = safe(res.get("url"))
-            level, score, match, sw, match_field = _source_identity_baseline(
-                brand, identity_model, title, content, url, self.suffixes,
-                int(self.identity_cfg.get("short_model_requires_brand_length", 5) or 5),
+            identity_candidates = [
+                _source_identity_baseline(
+                    brand, identity_model, title, content, url, self.suffixes,
+                    int(self.identity_cfg.get("short_model_requires_brand_length", 5) or 5),
+                )
+                for identity_model in identity_models
+            ]
+            identity_rank = self.IDENTITY_RANK
+            level, score, match, sw, match_field = max(
+                identity_candidates,
+                key=lambda x: (identity_rank.get(x[0], 0), int(x[1] or 0)),
             )
+            stored_level = safe(res.get("_collection_identity"))
+            if identity_rank.get(stored_level, 0) > identity_rank.get(level, 0):
+                # Curated evidence já passou pelo gate de identidade da coleta.
+                # Classificação não pode rebaixar o mesmo source por usar uma
+                # variante diferente de Search Model.
+                level = stored_level
+                score = max(int(score or 0), 90 if stored_level == "STRONG" else 78)
+                sw = max(float(sw or 0.0), 0.90 if stored_level == "STRONG" else 0.72)
+                match_field = match_field if match_field != "NONE" else "COLLECTION"
             collection_flags = [safe(x) for x in (res.get("_collection_quality_flags", []) or []) if safe(x)]
             flags = list(dict.fromkeys(self._source_quality_flags(title, content) + collection_flags))
             try:
@@ -4330,6 +4350,8 @@ class DeterministicEngine:
             return True
         if src.model_match_field == "BODY":
             return "BODY" in fields
+        if src.model_match_field == "COLLECTION" and safe(src.collection_decision).startswith("ACCEPT_"):
+            return bool(fields.intersection({"TITLE", "BODY", "MODEL_RULE", "COMPOSITE"}))
         return False
 
     def _apply_specificity(self, candidates: Iterable[str]) -> List[str]:
