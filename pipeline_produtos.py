@@ -8450,6 +8450,17 @@ def run_cache_recovery(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     run_pipeline(args, cfg, rules, explicit_targets=targets)
 
 
+def _stamp_classification_record(
+    rec: Dict[str, Any],
+    cohort_id: str,
+) -> Dict[str, Any]:
+    out = dict(rec or {})
+    out["Lifecycle State"] = _record_lifecycle_state(out)
+    out["Classification Semantic Version"] = CLASSIFICATION_SEMANTIC_VERSION
+    out["Collection Cohort ID"] = safe(cohort_id)
+    return out
+
+
 def run_pipeline(
     args: argparse.Namespace,
     cfg: Dict[str, Any],
@@ -8699,7 +8710,9 @@ def run_pipeline(
                 raw = store.get(brand, model_)
 
                 if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
-                    rec = record_for_raw_state(raw)
+                    rec = _stamp_classification_record(
+                        record_for_raw_state(raw), cohort_manifest_id
+                    )
                     stats[raw.state.lower()] += 1
                     db.put_checkpoint(
                         key, brand, model_, raw.raw_hash, rules.hash, rec, clef_identity
@@ -8714,7 +8727,9 @@ def run_pipeline(
                 )
                 has_collection = isinstance((raw.payload or {}).get("_collection"), dict)
                 if require_curated and not has_collection:
-                    rec = record_for_uncurated_cache(raw)
+                    rec = _stamp_classification_record(
+                        record_for_uncurated_cache(raw), cohort_manifest_id
+                    )
                     stats["collection_uncurated"] += 1
                     db.put_checkpoint(
                         key, brand, model_, raw.raw_hash, rules.hash, rec, clef_identity
@@ -8732,10 +8747,7 @@ def run_pipeline(
                     )
 
                 if cp is not None:
-                    cp = dict(cp)
-                    cp["Lifecycle State"] = _record_lifecycle_state(cp)
-                    cp["Classification Semantic Version"] = CLASSIFICATION_SEMANTIC_VERSION
-                    cp["Collection Cohort ID"] = cohort_manifest_id
+                    cp = _stamp_classification_record(cp, cohort_manifest_id)
                     rows.append(cp)
                     stats["checkpoint_hit"] += 1
                     continue
@@ -8774,9 +8786,7 @@ def run_pipeline(
                         LOG.error("%s", paused_reason)
                         break
 
-                rec["Lifecycle State"] = _record_lifecycle_state(rec)
-                rec["Classification Semantic Version"] = CLASSIFICATION_SEMANTIC_VERSION
-                rec["Collection Cohort ID"] = cohort_manifest_id
+                rec = _stamp_classification_record(rec, cohort_manifest_id)
 
                 if should_checkpoint_record(rec):
                     db.put_checkpoint(
