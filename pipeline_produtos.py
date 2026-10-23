@@ -6947,22 +6947,23 @@ def _baseline_row_accepted(row: Any, df: Any) -> bool:
         return False
     return True
 
-def _accepted_keys_from_baseline_file(
+def _lifecycle_keys_from_baseline_file(
     path: Optional[Path],
-) -> Tuple[set, set, set]:
-    """Retorna (aceitos, manuais, bi_ok_locked) de um baseline."""
+) -> Tuple[set, set, set, set]:
+    """Retorna (aceitos, manuais, bi_ok_locked, classificados_pendentes_review)."""
     accepted: set = set()
     manual: set = set()
     bi_locked: set = set()
+    pending_review: set = set()
 
     if not path or not path.exists():
-        return accepted, manual, bi_locked
+        return accepted, manual, bi_locked, pending_review
 
     try:
         df, _ = _read_business_sheet(path)
     except Exception as exc:
         LOG.warning("Baseline %s não pôde ser lida: %s", path, exc)
-        return accepted, manual, bi_locked
+        return accepted, manual, bi_locked, pending_review
 
     b = find_col(df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
     m = find_col(df, ["Modelo", "Model", "SKU", "Part Number"])
@@ -6983,31 +6984,48 @@ def _accepted_keys_from_baseline_file(
             manual.add(key)
             accepted.add(key)
             continue
-        if _baseline_row_accepted(row, df):
-            accepted.add(key)
 
+        lifecycle = _baseline_row_lifecycle(row, df)
+        if lifecycle in {LIFECYCLE_ACCEPTED_AUTO, LIFECYCLE_ACCEPTED_HUMAN} and _baseline_row_accepted(row, df):
+            accepted.add(key)
+        elif lifecycle == LIFECYCLE_CLASSIFIED_PENDING_REVIEW:
+            pending_review.add(key)
+
+    return accepted, manual, bi_locked, pending_review
+
+
+def _accepted_keys_from_baseline_file(
+    path: Optional[Path],
+) -> Tuple[set, set, set]:
+    accepted, manual, bi_locked, _ = _lifecycle_keys_from_baseline_file(path)
     return accepted, manual, bi_locked
 
 def load_baseline_inventory(
     master_path: Optional[Path],
     final_path: Optional[Path],
 ) -> Dict[str, set]:
-    """Lê Consolidado/Base Final e separa baseline de HARD LOCK humano."""
-    master_accepted, master_manual, master_bi = _accepted_keys_from_baseline_file(master_path)
-    final_accepted, final_manual, final_bi = _accepted_keys_from_baseline_file(final_path)
+    """Separa aceitos, hard locks e classificados aguardando double-check."""
+    master_accepted, master_manual, master_bi, master_pending = _lifecycle_keys_from_baseline_file(master_path)
+    final_accepted, final_manual, final_bi, final_pending = _lifecycle_keys_from_baseline_file(final_path)
 
     manual = master_manual | final_manual
     bi_locked = master_bi | final_bi
     hard_lock = manual | bi_locked
-    processed = master_accepted | final_accepted | hard_lock
+    pending_review = master_pending | final_pending
+    # "processed" significa não chamar classificador novamente. Não significa aceito.
+    processed = master_accepted | final_accepted | hard_lock | pending_review
 
     return {
         "processed": processed,
+        "accepted": master_accepted | final_accepted | hard_lock,
+        "classified_pending_review": pending_review,
         "manual": manual,
         "bi_locked": bi_locked,
         "hard_lock": hard_lock,
         "master_accepted": master_accepted,
         "final_accepted": final_accepted,
+        "master_pending_review": master_pending,
+        "final_pending_review": final_pending,
         "master_manual": master_manual,
         "final_manual": final_manual,
         "master_bi_locked": master_bi,
@@ -7129,6 +7147,10 @@ def _copy_business_values(
         "Rules Version": ["Rules Version"],
         "Rules Hash": ["Rules Hash"],
         "Pipeline Version": ["Pipeline Version"],
+        "Classification Semantic Version": ["Classification Semantic Version"],
+        "Collection Cohort ID": ["Collection Cohort ID"],
+        "Lifecycle State": ["Lifecycle State"],
+        "Classification Identity": ["Classification Identity"],
         "Processed At": ["Processed At"],
         "Clef Provider": ["Clef Provider"],
         "Clef Model": ["Clef Model"],
@@ -7565,6 +7587,7 @@ def _upsert_run_rows_into_master(
             key_index[key] = idx
 
         proc_state, review_state = _record_process_state(rec)
+        lifecycle_state = _record_lifecycle_state(rec)
 
         for col, value in rec.items():
             if col in {"Marca", "Modelo", "Revisão B.I", "Revisao B.I"}:
@@ -7578,10 +7601,12 @@ def _upsert_run_rows_into_master(
         master_df.at[idx, "Status"] = master_df.at[idx, "Status"] if safe(master_df.at[idx, "Status"]) else "Script"
         master_df.at[idx, "Status Processamento"] = proc_state
         master_df.at[idx, "Revisão"] = review_state
+        master_df.at[idx, "Lifecycle State"] = lifecycle_state
         # Nunca escreve Revisão B.I. Novo/reprocessado permanece vazio até o double check.
         master_df.at[idx, "Rules Version"] = rules.version
         master_df.at[idx, "Rules Hash"] = rules.hash
         master_df.at[idx, "Pipeline Version"] = PIPELINE_VERSION
+        master_df.at[idx, "Classification Semantic Version"] = safe(rec.get("Classification Semantic Version")) or CLASSIFICATION_SEMANTIC_VERSION
 
         if _record_is_accepted(rec):
             stats["baseline_promoted"] += 1
