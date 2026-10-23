@@ -18,6 +18,25 @@ class FakeDF:
         self.columns = list(columns)
 
 
+class FakeStore:
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.by_key = {
+            p.business_key(brand, model): payload
+            for brand, model, payload in self.rows
+        }
+
+    def catalog(self):
+        return [
+            (brand, model, p.business_key(brand, model))
+            for brand, model, _ in self.rows
+        ]
+
+    def get(self, brand, model):
+        payload = self.by_key[p.business_key(brand, model)]
+        return p.RawEvidence("RAW_OK", brand, model, payload=payload)
+
+
 def curated_payload(rows):
     return {
         "results": [],
@@ -292,6 +311,33 @@ class FlowStateClassifierV408Tests(unittest.TestCase):
         title, url = p._best_target_title(s1, [1, 2], False, brand="BRIGGS & STRATTON")
         self.assertIn("500E Series", title)
         self.assertIn("briggsandstratton.com", url)
+
+    def test_manifest_scope_yields_exact_same_18_targets_not_historical_cache(self):
+        ready = curated_payload([
+            curated(
+                "TEST product",
+                "https://example.com/product",
+                "test product engine",
+            )
+        ])
+        cohort_rows = [("TEST", f"M{i:03d}", ready) for i in range(18)]
+        historical_rows = [("OLD", f"H{i:03d}", ready) for i in range(7)]
+        store = FakeStore(cohort_rows + historical_rows)
+        allowed = {p.business_key(brand, model) for brand, model, _ in cohort_rows}
+
+        cohort, targets, stats, _ = p.build_classification_cohort(
+            store,
+            processed=set(),
+            manual=set(),
+            hard_lock=set(),
+            allowed_keys=allowed,
+            allow_safe_auxiliary_rescue=True,
+        )
+
+        self.assertEqual(len(cohort), 18)
+        self.assertEqual(len(targets), 18)
+        self.assertEqual({x[2] for x in targets}, allowed)
+        self.assertEqual(stats["classification_outside_input_skipped"], 7)
 
     def test_manifest_survives_input_file_changes(self):
         with tempfile.TemporaryDirectory() as td:
