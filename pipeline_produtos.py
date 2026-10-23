@@ -4737,9 +4737,9 @@ class ClassificationDB:
 
     @staticmethod
     def checkpoint_id(key: str, raw_hash: str, rules_hash: str, model: str) -> str:
-        # Inclui modelo + prompt para impedir reaproveitamento silencioso de
-        # resultados de outra política Clef.
-        material = f"{PIPELINE_VERSION}|{PROMPT_VERSION}|{model}|{key}|{raw_hash}|{rules_hash}"
+        # Checkpoint depende somente da semântica de classificação, não da versão
+        # de Excel/cohort/telemetria. Mudança de baseline não repete Clef.
+        material = f"{CLASSIFICATION_SEMANTIC_VERSION}|{PROMPT_VERSION}|{model}|{key}|{raw_hash}|{rules_hash}"
         return hashlib.sha256(material.encode()).hexdigest()
 
     def get_checkpoint(self, key: str, raw_hash: str, rules_hash: str, model: str) -> Optional[Dict[str, Any]]:
@@ -4759,7 +4759,7 @@ class ClassificationDB:
             """INSERT OR REPLACE INTO classification_results
                (checkpoint_id,business_key,brand,model,raw_hash,rules_hash,pipeline_version,result_json,updated_at)
                VALUES(?,?,?,?,?,?,?,?,?)""",
-            (cid, key, brand, model, raw_hash, rules_hash, PIPELINE_VERSION, json.dumps(result, ensure_ascii=False, default=str), now_iso()),
+            (cid, key, brand, model, raw_hash, rules_hash, CLASSIFICATION_SEMANTIC_VERSION, json.dumps(result, ensure_ascii=False, default=str), now_iso()),
         )
         self.conn.commit()  # por produto
 
@@ -8370,26 +8370,36 @@ def run_pipeline(
         if explicit_targets is None:
             if args.mode == "classify":
                 flow_cfg = cfg.get("classification_flow", {}) or {}
-                restrict_to_input = bool(flow_cfg.get("restrict_classify_to_input", True))
                 allowed_keys: Optional[set] = None
-                if restrict_to_input:
+                cohort_manifest_id = ""
+                if bool(getattr(args, "classification_use_current_input", False)):
                     if input_path is None or not input_path.exists():
-                        raise RuntimeError(
-                            "CLASSIFICATION_INPUT_SCOPE: arquivo de entrada não encontrado; "
-                            "classificação foi bloqueada para não consumir itens históricos do cache."
-                        )
+                        raise RuntimeError("CLASSIFICATION_INPUT_SCOPE: arquivo de entrada não encontrado.")
                     allowed_keys = {
                         row.key for row in read_input_rows(input_path)
                         if row.valid and row.key
                     }
                     if not allowed_keys:
-                        raise RuntimeError(
-                            "CLASSIFICATION_INPUT_SCOPE: arquivo de entrada não possui nenhuma Marca+Modelo válida."
-                        )
-                    LOG.info(
-                        "CLASSIFICATION INPUT SCOPE | arquivo=%s | business_keys=%d | historico_cache_excluido=SIM",
-                        input_path, len(allowed_keys),
+                        raise RuntimeError("CLASSIFICATION_INPUT_SCOPE: arquivo sem Marca+Modelo válida.")
+                    cohort_manifest_id = "CURRENT_INPUT_EXPLICIT"
+                    LOG.warning(
+                        "CLASSIFICATION SCOPE EXPLÍCITO = CURRENT INPUT | business_keys=%d",
+                        len(allowed_keys),
                     )
+                elif bool(flow_cfg.get("use_collection_manifest", True)):
+                    manifest_path = _collection_manifest_path(args, cfg)
+                    manifest = _load_collection_manifest(manifest_path)
+                    allowed_keys = set(safe(x) for x in manifest.get("business_keys", []) if safe(x))
+                    cohort_manifest_id = safe(manifest.get("cohort_id")) or safe(manifest.get("cohort_hash"))[:12]
+                    LOG.info(
+                        "CLASSIFICATION COHORT MANIFEST | arquivo=%s | cohort_id=%s | business_keys=%d | input_atual_ignorado=SIM",
+                        manifest_path, cohort_manifest_id, len(allowed_keys),
+                    )
+                elif bool(flow_cfg.get("fail_if_manifest_missing", True)):
+                    raise RuntimeError(
+                        "CLASSIFICATION_COHORT_SCOPE_UNDEFINED: manifest obrigatório."
+                    )
+
                 cohort, targets, cohort_stats, cohort_hash = build_classification_cohort(
                     store,
                     processed=processed,
@@ -8425,6 +8435,8 @@ def run_pipeline(
             cohort_hash = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
         for k, v in cohort_stats.items():
             stats[k] = v
+        if "cohort_manifest_id" not in locals():
+            cohort_manifest_id = ""
         # Mantém nomes históricos no resumo/log.
         stats["already_classified"] = cohort_stats["cohort_already_classified"]
         stats["manual_lock"] = cohort_stats["cohort_manual_lock"]
@@ -8535,6 +8547,10 @@ def run_pipeline(
                     )
 
                 if cp is not None:
+                    cp = dict(cp)
+                    cp["Lifecycle State"] = _record_lifecycle_state(cp)
+                    cp["Classification Semantic Version"] = CLASSIFICATION_SEMANTIC_VERSION
+                    cp["Collection Cohort ID"] = cohort_manifest_id
                     rows.append(cp)
                     stats["checkpoint_hit"] += 1
                     continue
@@ -8572,6 +8588,10 @@ def run_pipeline(
                         paused_reason = f"{exc.code}: {exc}"
                         LOG.error("%s", paused_reason)
                         break
+
+                rec["Lifecycle State"] = _record_lifecycle_state(rec)
+                rec["Classification Semantic Version"] = CLASSIFICATION_SEMANTIC_VERSION
+                rec["Collection Cohort ID"] = cohort_manifest_id
 
                 if should_checkpoint_record(rec):
                     db.put_checkpoint(
@@ -8687,6 +8707,8 @@ def run_pipeline(
                 "Produtos no cache": len(store.catalog()),
                 "Elegíveis": len(targets),
                 "Pilot Cohort Hash": cohort_hash,
+                "Collection Cohort ID": cohort_manifest_id,
+                "Classification Semantic Version": CLASSIFICATION_SEMANTIC_VERSION,
                 "Clef API Calls": clef.api_calls if clef is not None else 0,
                 "Clef Prompt Tokens": clef.prompt_tokens if clef is not None else 0,
                 "Clef Completion Tokens": clef.completion_tokens if clef is not None else 0,
