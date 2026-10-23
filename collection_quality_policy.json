@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-22-r9.6p7.2.3-structural-sku-core",
+  "VERSION": "2026-10-23-r9.6p8-source-purpose",
   "DESIGN_PRINCIPLES": [
     "Uma unica Search por produto: sem fallback, rescue, retry automatico, provider Extract ou provider failover.",
     "Busca 100% aberta: sem include_domains, country, language filter ou exact_match.",
@@ -30,7 +30,10 @@
     "Structural SKU Core é global e determinístico: sem fuzzy, edit-distance ou regra específica por marca para plataformas/regiões comuns.",
     "Uma variante CORE só existe quando, após remover decorator de borda permitido, sobra identificador suficientemente específico.",
     "Search query e Identity Core são conceitos separados: uma consulta pode manter tokens úteis enquanto o matcher reconhece o SKU publicado.",
-    "Todos os gates de identidade, Target Isolation, Evidence Cache e Title Rescue usam a mesma família de variantes estruturais."
+    "Todos os gates de identidade, Target Isolation, Evidence Cache e Title Rescue usam a mesma família de variantes estruturais.",
+    "Source Purpose é compartilhado entre coleta e classificação; página de catálogo de peças não pode transformar o equipamento-alvo em PART.",
+    "Negativo encontrado apenas no BODY não cancela um tipo físico explicitamente identificado no TITLE.",
+    "Título Real prioriza fonte primária/limpa; repair/parts/video não vence página oficial do produto quando há alternativa target-anchored."
   ],
   "identity": {
     "direct_accept_levels": [
@@ -204,5 +207,41 @@
       "^manage cookies?$",
       "^skip to (main )?content$"
     ]
+  },
+  "source_purpose": {
+    "parts_catalog_title_terms": [
+      "parts",
+      "parts for",
+      "parts catalog",
+      "parts catalogue",
+      "spare parts",
+      "replacement parts",
+      "exploded parts",
+      "repuestos",
+      "pièces détachées",
+      "pieces detachees",
+      "peças",
+      "pecas"
+    ],
+    "repair_title_terms": [
+      "repairing",
+      "repair",
+      "repair guide",
+      "how to repair",
+      "fixing",
+      "teardown"
+    ],
+    "documentation_title_terms": [
+      "parts manual",
+      "parts list",
+      "illustrated parts list",
+      "exploded view"
+    ],
+    "rules": {
+      "parts_catalog_title_is_parent_context": true,
+      "parts_catalog_title_cannot_generate_part_type": true,
+      "body_negative_cannot_cancel_explicit_title_physical_type": true,
+      "source_purpose_flags_shared_with_classifier": true
+    }
   }
 }
