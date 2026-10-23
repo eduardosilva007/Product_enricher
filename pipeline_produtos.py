@@ -5149,7 +5149,7 @@ class ClefFunnelClassifier:
     def _type_document(self, typ: str) -> str:
         meta = self.rules.types.get(typ, {}) or {}
         aliases = [safe(x) for x in (meta.get("aliases", []) or []) if safe(x)][:20]
-        pair_names = sorted(_pair_label(x) for x in _taxonomy_pairs_for_type(self.rules, typ, brand, model))
+        pair_names = sorted(_pair_label(x) for x in _taxonomy_pairs_for_type(self.rules, typ))
         chunks = [f"Canonical physical product type: {typ}."]
         if aliases:
             chunks.append("Known names and aliases: " + "; ".join(aliases) + ".")
@@ -6224,6 +6224,8 @@ def _clef_auto_gate(
     rules: Rules,
     s1: Stage1Result,
     cfg: Dict[str, Any],
+    brand: str = "",
+    model: str = "",
 ) -> Tuple[bool, str]:
     """Gate conservador de AUTO. Clef pode sugerir em REVIEW sem passar neste gate."""
     if safe(data.get("decision")) != "RESOLVED":
@@ -6238,7 +6240,7 @@ def _clef_auto_gate(
 
     policy = (cfg.get("clef", {}) or {}).get("auto_approval", {}) or {}
     if bool(policy.get("require_type_taxonomy_compatible", True)):
-        allowed_pairs = _taxonomy_pairs_for_type(rules, typ)
+        allowed_pairs = _taxonomy_pairs_for_type(rules, typ, brand, model)
         if allowed_pairs and (cg, fam) not in allowed_pairs:
             return False, "CLEF_TYPE_TAXONOMY_CONFLICT"
 
@@ -6541,7 +6543,7 @@ def finalize_product(
         power = safe(data.get("power")) or "UNKNOWN"
         cg = safe(data.get("category_general"))
         fam = safe(data.get("family"))
-        auto_ok, gate_reason = _clef_auto_gate(data, usage, rules, s1, cfg)
+        auto_ok, gate_reason = _clef_auto_gate(data, usage, rules, s1, cfg, brand, model)
         if rescue_only and auto_ok:
             auto_ok = False
             gate_reason = "CLEF_RESCUE_ONLY_DOUBLE_CHECK"
@@ -6599,7 +6601,7 @@ def finalize_product(
                 power = safe(data.get("power")) or power
                 cg = safe(data.get("category_general"))
                 fam = safe(data.get("family"))
-                auto_ok, gate_reason = _clef_auto_gate(data, usage, rules, s1, cfg)
+                auto_ok, gate_reason = _clef_auto_gate(data, usage, rules, s1, cfg, brand, model)
                 if rescue_only and auto_ok:
                     auto_ok = False
                     gate_reason = "CLEF_RESCUE_ONLY_DOUBLE_CHECK"
@@ -6624,7 +6626,7 @@ def finalize_product(
                 clef_valid = (
                     typ in rules.types
                     and (cg, fam) in rules.valid_pairs
-                    and (cg, fam) in _taxonomy_pairs_for_type(rules, typ)
+                    and (cg, fam) in _taxonomy_pairs_for_type(rules, typ, brand, model)
                 )
             else:
                 return {
