@@ -301,7 +301,7 @@
     "pipeline_version": "4.0.8-flow-state-classifier-hardening",
     "collection_engine_version": "2026-10-23-r9.6p8-source-purpose",
     "collection_policy_version": "2026-10-23-r9.6p8-source-purpose",
-    "rules_version": "2026-10-13-v3.0.13-manual-taxonomy-gold-2",
+    "rules_version": "2026-10-23-v3.0.14-source-purpose-engine-guard",
     "evidence_cache_schema": "1",
     "identity_profile_version": "2026-10-22-structural-sku-core-v3",
     "classification_semantic_version": "2026-10-23-classifier-v20",
