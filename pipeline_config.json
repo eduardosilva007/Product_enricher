@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-22-v4.0.7.3.1-input-scoped-recuration",
+  "VERSION": "2026-10-23-v4.0.8-flow-state-classifier-hardening",
   "files": {
     "cache": "cache_tavily.sqlite",
     "master": "Consolidado Base de Produtos Enriquecida.xlsx",
@@ -8,15 +8,16 @@
     "output": "Classificacao_v3.xlsx",
     "inventory_output": "Inventario_v3.xlsx",
     "input": "Base de Produtos.xlsx",
-    "collection_report": "Coleta_Search_R9_6p7_2_3.xlsx",
-    "precollection_report": "Pre_Coleta_R9_6p7_2_3.xlsx",
+    "collection_report": "Coleta_Search_R9_6p8.xlsx",
+    "precollection_report": "Pre_Coleta_R9_6p8.xlsx",
     "pending_with_cache": "Pendentes_Com_Cache.xlsx",
     "pending_without_cache": "Pendentes_Sem_Cache.xlsx",
     "baseline_backup_dir": "Backups_Baseline",
     "baseline_audit": "Auditoria_Baseline_R9_5.csv",
     "collection_policy": "collection_quality_policy.json",
-    "collection_report_cache_rebuild": "Curadoria_Cache_R9_6p7_2_3.xlsx",
-    "evidence_export_jsonl": "Evidence_Bundle_v4_0_7_3.jsonl"
+    "collection_report_cache_rebuild": "Curadoria_Cache_R9_6p8.xlsx",
+    "evidence_export_jsonl": "Evidence_Bundle_v4_0_8.jsonl",
+    "collection_manifest_json": "Collection_Cohort_Manifest_v4_0_8.json"
   },
   "evidence": {
     "max_results": 5,
@@ -289,16 +290,21 @@
     "weak_identity_requires_recollection": false,
     "repair_type_taxonomy_conflict": true,
     "max_clef_repair_attempts": 1,
-    "restrict_classify_to_input": true,
+    "restrict_classify_to_input": false,
     "allow_safe_auxiliary_rescue": true,
-    "max_unverified_review_sources": 4
+    "max_unverified_review_sources": 4,
+    "use_collection_manifest": true,
+    "fail_if_manifest_missing": true,
+    "preserve_pending_review_out_of_processed": true
   },
   "release_contract": {
-    "pipeline_version": "4.0.7.3.1-input-scoped-recuration",
-    "collection_engine_version": "2026-10-22-r9.6p7.2.3-structural-sku-core",
-    "collection_policy_version": "2026-10-22-r9.6p7.2.3-structural-sku-core",
+    "pipeline_version": "4.0.8-flow-state-classifier-hardening",
+    "collection_engine_version": "2026-10-23-r9.6p8-source-purpose",
+    "collection_policy_version": "2026-10-23-r9.6p8-source-purpose",
     "rules_version": "2026-10-13-v3.0.13-manual-taxonomy-gold-2",
     "evidence_cache_schema": "1",
-    "identity_profile_version": "2026-10-22-structural-sku-core-v3"
+    "identity_profile_version": "2026-10-22-structural-sku-core-v3",
+    "classification_semantic_version": "2026-10-23-classifier-v20",
+    "cohort_manifest_schema": "1"
   }
 }
