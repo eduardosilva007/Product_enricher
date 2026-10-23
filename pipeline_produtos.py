@@ -6506,6 +6506,16 @@ BASELINE_FINAL_COLUMNS = [
     "Status",
     "Revisão",
     "Revisão B.I",
+    "Lifecycle State",
+    "Resolution State",
+    "Review Required",
+    "Classification Identity",
+    "Collection State",
+    "Reason Code",
+    "Pipeline Version",
+    "Classification Semantic Version",
+    "Collection Cohort ID",
+    "Processed At",
 ]
 
 BASELINE_MASTER_FIELDS = [
@@ -6537,6 +6547,9 @@ BASELINE_MASTER_FIELDS = [
     "Rules Version",
     "Rules Hash",
     "Pipeline Version",
+    "Classification Semantic Version",
+    "Collection Cohort ID",
+    "Lifecycle State",
     "Processed At",
     "Clef Provider",
     "Clef Model",
@@ -6567,9 +6580,12 @@ _REVIEW_REJECT_STATES = {
 
 _BASELINE_ACCEPT_STATES = {
     "AUTO_APROVADO",
+    "VALIDADO_MANUAL",
+}
+
+_BASELINE_REVIEW_ONLY_STATES = {
     "PROVÁVEL",
     "PROVAVEL",
-    "VALIDADO_MANUAL",
 }
 
 
@@ -6618,62 +6634,93 @@ def _read_business_sheet(path: Path) -> Tuple[Any, str]:
         xls.close()
 
 
-def _baseline_row_accepted(row: Any, df: Any) -> bool:
-    """Define se a linha é baseline/skip.
+def _record_lifecycle_state(rec: Dict[str, Any]) -> str:
+    explicit = safe(rec.get("Lifecycle State")).upper()
+    if explicit in {
+        LIFECYCLE_PENDING_PROCESSING,
+        LIFECYCLE_CLASSIFIED_PENDING_REVIEW,
+        LIFECYCLE_ACCEPTED_AUTO,
+        LIFECYCLE_ACCEPTED_HUMAN,
+        LIFECYCLE_NEEDS_RECOLLECTION,
+    }:
+        return explicit
+    resolution = safe(rec.get("Resolution State")).upper()
+    review_required = safe(rec.get("Review Required")).upper() == "SIM"
+    if resolution == "RESOLVED" and not review_required:
+        return LIFECYCLE_ACCEPTED_AUTO
+    if resolution == "CLASSIFIED_CLEF" or (resolution == "RESOLVED" and review_required):
+        return LIFECYCLE_CLASSIFIED_PENDING_REVIEW
+    if resolution in {
+        "PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION",
+        "CACHE_ERROR", "CACHE_COLLISION",
+    }:
+        return LIFECYCLE_NEEDS_RECOLLECTION
+    return LIFECYCLE_PENDING_PROCESSING
 
-    HARD LOCKS:
-    - Revisão B.I = OK: autoridade humana final, mesmo se a linha parecer incompleta.
-    - Status = Manual: preservado integralmente.
 
-    Para Script sem OK, REVIEW/PENDING nunca vira baseline só por existir na Base Final.
-    """
+def _baseline_row_lifecycle(row: Any, df: Any) -> str:
     if _row_bi_locked(row, df):
-        return True
-
+        return LIFECYCLE_ACCEPTED_HUMAN
     status_col = find_col(df, ["Status"], required=False)
     if status_col and _is_manual_status(row.get(status_col)):
-        return True
+        return LIFECYCLE_ACCEPTED_HUMAN
 
-    review_required_col = find_col(df, ["Review Required"], required=False)
-    if review_required_col and safe(row.get(review_required_col)).upper() == "SIM":
-        return False
-
-    resolution_col = find_col(df, ["Resolution State"], required=False)
-    resolution = safe(row.get(resolution_col)).upper() if resolution_col else ""
-    if resolution and resolution != "RESOLVED":
-        return False
-
-    proc_col = find_col(df, ["Status Processamento"], required=False)
-    proc = safe(row.get(proc_col)).upper() if proc_col else ""
-    if proc and proc not in {"PROCESSADO", "COMPLETED"}:
-        return False
+    lifecycle_col = find_col(df, ["Lifecycle State"], required=False)
+    explicit = safe(row.get(lifecycle_col)).upper() if lifecycle_col else ""
+    if explicit in {
+        LIFECYCLE_PENDING_PROCESSING,
+        LIFECYCLE_CLASSIFIED_PENDING_REVIEW,
+        LIFECYCLE_ACCEPTED_AUTO,
+        LIFECYCLE_ACCEPTED_HUMAN,
+        LIFECYCLE_NEEDS_RECOLLECTION,
+    }:
+        return explicit
 
     review_col = find_col(df, ["Revisão", "Revisao"], required=False)
     review = safe(row.get(review_col)).upper() if review_col else ""
-    if review in _REVIEW_REJECT_STATES:
-        return False
+    if review in _BASELINE_REVIEW_ONLY_STATES:
+        return LIFECYCLE_CLASSIFIED_PENDING_REVIEW
 
-    technical_gate_present = any([
-        bool(review_required_col and safe(row.get(review_required_col))),
-        bool(resolution_col and safe(row.get(resolution_col))),
-        bool(proc_col and safe(row.get(proc_col))),
-    ])
-    if not technical_gate_present and review not in _BASELINE_ACCEPT_STATES:
+    review_required_col = find_col(df, ["Review Required"], required=False)
+    review_required = bool(
+        review_required_col and safe(row.get(review_required_col)).upper() == "SIM"
+    )
+    resolution_col = find_col(df, ["Resolution State"], required=False)
+    resolution = safe(row.get(resolution_col)).upper() if resolution_col else ""
+    if resolution == "RESOLVED" and not review_required:
+        return LIFECYCLE_ACCEPTED_AUTO
+    if resolution == "CLASSIFIED_CLEF" or (resolution == "RESOLVED" and review_required):
+        return LIFECYCLE_CLASSIFIED_PENDING_REVIEW
+    if resolution in {
+        "PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION",
+        "CACHE_ERROR", "CACHE_COLLISION",
+    } or review in {"PENDENTE_COLETA"}:
+        return LIFECYCLE_NEEDS_RECOLLECTION
+
+    if review in _BASELINE_ACCEPT_STATES:
+        return LIFECYCLE_ACCEPTED_AUTO
+    return LIFECYCLE_PENDING_PROCESSING
+
+
+def _baseline_row_accepted(row: Any, df: Any) -> bool:
+    """Aceitação é um estado explícito; PROVÁVEL é revisão, nunca baseline aceito."""
+    lifecycle = _baseline_row_lifecycle(row, df)
+    if lifecycle not in {LIFECYCLE_ACCEPTED_AUTO, LIFECYCLE_ACCEPTED_HUMAN}:
         return False
 
     type_col = find_col(df, ["O que é (Tipo)", "Tipo", "Product Type"], required=False)
     cg_col = find_col(df, ["Category General"], required=False)
     fam_col = find_col(df, ["FAMILY", "Family"], required=False)
-
     typ = safe(row.get(type_col)).upper() if type_col else ""
     cg = safe(row.get(cg_col)).upper() if cg_col else ""
     fam = safe(row.get(fam_col)).upper() if fam_col else ""
 
+    # HARD LOCK humano permanece autoridade mesmo em legado incompleto.
+    if lifecycle == LIFECYCLE_ACCEPTED_HUMAN:
+        return True
     if not typ or typ in {"REVISAR", "UNKNOWN"}:
         return False
-    if not cg or not fam:
-        return False
-    if (cg, fam) == ("OTHERS", "OTHERS"):
+    if not cg or not fam or (cg, fam) == ("OTHERS", "OTHERS"):
         return False
     return True
 
@@ -7215,9 +7262,7 @@ def _sync_final_into_master(
     return master_df, stats
 
 def _record_is_accepted(rec: Dict[str, Any]) -> bool:
-    if safe(rec.get("Resolution State")).upper() != "RESOLVED":
-        return False
-    if safe(rec.get("Review Required")).upper() == "SIM":
+    if _record_lifecycle_state(rec) != LIFECYCLE_ACCEPTED_AUTO:
         return False
     typ = safe(rec.get("O que é (Tipo)")).upper()
     cg = safe(rec.get("Category General")).upper()
@@ -7233,22 +7278,13 @@ def _record_is_accepted(rec: Dict[str, Any]) -> bool:
 
 
 def _record_process_state(rec: Dict[str, Any]) -> Tuple[str, str]:
-    if _record_is_accepted(rec):
+    lifecycle = _record_lifecycle_state(rec)
+    if lifecycle == LIFECYCLE_ACCEPTED_AUTO:
         return "PROCESSADO", "AUTO_APROVADO"
-
-    resolution = safe(rec.get("Resolution State")).upper()
-    if resolution == "CLASSIFIED_CLEF":
-        # Classificação completa produzida pelo Clef; falta apenas double-check humano.
+    if lifecycle == LIFECYCLE_CLASSIFIED_PENDING_REVIEW:
         return "PROCESSADO", "PROVÁVEL"
-    if resolution in {
-        "PENDING_COLLECTION",
-        "PENDING_RECOLLECTION",
-        "NEEDS_RECOLLECTION",
-        "CACHE_ERROR",
-        "CACHE_COLLISION",
-    }:
-        return resolution, "PENDENTE_COLETA"
-
+    if lifecycle == LIFECYCLE_NEEDS_RECOLLECTION:
+        return "NEEDS_RECOLLECTION", "PENDENTE_COLETA"
     return "REVISAR", "REVISAR"
 
 
