@@ -8564,7 +8564,7 @@ def run_pipeline(
         stats = defaultdict(int)
 
         if explicit_targets is None:
-            if args.mode == "classify":
+            if args.mode in {"classify", "full"}:
                 flow_cfg = cfg.get("classification_flow", {}) or {}
                 allowed_keys: Optional[set] = None
                 cohort_manifest_id = ""
@@ -8661,10 +8661,10 @@ def run_pipeline(
             cohort_stats.get("cohort_bi_ok_lock", 0),
             cohort_hash,
         )
-        if args.mode == "classify" and explicit_targets is None:
+        if args.mode in {"classify", "full"} and explicit_targets is None:
             LOG.info(
                 "CLASSIFICATION QUEUE | targets=%d | ready=%d | partial=%d | legacy_curated=%d | "
-                "safe_aux_rescue=%d | fora_input=%d | no_evidence_fora_da_fila=%d | raw_indisponivel=%d | "
+                "safe_aux_rescue=%d | fora_cohort=%d | no_evidence_fora_da_fila=%d | raw_indisponivel=%d | "
                 "limite_aplicado_apos_filtros=SIM",
                 len(targets),
                 cohort_stats.get("classification_ready_available", 0),
