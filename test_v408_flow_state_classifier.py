@@ -108,6 +108,30 @@ class FlowStateClassifierV408Tests(unittest.TestCase):
         self.assertNotIn(("OTHERS", "ENGINE"), briggs)
         self.assertIn(("OTHERS", "ENGINE"), koop)
 
+    def test_semantic_guard_cannot_reintroduce_part_from_parent_parts_page(self):
+        src = p.Source(
+            1,
+            "Briggs And Stratton 550ex Parts",
+            "replacement parts for 550EX",
+            "https://example.com/550ex-parts",
+            "STRONG",
+            quality_flags=["PARTS_CATALOG_TITLE"],
+        )
+        s1 = p.Stage1Result(
+            state="UNRESOLVED",
+            product_type=None,
+            power=None,
+            type_candidates=[],
+            power_candidates=[],
+            sources=[src],
+            reasons=[],
+        )
+        guarded = p.ClefFunnelClassifier._apply_source_purpose_semantic_guard(
+            ["PART", "ENGINE", "LAWN MOWER"], s1
+        )
+        self.assertNotIn("PART", guarded)
+        self.assertIn("ENGINE", guarded)
+
     def test_550ex_parts_catalog_cannot_make_parent_product_part(self):
         engine = p.DeterministicEngine(RULES, CFG)
         result = engine.classify(
@@ -272,6 +296,11 @@ class FlowStateClassifierV408Tests(unittest.TestCase):
             manifest = p._build_collection_manifest(
                 plan, CFG, status="NO_SEARCH_NEEDED", provider="tavily"
             )
+            final_manifest = p._build_collection_manifest(
+                plan, CFG, status="COMPLETED", provider="tavily",
+                cohort_id=manifest["cohort_id"],
+            )
+            self.assertEqual(manifest["cohort_id"], final_manifest["cohort_id"])
             path = root / "manifest.json"
             p._write_collection_manifest(path, manifest)
             input_file.write_bytes(b"now-only-one-product")
