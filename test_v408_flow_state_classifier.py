@@ -172,6 +172,35 @@ class FlowStateClassifierV408Tests(unittest.TestCase):
         self.assertEqual(result.power, "PETROL")
         self.assertEqual(result.taxonomy[:2], ("ENGINES", "ENGINE"))
 
+    def test_44s977_engine_stays_canonical_engine_taxonomy(self):
+        engine = p.DeterministicEngine(RULES, CFG)
+        result = engine.classify(
+            "BRIGGS & STRATTON",
+            "44S9770046G1AF0001",
+            curated_payload([
+                curated(
+                    "Briggs & Stratton 44S977-0046-G1 Vertical Engine",
+                    "https://example.com/44s977-0046-g1",
+                    "Briggs & Stratton vertical gasoline engine model 44S977-0046-G1.",
+                )
+            ]),
+        )
+        self.assertEqual(result.product_type, "ENGINE")
+        self.assertEqual(result.power, "PETROL")
+        self.assertEqual(result.taxonomy[:2], ("ENGINES", "ENGINE"))
+
+    def test_all_early_exit_records_receive_lifecycle_metadata(self):
+        rec = {
+            "Marca": "TEST",
+            "Modelo": "M1",
+            "Resolution State": "NEEDS_RECOLLECTION",
+            "Review Required": "NÃO",
+        }
+        stamped = p._stamp_classification_record(rec, "cohort-123")
+        self.assertEqual(stamped["Lifecycle State"], p.LIFECYCLE_NEEDS_RECOLLECTION)
+        self.assertEqual(stamped["Classification Semantic Version"], p.CLASSIFICATION_SEMANTIC_VERSION)
+        self.assertEqual(stamped["Collection Cohort ID"], "cohort-123")
+
     def test_08p602_moteur_is_engine_not_part(self):
         engine = p.DeterministicEngine(RULES, CFG)
         result = engine.classify(
