@@ -2434,11 +2434,18 @@ def _source_purpose_flags_policy(
     purpose = policy.get("source_purpose", {}) or {}
     title_fold = strip_accents(safe(title)).casefold()
     flags: List[str] = []
-    if _term_present(title_fold, purpose.get("parts_catalog_title_terms", []) or []):
+
+    def has_term(values: Sequence[str]) -> bool:
+        return any(
+            safe(term) and contains_alias_prepared(title_fold, safe(term))
+            for term in (values or [])
+        )
+
+    if has_term(purpose.get("parts_catalog_title_terms", []) or []):
         flags.append("PARTS_CATALOG_TITLE")
-    if _term_present(title_fold, purpose.get("repair_title_terms", []) or []):
+    if has_term(purpose.get("repair_title_terms", []) or []):
         flags.append("REPAIR_TITLE")
-    if _term_present(title_fold, purpose.get("documentation_title_terms", []) or []):
+    if has_term(purpose.get("documentation_title_terms", []) or []):
         flags.append("PARTS_DOCUMENTATION_TITLE")
     return flags
 
@@ -3284,6 +3291,7 @@ def _build_collection_manifest(
     provider: str,
     run_id: str = "",
     completed_search_keys: Optional[Sequence[str]] = None,
+    cohort_id: str = "",
 ) -> Dict[str, Any]:
     products = []
     for row in plan.representatives:
@@ -3303,7 +3311,7 @@ def _build_collection_manifest(
     candidate_keys = sorted({row.key for row in plan.candidates if row.key})
     completed = sorted(set(completed_search_keys or []))
     input_hash = file_hash(plan.input_path) if plan.input_path.exists() else ""
-    cohort_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{cohort_hash[:12]}"
+    cohort_id = safe(cohort_id) or f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{cohort_hash[:12]}"
     return {
         "schema_version": COHORT_MANIFEST_SCHEMA_VERSION,
         "cohort_id": cohort_id,
@@ -3550,6 +3558,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             provider=provider,
             run_id=run_id,
             completed_search_keys=completed_search_keys,
+            cohort_id=safe(running_manifest.get("cohort_id")),
         )
         _write_collection_manifest(manifest_path, final_manifest)
         LOG.info(
@@ -4822,7 +4831,7 @@ class ClassificationDB:
             """INSERT OR REPLACE INTO classification_results
                (checkpoint_id,business_key,brand,model,raw_hash,rules_hash,pipeline_version,result_json,updated_at)
                VALUES(?,?,?,?,?,?,?,?,?)""",
-            (cid, key, brand, model, raw_hash, rules_hash, CLASSIFICATION_SEMANTIC_VERSION, json.dumps(result, ensure_ascii=False, default=str), now_iso()),
+            (cid, key, brand, model, raw_hash, rules_hash, PIPELINE_VERSION, json.dumps(result, ensure_ascii=False, default=str), now_iso()),
         )
         self.conn.commit()  # por produto
 
