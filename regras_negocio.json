@@ -4984,12 +4984,7 @@
     "output_voltage_rule": "Para GENERATOR, INVERTER GENERATOR e INVERTER WELDER, tensão isolada pode ser saída. O engine deve suprimir power inferido somente por voltage/amp keywords quando houver um desses tipos na mesma fonte.",
     "replacement_compatibility_rule": "ACCESSORY/PART exige evidência de que o Brand+Model consultado é o próprio componente. Página com replacement/spare/repuesto/compatible/para/for pode apenas referenciar o equipamento-alvo; não transformar automaticamente o modelo pesquisado em ACCESSORY/PART.",
     "source_conflict_rule": "Em conflito entre fontes, preferir a fonte que identifica explicitamente Brand+Model e o substantivo físico do produto. Página de peça/replacement/compatibilidade é evidência secundária. Manual oficial ou ficha técnica do SKU pode ser evidência primária quando Brand+Model e o tipo físico aparecem de forma explícita.",
-    "agricultural_mower_rule": "front/rear/disc/mounted mower e mower-conditioner de implementos agrícolas => DISC MOWER; não usar RIDER/LAWN MOWER apenas pela palavra mower.",
-    "source_purpose_guard": {
-      "parts_catalog_title_cannot_generate_part": true,
-      "explicit_title_physical_type_survives_body_negative": true,
-      "component_requires_component_identity": true
-    }
+    "agricultural_mower_rule": "front/rear/disc/mounted mower e mower-conditioner de implementos agrícolas => DISC MOWER; não usar RIDER/LAWN MOWER apenas pela palavra mower."
   },
   "RESOLUTION_POLICY": {
     "alias_collision_policy": {
