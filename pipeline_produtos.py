@@ -4893,8 +4893,13 @@ def _unit_score(value: Any) -> float:
     return max(0.0, min(1.0, x))
 
 
-def _taxonomy_pairs_for_type(rules: Rules, product_type: str) -> set:
-    """Todos os pares Category|FAMILY declarados pelo JSON para um PRODUCT_TYPE."""
+def _taxonomy_pairs_for_type(
+    rules: Rules,
+    product_type: str,
+    brand: str = "",
+    model: str = "",
+) -> set:
+    """Pares executáveis para TYPE, respeitando escopo brand/model das evidence rules."""
     typ = safe(product_type)
     pairs = set()
     for row in rules.taxonomy_rules:
@@ -4903,12 +4908,29 @@ def _taxonomy_pairs_for_type(rules: Rules, product_type: str) -> set:
         pair = (safe(row.get("category_general")), safe(row.get("family")))
         if pair in rules.valid_pairs:
             pairs.add(pair)
+
     for row in rules.taxonomy_evidence_rules:
         if safe(row.get("primary_type")) != typ:
             continue
+        rule_brand = canonical_display(row.get("brand"))
+        model_regex = safe(row.get("model_regex"))
+        scoped = bool(rule_brand or model_regex)
+        if scoped:
+            # Sem contexto de produto, regra específica não entra no universo global.
+            if not brand and not model:
+                continue
+            if rule_brand and canonical_display(brand) != rule_brand:
+                continue
+            if model_regex:
+                try:
+                    if not re.search(model_regex, safe(model), flags=re.I):
+                        continue
+                except re.error:
+                    continue
         pair = (safe(row.get("category_general")), safe(row.get("family")))
         if pair in rules.valid_pairs:
             pairs.add(pair)
+
     fb = (rules.types.get(typ, {}) or {}).get("fallback_pair")
     if isinstance(fb, list) and len(fb) >= 2:
         pair = (safe(fb[0]), safe(fb[1]))
@@ -5127,7 +5149,7 @@ class ClefFunnelClassifier:
     def _type_document(self, typ: str) -> str:
         meta = self.rules.types.get(typ, {}) or {}
         aliases = [safe(x) for x in (meta.get("aliases", []) or []) if safe(x)][:20]
-        pair_names = sorted(_pair_label(x) for x in _taxonomy_pairs_for_type(self.rules, typ))
+        pair_names = sorted(_pair_label(x) for x in _taxonomy_pairs_for_type(self.rules, typ, brand, model))
         chunks = [f"Canonical physical product type: {typ}."]
         if aliases:
             chunks.append("Known names and aliases: " + "; ".join(aliases) + ".")
@@ -5465,7 +5487,7 @@ class ClefFunnelClassifier:
         # vizinhas. Pool pequeno, contexto curto e apenas um reranking por produto.
         mapped_required: List[str] = []
         for typ in type_top:
-            mapped_required.extend(_pair_label(x) for x in _taxonomy_pairs_for_type(self.rules, typ))
+            mapped_required.extend(_pair_label(x) for x in _taxonomy_pairs_for_type(self.rules, typ, brand, model))
         tax_lex = self._lexical_taxonomy_scores(evidence, type_top)
         tax_dense = self._dense_scores_from_vector(query_embedding, self.taxonomy_labels, self._taxonomy_doc_embeddings)
         tax_pool = self._merge_pool(
@@ -5489,7 +5511,7 @@ class ClefFunnelClassifier:
         deterministic_pairs: List[str] = []
         for typ in deterministic_keep:
             deterministic_pairs.extend(
-                _pair_label(pair) for pair in _taxonomy_pairs_for_type(self.rules, typ)
+                _pair_label(pair) for pair in _taxonomy_pairs_for_type(self.rules, typ, brand, model)
             )
         for label in deterministic_pairs:
             if label in self.taxonomy_profiles and label not in tax_top:
@@ -5709,7 +5731,7 @@ class ClefFunnelClassifier:
         type_choice = safe(type_ans["choice"])
         tax_choice = safe(tax_ans["choice"])
         valid_type = type_choice in self.rules.types and type_choice in type_candidates
-        type_pairs = _taxonomy_pairs_for_type(self.rules, type_choice) if valid_type else set()
+        type_pairs = _taxonomy_pairs_for_type(self.rules, type_choice, brand, model) if valid_type else set()
         valid_pair = (
             (cg, fam) in self.rules.valid_pairs
             and tax_choice in tax_candidates
@@ -5831,7 +5853,7 @@ class ClefFunnelClassifier:
 
         joint_criteria: Dict[str, str] = {}
         for typ in type_candidates:
-            for pair in sorted(_taxonomy_pairs_for_type(self.rules, typ)):
+            for pair in sorted(_taxonomy_pairs_for_type(self.rules, typ, brand, model)):
                 label = f"{typ} || {_pair_label(pair)}"
                 if label in joint_criteria:
                     continue
@@ -5935,7 +5957,7 @@ class ClefFunnelClassifier:
         if "||" in joint_choice:
             typ, pair_label = [safe(x) for x in joint_choice.split("||", 1)]
         cg, fam = _split_pair_label(pair_label)
-        compatible = (cg, fam) in _taxonomy_pairs_for_type(self.rules, typ)
+        compatible = (cg, fam) in _taxonomy_pairs_for_type(self.rules, typ, brand, model)
         resolved = (
             joint_choice != "INSUFFICIENT"
             and typ in self.rules.types
