@@ -9400,6 +9400,8 @@ def validate_release_contract(cfg: Dict[str, Any], rules: Any, policy: Dict[str,
         "collection_policy_version": safe(policy.get("VERSION")),
         "rules_version": safe(getattr(rules, "version", "")),
         "identity_profile_version": IDENTITY_PROFILE_VERSION,
+        "classification_semantic_version": CLASSIFICATION_SEMANTIC_VERSION,
+        "cohort_manifest_schema": COHORT_MANIFEST_SCHEMA_VERSION,
         "evidence_cache_schema": EVIDENCE_CACHE_SCHEMA_VERSION,
     }
     errors: List[str] = []
