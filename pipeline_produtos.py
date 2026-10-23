@@ -9086,7 +9086,7 @@ def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
 
 
 def validate_classification_flow_policy(cfg: Dict[str, Any]) -> List[str]:
-    """Fail-closed para o contrato operacional da v4.0.7.
+    """Fail-closed para o contrato operacional da v4.0.8.
 
     O funil prepara candidatos; Clef decide toda cauda não resolvida por regra
     quando há evidência target utilizável. Resultado Clef válido é preservado
@@ -9100,8 +9100,10 @@ def validate_classification_flow_policy(cfg: Dict[str, Any]) -> List[str]:
         "no_automatic_secondary_search",
         "repair_type_taxonomy_conflict",
         "review_is_last_resort",
-        "restrict_classify_to_input",
+        "use_collection_manifest",
+        "fail_if_manifest_missing",
         "allow_safe_auxiliary_rescue",
+        "preserve_pending_review_out_of_processed",
     )
     for key in required_true:
         if not bool(flow.get(key, False)):
