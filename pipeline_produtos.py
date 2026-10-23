@@ -5472,6 +5472,12 @@ class ClefFunnelClassifier:
             tax_lex, tax_dense, mapped_required,
             self.taxonomy_dense_k, self.taxonomy_pool_k,
         )
+        # Taxonomia é condicionada ao TYPE. Pares globalmente válidos, mas não
+        # mapeados para nenhum TYPE candidato, ficam fora antes do Clef.
+        allowed_tax_labels = set(mapped_required)
+        tax_pool = [label for label in tax_pool if label in allowed_tax_labels]
+        if not tax_pool:
+            tax_pool = [label for label in dict.fromkeys(mapped_required) if label in self.taxonomy_profiles]
         if self.rerank_taxonomy and len(tax_pool) > self.taxonomy_top_k:
             tax_top, tax_rerank = self._rerank_labels(
                 evidence, tax_pool, self.taxonomy_docs, self.taxonomy_top_k
@@ -5703,7 +5709,12 @@ class ClefFunnelClassifier:
         type_choice = safe(type_ans["choice"])
         tax_choice = safe(tax_ans["choice"])
         valid_type = type_choice in self.rules.types and type_choice in type_candidates
-        valid_pair = (cg, fam) in self.rules.valid_pairs and tax_choice in tax_candidates
+        type_pairs = _taxonomy_pairs_for_type(self.rules, type_choice) if valid_type else set()
+        valid_pair = (
+            (cg, fam) in self.rules.valid_pairs
+            and tax_choice in tax_candidates
+            and (cg, fam) in type_pairs
+        )
         decision = "RESOLVED" if valid_type and valid_pair else "INSUFFICIENT_EVIDENCE"
         if type_choice in {"OTHER", "INSUFFICIENT"} or tax_choice in {"OTHER", "INSUFFICIENT"}:
             decision = "INSUFFICIENT_EVIDENCE"
@@ -6237,13 +6248,31 @@ def _clef_auto_gate(
     return True, "CLEF_AUTO_GATE_OK"
 
 
-def _best_target_title(s1: Stage1Result, refs: Sequence[int], require_strong: bool) -> Tuple[str, str]:
+def _brand_url_affinity(brand: str, url: str) -> int:
+    host = compact(urlparse(safe(url)).netloc)
+    if not host:
+        return 0
+    full = compact(brand)
+    if full and full in host:
+        return 3
+    tokens = [
+        compact(x) for x in re.findall(r"[A-Za-z0-9]+", strip_accents(safe(brand)))
+        if len(compact(x)) >= 5
+    ]
+    return 2 if any(tok in host for tok in tokens) else 0
+
+
+def _best_target_title(
+    s1: Stage1Result,
+    refs: Sequence[int],
+    require_strong: bool,
+    brand: str = "",
+) -> Tuple[str, str]:
     refset = {int(x) for x in refs if isinstance(x, int) and not isinstance(x, bool)}
     rank = DeterministicEngine.IDENTITY_RANK
     candidates = [
         src for src in s1.sources
-        if (not refset or src.source_id in refset)
-        and (not require_strong or src.relevance == "STRONG")
+        if (not require_strong or src.relevance == "STRONG")
     ]
     if not candidates and require_strong:
         return "", ""
@@ -6251,10 +6280,21 @@ def _best_target_title(s1: Stage1Result, refs: Sequence[int], require_strong: bo
         candidates = list(s1.sources)
     if not candidates:
         return "", ""
+
+    bad_title_flags = {
+        "PARTS_CATALOG_TITLE", "PARTS_DOCUMENTATION_TITLE",
+        "REPAIR_TITLE", "NEGATIVE_TITLE_TERM",
+    }
     candidates.sort(
         key=lambda src: (
-            rank.get(src.relevance, 0), src.identity_score,
-            0 if src.quality_flags else 1, src.source_weight, float(src.tavily_score or 0.0),
+            _brand_url_affinity(brand, src.url),
+            1 if not bad_title_flags.intersection(set(src.quality_flags or [])) else 0,
+            1 if src.source_id in refset else 0,
+            rank.get(src.relevance, 0),
+            src.identity_score,
+            1 if not src.quality_flags else 0,
+            src.source_weight,
+            float(src.tavily_score or 0.0),
         ),
         reverse=True,
     )
@@ -6483,7 +6523,7 @@ def finalize_product(
         if rescue_only and auto_ok:
             auto_ok = False
             gate_reason = "CLEF_RESCUE_ONLY_DOUBLE_CHECK"
-        title, url = _best_target_title(s1, refs, require_strong=auto_ok)
+        title, url = _best_target_title(s1, refs, require_strong=auto_ok, brand=brand)
         title, url = _output_title(title, url)
 
         base_clef = {
@@ -6541,7 +6581,7 @@ def finalize_product(
                 if rescue_only and auto_ok:
                     auto_ok = False
                     gate_reason = "CLEF_RESCUE_ONLY_DOUBLE_CHECK"
-                title, url = _best_target_title(s1, refs, require_strong=auto_ok)
+                title, url = _best_target_title(s1, refs, require_strong=auto_ok, brand=brand)
                 title, url = _output_title(title, url)
                 base_clef.update({
                     "Clef Cache": "SIM" if (cache_hit and repair_cache_hit) else "NÃO",
