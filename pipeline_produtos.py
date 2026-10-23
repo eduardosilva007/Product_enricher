@@ -5457,6 +5457,29 @@ class ClefFunnelClassifier:
         ranked = sorted(zip(labels, scores), key=lambda kv: (-kv[1], kv[0]))
         return [x[0] for x in ranked[:top_k]], {x[0]: float(x[1]) for x in ranked}
 
+    @staticmethod
+    def _apply_source_purpose_semantic_guard(
+        type_pool: Sequence[str],
+        s1: Stage1Result,
+    ) -> List[str]:
+        """Impede o BGE de reintroduzir componente inferido só do propósito da página."""
+        out = list(type_pool)
+        has_parent_parts_page = any(
+            "PARTS_CATALOG_TITLE" in set(src.quality_flags or [])
+            or "PARTS_DOCUMENTATION_TITLE" in set(src.quality_flags or [])
+            for src in s1.sources
+        )
+        non_catalog_part_support = any(
+            "PART" in (src.type_hits or {})
+            and "PARTS_CATALOG_TITLE" not in set(src.quality_flags or [])
+            and "PARTS_DOCUMENTATION_TITLE" not in set(src.quality_flags or [])
+            for src in s1.sources
+        )
+        if has_parent_parts_page and not non_catalog_part_support and "PART" not in s1.type_candidates:
+            out = [typ for typ in out if typ != "PART"]
+        return out
+
+
     def _semantic_candidates(self, brand: str, model: str, s1: Stage1Result) -> Dict[str, Any]:
         self._ensure_models()
         started = time.monotonic()
@@ -5470,6 +5493,7 @@ class ClefFunnelClassifier:
             type_lex, type_dense, s1.type_candidates,
             self.type_dense_k, self.type_pool_k,
         )
+        type_pool = self._apply_source_purpose_semantic_guard(type_pool, s1)
 
         # TYPE: BGE + lexical/RRF já têm recall alto e são baratos. O cross-encoder
         # fica desligado por padrão nesta etapa para não duplicar o maior custo em CPU.
