@@ -3429,7 +3429,12 @@
         "briggs & stratton engine",
         "briggs and stratton engine",
         "honda gx engine",
-        "honda gcv engine"
+        "honda gcv engine",
+        "essence",
+        "moteur essence",
+        "moteur thermique",
+        "4 temps",
+        "2 temps"
       ],
       "engine_keywords": [
         "cc",
