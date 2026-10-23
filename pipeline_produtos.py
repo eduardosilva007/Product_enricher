@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.7.3-structural-sku-core / Collection R9.6p7.2.3
+PIPELINE DE ENRIQUECIMENTO DE PRODUTOS v4.0.8-flow-state-classifier-hardening / Collection R9.6p8
 
 Arquitetura:
     Stage 0A - Search Provider único (Tavily/Serper/Bright Data) - MAX 1 request
@@ -56,14 +56,22 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
 
-PIPELINE_VERSION = "4.0.7.3.1-input-scoped-recuration"
-PROMPT_VERSION = "2026-10-13-v19-clef-joint-repair-identity-guard"
+PIPELINE_VERSION = "4.0.8-flow-state-classifier-hardening"
+PROMPT_VERSION = "2026-10-23-v20-source-purpose-type-taxonomy-guard"
+CLASSIFICATION_SEMANTIC_VERSION = "2026-10-23-classifier-v20"
+COHORT_MANIFEST_SCHEMA_VERSION = "1"
 DEFAULT_CLEF_MODEL = "clef"
-BUILD_LABEL = "v4.0.7.3.1 Structural SKU Core + Input-Scoped Recuration"
-COLLECTION_ENGINE_VERSION = "2026-10-22-r9.6p7.2.3-structural-sku-core"
-COLLECTION_LABEL = "R9.6p7.2.3"
+BUILD_LABEL = "v4.0.8 Cohort Manifest + Lifecycle State + Classifier Hardening"
+COLLECTION_ENGINE_VERSION = "2026-10-23-r9.6p8-source-purpose"
+COLLECTION_LABEL = "R9.6p8"
 IDENTITY_PROFILE_VERSION = "2026-10-22-structural-sku-core-v3"
 EVIDENCE_CACHE_SCHEMA_VERSION = "1"
+
+LIFECYCLE_PENDING_PROCESSING = "PENDING_PROCESSING"
+LIFECYCLE_CLASSIFIED_PENDING_REVIEW = "CLASSIFIED_PENDING_REVIEW"
+LIFECYCLE_ACCEPTED_AUTO = "ACCEPTED_AUTO"
+LIFECYCLE_ACCEPTED_HUMAN = "ACCEPTED_HUMAN"
+LIFECYCLE_NEEDS_RECOLLECTION = "NEEDS_RECOLLECTION"
 
 DEFAULT_STRUCTURAL_EDGE_DECORATOR_REGEXES = (
     r"^M(?:12|18)$",
