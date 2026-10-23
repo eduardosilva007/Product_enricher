@@ -43,6 +43,13 @@ def curated(title, url, content, identity="STRONG", decision="ACCEPT_TARGET_CLEA
 
 
 class FlowStateClassifierV408Tests(unittest.TestCase):
+    def test_release_and_flow_contracts_validate_together(self):
+        self.assertEqual(p.validate_collection_policy(POLICY), [])
+        self.assertEqual(RULES.validate(), [])
+        self.assertEqual(p.validate_release_contract(CFG, RULES, POLICY), [])
+        self.assertEqual(p.validate_classification_flow_policy(CFG), [])
+        self.assertEqual(p.validate_identity_runtime_contract(CFG), [])
+
     def test_classified_clef_is_pending_review_not_accepted(self):
         rec = {
             "Resolution State": "CLASSIFIED_CLEF",
