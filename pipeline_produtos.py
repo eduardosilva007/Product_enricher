@@ -2426,6 +2426,23 @@ def _llm_unverified_review_context(
     return "\n".join(lines).strip()
 
 
+def _source_purpose_flags_policy(
+    title: str,
+    content: str,
+    policy: Dict[str, Any],
+) -> List[str]:
+    purpose = policy.get("source_purpose", {}) or {}
+    title_fold = strip_accents(safe(title)).casefold()
+    flags: List[str] = []
+    if _term_present(title_fold, purpose.get("parts_catalog_title_terms", []) or []):
+        flags.append("PARTS_CATALOG_TITLE")
+    if _term_present(title_fold, purpose.get("repair_title_terms", []) or []):
+        flags.append("REPAIR_TITLE")
+    if _term_present(title_fold, purpose.get("documentation_title_terms", []) or []):
+        flags.append("PARTS_DOCUMENTATION_TITLE")
+    return flags
+
+
 def _source_sieve(
     brand: str,
     search_model: str,
@@ -2460,7 +2477,7 @@ def _source_sieve(
                 identity = dict(body_rescue)
                 identity_origin = "BODY_RESCUE"
         search_text = f"{title}\n{snippet}".strip()
-        flags: List[str] = []
+        flags: List[str] = _source_purpose_flags_policy(title, snippet, policy)
 
         decision = "ACCEPT_SOURCE_SIEVE_BODY_RESCUE" if identity_origin == "BODY_RESCUE" else "ACCEPT_SOURCE_SIEVE"
         reason = (
@@ -4026,7 +4043,9 @@ class DeterministicEngine:
             flags.append("NEGATIVE_TITLE_TERM")
         if any(safe(x) and contains_alias_prepared(page_fold, x) for x in (self.rules.source_rules.get("negative_page_terms", []) or [])):
             flags.append("NEGATIVE_PAGE_TERM")
-        return flags
+        policy = self.cfg.get("_collection_policy", {}) or {}
+        flags.extend(_source_purpose_flags_policy(title, content, policy))
+        return list(dict.fromkeys(flags))
 
     def _title_only_rescue_rows(self, brand: str, model: str, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Recupera somente TITULOS target-anchored do RAW Search.
@@ -4164,22 +4183,44 @@ class DeterministicEngine:
         hits: Dict[str, List[str]] = {}
         fields: Dict[str, List[str]] = defaultdict(list)
 
+        purpose_flags = set(src.quality_flags or [])
         for typ, patterns in self.rules._compiled_aliases.items():
             neg_patterns = self.rules._compiled_negative.get(typ, [])
-            if any(p.search(combined) for _, p in neg_patterns):
+            if typ == "PART" and "PARTS_CATALOG_TITLE" in purpose_flags:
+                # "MODEL parts" descreve peças PARA o equipamento pai. Não prova
+                # que o próprio MODEL seja uma peça.
                 continue
             if typ in self.component_negations and any(contains_alias_prepared(combined, x) for x in self.component_negations.get(typ, [])):
                 continue
 
-            matched = [alias for alias, p in patterns if self._collision_allows(typ, alias) and p.search(combined)]
+            title_matches = [
+                alias for alias, p in patterns
+                if self._collision_allows(typ, alias) and p.search(title_fold)
+            ]
+            body_matches = [
+                alias for alias, p in patterns
+                if self._collision_allows(typ, alias) and p.search(body_fold)
+            ]
+            matched = title_matches + [x for x in body_matches if x not in title_matches]
             if not matched:
                 continue
+
+            negative_title = any(p.search(title_fold) for _, p in neg_patterns)
+            negative_body = any(p.search(body_fold) for _, p in neg_patterns)
+            if negative_title:
+                continue
+            # Um negativo apenas no BODY não apaga um tipo físico explicitamente
+            # identificado no TITLE. Isso evita "Engine" virar PART porque a
+            # página também contém navegação/links de engine parts.
+            if negative_body and not title_matches:
+                continue
+
             max_words = max(len(norm_text(a).split()) for a in matched)
             chosen = sorted({a for a in matched if len(norm_text(a).split()) == max_words})
             hits[typ] = chosen
-            if any(p.search(title_fold) for a, p in patterns if a in chosen):
+            if any(a in chosen for a in title_matches):
                 fields[typ].append("TITLE")
-            if any(p.search(body_fold) for a, p in patterns if a in chosen):
+            if any(a in chosen for a in body_matches):
                 fields[typ].append("BODY")
 
         # Recovery Ladder p6: TAXONOMY_EVIDENCE_RULES também podem GERAR o
