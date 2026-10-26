@@ -44,7 +44,8 @@ class InputRegistrationTests(unittest.TestCase):
             pd.DataFrame([{"Marca":"BESTOOL","Modelo":"HL2002"}]).to_excel(inp,index=False)
             rules = p.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
             result = p.persist_baseline_excels([], master, final, inp, rules)
-            self.assertEqual(result["input_registered"], 1)
+            # Master inexistente utiliza o próprio arquivo de entrada como origem.
+            self.assertEqual(result["input_registered"], 0)
             exported, _ = p._read_business_sheet(final)
             self.assertEqual(exported["Modelo"].tolist(), ["HL2002"])
             self.assertEqual(exported["Revisão"].iloc[0], "PENDENTE_COLETA")
