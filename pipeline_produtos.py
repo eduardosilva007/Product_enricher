@@ -7539,9 +7539,11 @@ def persist_baseline_excels(
     elif final_path and final_path.exists():
         source_path = final_path
 
-    if source_path:
+    if source_path and source_path != input_path:
         master_df, master_sheet = _read_business_sheet(source_path)
     else:
+        # A entrada é lista de SKUs, não uma baseline já classificada.
+        # Partir de um cadastro vazio evita declarar itens como existentes sem status.
         master_df = pd.DataFrame(columns=["Marca", "Modelo"])
 
     master_df, brand_col, model_col = _ensure_master_columns(master_df)
