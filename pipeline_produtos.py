@@ -7480,6 +7480,38 @@ def _export_base_final(
         raise
     return len(out)
 
+def _register_input_keys_in_master(master_df: Any, input_path: Optional[Path]) -> Tuple[Any, int]:
+    """Cadastro total da entrada; não atribui classificação sem evidência.
+
+    Nunca altera registros existentes, inclusive B.I=OK e classificação manual.
+    """
+    import pandas as pd
+
+    if not input_path or not input_path.exists():
+        return master_df, 0
+    master_df, brand_col, model_col = _ensure_master_columns(master_df)
+    present = set(_master_key_index(master_df, brand_col, model_col))
+    added = 0
+    for item in read_input_rows(input_path):
+        if not item.valid or item.key in present:
+            continue
+        row = {col: pd.NA for col in master_df.columns}
+        row[brand_col] = item.brand_original
+        row[model_col] = item.model_original
+        row["Status"] = "Script"
+        row["Status Processamento"] = "PENDING_COLLECTION"
+        row["Revisão"] = "PENDENTE_COLETA"
+        row["Resolution State"] = "PENDING_COLLECTION"
+        row["Review Required"] = "SIM"
+        row["Próxima Ação"] = "REVISAR_MANUAL_OU_CLASSIFICAR"
+        row["Reason Code"] = "INPUT_PENDING_CLASSIFICATION"
+        row["Motivo"] = "Registro da entrada ainda sem classificação validada."
+        master_df.loc[len(master_df)] = row
+        present.add(item.key)
+        added += 1
+    return master_df, added
+
+
 def persist_baseline_excels(
     rows: List[Dict[str, Any]],
     master_path: Optional[Path],
@@ -7515,6 +7547,7 @@ def persist_baseline_excels(
     master_df, brand_col, model_col = _ensure_master_columns(master_df)
     master_df, sync_stats = _sync_final_into_master(master_df, final_path, brand_col, model_col)
     master_df, brand_col, model_col = _ensure_master_columns(master_df)
+    master_df, input_registered = _register_input_keys_in_master(master_df, input_path)
     master_df, merge_stats = _upsert_run_rows_into_master(
         master_df, rows, brand_col, model_col, rules, reprocess, force_reprocess_keys
     )
@@ -7530,6 +7563,7 @@ def persist_baseline_excels(
     stats = {
         **sync_stats,
         **merge_stats,
+        "input_registered": input_registered,
         "legacy_taxonomy_cleaned": legacy_taxonomy_cleaned,
         "review_bi_snapshot_rows": len(review_bi_snapshot),
         "bi_ok_hard_lock_rows": len(bi_lock_snapshot),
@@ -9242,6 +9276,31 @@ def main() -> int:
     if args.mode == "validate":
         validate_all(rules, cfg, args.cache)
         return 0
+    # A existência do SKU nas bases finais não depende de Search nem de classificação.
+    # Executa uma única sincronização segura antes de coletar/classificar.
+    if args.mode in {"collect", "classify", "full"}:
+        files_cfg = cfg.get("files", {}) or {}
+        input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
+        master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
+        final_sync = Path(files_cfg.get("final", "Base Final Produtos Enriquecida.xlsx"))
+        if not input_sync.exists():
+            LOG.error("Sincronização não iniciada: Base de entrada ausente: %s", input_sync)
+            return 2
+        try:
+            _backup_baseline_files(
+                master_sync, final_sync,
+                Path(files_cfg.get("baseline_backup_dir", "Backups_Baseline")),
+            )
+            sync_stats = persist_baseline_excels(
+                rows=[], master_path=master_sync, final_path=final_sync,
+                input_path=input_sync, rules=rules,
+            )
+            LOG.info("INPUT BASELINE SYNC OK | inserted=%s | final_rows=%s",
+                     sync_stats.get("input_registered", 0), sync_stats.get("final_rows", 0))
+        except Exception as exc:
+            LOG.error("INPUT BASELINE SYNC FAILED; interrompendo para preservar os dados: %s", exc)
+            return 2
+
     if args.mode == "repair":
         run_baseline_repair(args, cfg, rules)
         return 0
