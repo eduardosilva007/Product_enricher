@@ -8897,7 +8897,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -9280,7 +9280,7 @@ def main() -> int:
         return 0
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
-    if args.mode in {"collect", "classify", "full"}:
+    if args.mode in {"collect", "classify", "full", "sync-input"}:
         files_cfg = cfg.get("files", {}) or {}
         input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
         master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
@@ -9324,6 +9324,8 @@ def main() -> int:
             "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
             "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
         )
+    if args.mode == "sync-input":
+        return 0
     if args.mode == "inventory":
         run_pipeline(args, cfg, rules)
         return 0
