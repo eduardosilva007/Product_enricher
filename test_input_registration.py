@@ -58,7 +58,9 @@ class InputRegistrationTests(unittest.TestCase):
             self.assertEqual(approved["Revisão B.I"], "OK")
             self.assertEqual(approved["FAMILY"], "POLISHER")
             self.assertNotEqual(p.safe(variant["Revisão B.I"]), "OK")
-            self.assertEqual(variant["Revisão"], "PENDENTE")
+            self.assertEqual(variant["Revisão"], "PROVÁVEL")
+            self.assertEqual(variant["FAMILY"], "POLISHER")
+            self.assertEqual(variant["Próxima Ação"], "VALIDAR_EQUIVALENCIA_MODELO")
 
     def test_exact_model_variants_are_visible_for_procv(self):
         with tempfile.TemporaryDirectory() as td:
