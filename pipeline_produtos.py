@@ -7006,21 +7006,28 @@ def _apply_review_bi_snapshot(
     model_col: str,
     snapshot: Dict[str, Any],
     source_exists: bool,
+    bi_lock_snapshot: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Any:
-    """Base Final é a fonte de verdade humana de Revisão B.I."""
+    """Reaplica B.I=OK somente ao par original aprovado na Base Final."""
     import pandas as pd
     if "Revisão B.I" not in df.columns:
         df["Revisão B.I"] = pd.NA
     if not source_exists:
         return df
-    # Limpa inclusive valores antigos do Consolidado e reaplica exatamente o snapshot da Base Final.
+    # Nunca replica OK para todas as linhas que compartilham chave normalizada.
+    # Primeiro posiciona cada aprovação no par exato Marca+Modelo da Base Final.
+    locks = bi_lock_snapshot or {}
     df["Revisão B.I"] = pd.NA
     for idx, row in df.iterrows():
         brand, model = safe(row.get(brand_col)), safe(row.get(model_col))
         if not brand or not model:
             continue
         key = business_key(brand, model)
-        if key in snapshot:
+        approved = locks.get(key)
+        if approved:
+            if (brand, model) == (approved["Marca"], approved["Modelo"]):
+                df.at[idx, "Revisão B.I"] = "OK"
+        elif key in snapshot:
             df.at[idx, "Revisão B.I"] = snapshot[key]
     return df
 
@@ -7175,6 +7182,25 @@ def _sync_final_into_master(
 
         if key in key_index:
             idx = key_index[key]
+
+            # O registro B.I=OK deve ocupar exatamente o par original aprovado,
+            # mesmo que outra grafia compartilhe a business_key.
+            if src_bi_ok and (safe(master_df.at[idx, brand_col]), safe(master_df.at[idx, model_col])) != (brand, model):
+                exact = [
+                    i for i in master_df.index
+                    if safe(master_df.at[i, brand_col]) == brand
+                    and safe(master_df.at[i, model_col]) == model
+                ]
+                if exact:
+                    idx = exact[-1]
+                else:
+                    new_row = {col: pd.NA for col in master_df.columns}
+                    new_row[brand_col] = brand
+                    new_row[model_col] = model
+                    idx = len(master_df)
+                    master_df.loc[idx] = new_row
+                    stats["final_rows_imported"] += 1
+                key_index[key] = idx
 
             # BI_OK é absoluto: a Base Final vence o Consolidado inclusive nos vazios.
             if src_bi_ok:
@@ -7592,7 +7618,8 @@ def persist_baseline_excels(
     )
 
     master_df = _apply_review_bi_snapshot(
-        master_df, brand_col, model_col, review_bi_snapshot, review_bi_source_exists
+        master_df, brand_col, model_col, review_bi_snapshot, review_bi_source_exists,
+        bi_lock_snapshot=bi_lock_snapshot
     )
     master_df, legacy_taxonomy_cleaned = _sanitize_legacy_unresolved_taxonomy(master_df)
 
