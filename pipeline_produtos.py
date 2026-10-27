@@ -7563,8 +7563,22 @@ def _export_base_final(
         }
         requested.update(input_pairs)
 
+    # Detecta conflitos reais de taxonomia em variantes da mesma chave.
+    signatures = {}
+    for rec in list(base.values()) + [
+        {col: prev.get(col, pd.NA) for col in BASELINE_FINAL_COLUMNS}
+        for prev in prior_exact.values()
+    ]:
+        if not classified(rec):
+            continue
+        key = business_key(safe(rec["Marca"]), safe(rec["Modelo"]))
+        signature = tuple(safe(rec.get(col)).upper() for col in required)
+        signatures.setdefault(key, set()).add(signature)
+    conflict_keys = {key for key, values in signatures.items() if len(values) > 1}
+
     created = 0
     enriched = 0
+    inherited = 0
     for pair in sorted(requested | set(base)):
         rec = base.get(pair)
         if rec is None:
@@ -7598,8 +7612,22 @@ def _export_base_final(
         if not present(rec.get("Status")):
             rec["Status"] = "Script"
         if classified(rec) and pair != (safe(source["Marca"]), safe(source["Modelo"])):
-            rec["Revisão"] = "PROVÁVEL"
-            rec["Próxima Ação"] = "VALIDAR_EQUIVALENCIA_MODELO"
+            key = business_key(*pair)
+            # Herda a classificação validada para grafias equivalentes,
+            # sem copiar o campo humano Revisão B.I.
+            if (_is_bi_ok_value(source.get("Revisão B.I"))
+                    and key not in conflict_keys
+                    and tuple(safe(rec.get(col)).upper() for col in required)
+                        == tuple(safe(source.get(col)).upper() for col in required)):
+                rec["Revisão"] = "AUTO_APROVADO"
+                rec["Próxima Ação"] = "CONCLUIDO_POR_EQUIVALENCIA_BI"
+                inherited += 1
+            else:
+                rec["Revisão"] = "PROVÁVEL"
+                rec["Próxima Ação"] = (
+                    "REVISAR_CONFLITO_EQUIVALENCIA" if key in conflict_keys
+                    else "VALIDAR_EQUIVALENCIA_MODELO"
+                )
         elif not present(rec.get("Revisão")):
             rec["Revisão"] = "PENDENTE"
             rec["Próxima Ação"] = "REVISAR_MANUAL_SEM_CLASSIFICACAO"
@@ -7618,6 +7646,7 @@ def _export_base_final(
         "aliases_added=%d | variants_enriched=%d | missing=0",
         len(input_pairs), len(prior_exact), created, enriched,
     )
+    LOG.info("BASE FINAL EQUIVALENCIA BI | herdados=%d | conflitos=%d", inherited, len(conflict_keys))
 
     tmp = final_path.with_name(final_path.stem + f".tmp_{os.getpid()}" + final_path.suffix)
     final_path.parent.mkdir(parents=True, exist_ok=True)
