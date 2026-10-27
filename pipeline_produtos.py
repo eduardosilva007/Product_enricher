@@ -6951,7 +6951,10 @@ def _assert_bi_lock_snapshot(df: Any, snapshot: Dict[str, Dict[str, str]], label
     for _, row in df.iterrows():
         brand, model = safe(row.get(b)), safe(row.get(m))
         if brand and model:
-            by_key[business_key(brand, model)] = row
+            key = business_key(brand, model)
+            existing = by_key.get(key)
+            if existing is None or (_row_bi_locked(row, df) and not _row_bi_locked(existing, df)):
+                by_key[key] = row
     errors = []
     for key, expected in snapshot.items():
         row = by_key.get(key)
@@ -6990,7 +6993,10 @@ def _load_review_bi_snapshot(
         brand, model = safe(row.get(b)), safe(row.get(m))
         if not brand or not model:
             continue
-        snapshot[business_key(brand, model)] = row.get(rb) if rb else None
+        key = business_key(brand, model)
+        value = row.get(rb) if rb else None
+        if key not in snapshot or _is_bi_ok_value(value):
+            snapshot[key] = value
     return snapshot, True
 
 
