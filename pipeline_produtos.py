@@ -7494,6 +7494,16 @@ def _export_base_final(
     # Contrato de cobertura: cada par exato deve ser persistido, inclusive aliases
     # de execuções anteriores. Chave compacta só serve para buscar classificação.
     # O registro B.I. permanece byte-semanticamente protegido no par de origem.
+    def present(value):
+        if value is None:
+            return False
+        try:
+            if bool(pd.isna(value)):
+                return False
+        except (TypeError, ValueError):
+            pass
+        return bool(safe(value))
+
     taxonomy = ["O que é (Tipo)", "Alimentação", "Category General", "FAMILY", "Título Real"]
     required = ["O que é (Tipo)", "Category General", "FAMILY"]
     prior_exact = {}
@@ -7512,7 +7522,7 @@ def _export_base_final(
         base[pair] = {col: existing.get(col, pd.NA) for col in BASELINE_FINAL_COLUMNS}
 
     def classified(rec):
-        return all(safe(rec.get(col)) for col in required)
+        return all(present(rec.get(col)) for col in required)
 
     # Escolhe evidência completa antes de linhas pendentes; B.I. tem autoridade,
     # mas nunca se converte numa aprovação humana para uma variante.
@@ -7520,14 +7530,14 @@ def _export_base_final(
     for rec in base.values():
         key = business_key(safe(rec["Marca"]), safe(rec["Modelo"]))
         score = (int(classified(rec)), int(_is_bi_ok_value(rec.get("Revisão B.I"))),
-                 sum(bool(safe(rec.get(c))) for c in taxonomy))
+                 sum(bool(present(rec.get(c))) for c in taxonomy))
         if key not in by_key or score > by_key[key][0]:
             by_key[key] = (score, rec)
     for pair, prev in prior_exact.items():
         key = business_key(*pair)
         rec = {col: prev.get(col, pd.NA) for col in BASELINE_FINAL_COLUMNS}
         score = (int(classified(rec)), int(_is_bi_ok_value(rec.get("Revisão B.I"))),
-                 sum(bool(safe(rec.get(c))) for c in taxonomy))
+                 sum(bool(present(rec.get(c))) for c in taxonomy))
         if key not in by_key or score > by_key[key][0]:
             by_key[key] = (score, rec)
 
@@ -7553,31 +7563,31 @@ def _export_base_final(
             rec["Marca"], rec["Modelo"] = pair
             base[pair] = rec
             created += 1
-        if _is_bi_ok_value(rec.get("Revisão B.I")) or safe(rec.get("Status")).upper() == "MANUAL":
+        if _is_bi_ok_value(rec.get("Revisão B.I")) or present(rec.get("Status")).upper() == "MANUAL":
             continue
         src = by_key.get(business_key(*pair))
         if src is None:
-            if not safe(rec.get("Status")):
+            if not present(rec.get("Status")):
                 rec["Status"] = "Script"
-            if not safe(rec.get("Revisão")):
+            if not present(rec.get("Revisão")):
                 rec["Revisão"] = "PENDENTE"
-            if not safe(rec.get("Próxima Ação")):
+            if not present(rec.get("Próxima Ação")):
                 rec["Próxima Ação"] = "REVISAR_MANUAL_SEM_EVIDENCIA"
             continue
         source = src[1]
         changed = False
         for col in taxonomy:
-            if not safe(rec.get(col)) and safe(source.get(col)):
+            if not present(rec.get(col)) and present(source.get(col)):
                 rec[col] = source[col]
                 changed = True
         if changed:
             enriched += 1
-        if not safe(rec.get("Status")):
+        if not present(rec.get("Status")):
             rec["Status"] = "Script"
         if classified(rec) and pair != (safe(source["Marca"]), safe(source["Modelo"])):
             rec["Revisão"] = "PROVÁVEL"
             rec["Próxima Ação"] = "VALIDAR_EQUIVALENCIA_MODELO"
-        elif not safe(rec.get("Revisão")):
+        elif not present(rec.get("Revisão")):
             rec["Revisão"] = "PENDENTE"
             rec["Próxima Ação"] = "REVISAR_MANUAL_SEM_CLASSIFICACAO"
 
