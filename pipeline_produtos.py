@@ -7392,6 +7392,7 @@ def _export_base_final(
     review_bi_snapshot: Optional[Dict[str, Any]] = None,
     review_bi_source_exists: bool = False,
     bi_lock_snapshot: Optional[Dict[str, Dict[str, str]]] = None,
+    input_path: Optional[Path] = None,
 ) -> int:
     """Reconstrói Base Final preservando BI_OK byte-semanticamente nos campos humanos."""
     import pandas as pd
@@ -7457,6 +7458,36 @@ def _export_base_final(
     out = out[BASELINE_FINAL_COLUMNS].reset_index(drop=True)
 
     _assert_bi_lock_snapshot(out, bi_lock_snapshot or {}, "Base Final gerada")
+
+    # Cobertura física para PROCV: chave compacta é para matching, não substitui
+    # cada Marca+Modelo original. Não duplicar o B.I=OK nem replicar seu aval.
+    if input_path and input_path.exists():
+        exact = {(safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"])}
+        aliases = []
+        for item in read_input_rows(input_path):
+            pair = (item.brand_original, item.model_original)
+            if not item.valid or pair in exact:
+                continue
+            alias = {col: pd.NA for col in BASELINE_FINAL_COLUMNS}
+            alias.update({
+                "Marca": item.brand_original,
+                "Modelo": item.model_original,
+                "Status": "Script",
+                "Revisão": "PENDENTE",
+                "Próxima Ação": "REVISAR_MANUAL_VARIANTE_CODIGO",
+            })
+            aliases.append(alias)
+            exact.add(pair)
+        if aliases:
+            out = pd.concat([out, pd.DataFrame(aliases, columns=BASELINE_FINAL_COLUMNS)],
+                            ignore_index=True)
+        expected = {(x.brand_original, x.model_original) for x in read_input_rows(input_path) if x.valid}
+        actual = {(safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"])}
+        missing = expected - actual
+        if missing:
+            raise RuntimeError(f"BASE_FINAL_INPUT_COVERAGE_FAILED: {len(missing)} pares ausentes")
+        LOG.info("BASE FINAL PROCV COVERAGE OK | input_pairs=%d | aliases_added=%d",
+                 len(expected), len(aliases))
 
     tmp = final_path.with_name(final_path.stem + f".tmp_{os.getpid()}" + final_path.suffix)
     final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -7579,7 +7610,8 @@ def persist_baseline_excels(
 
     if final_path:
         stats["final_rows"] = _export_base_final(
-            master_df, final_path, review_bi_snapshot, review_bi_source_exists, bi_lock_snapshot
+            master_df, final_path, review_bi_snapshot, review_bi_source_exists, bi_lock_snapshot,
+            input_path=input_path
         )
 
     inv_after = load_baseline_inventory(master_path, final_path)
