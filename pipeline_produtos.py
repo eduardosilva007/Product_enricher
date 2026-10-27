@@ -7495,18 +7495,39 @@ def _export_base_final(
     # cada Marca+Modelo original. Não duplicar o B.I=OK nem replicar seu aval.
     if input_path and input_path.exists():
         exact = {(safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"])}
+        by_key = {}
+        for _, existing in out.iterrows():
+            key = business_key(safe(existing["Marca"]), safe(existing["Modelo"]))
+            if key not in by_key or _is_bi_ok_value(existing.get("Revisão B.I")):
+                by_key[key] = existing
         aliases = []
         for item in read_input_rows(input_path):
             pair = (item.brand_original, item.model_original)
             if not item.valid or pair in exact:
                 continue
             alias = {col: pd.NA for col in BASELINE_FINAL_COLUMNS}
+            source = by_key.get(item.key)
+            # Somente equivalência EXATA de business_key; reaproveita campos
+            # preenchidos, não a aprovação humana nem uma classificação inventada.
+            taxonomy = ["O que é (Tipo)", "Alimentação", "Category General", "FAMILY", "Título Real"]
+            has_classification = bool(
+                source is not None
+                and all(safe(source.get(col)) for col in
+                        ["O que é (Tipo)", "Category General", "FAMILY"])
+            )
+            if source is not None:
+                for col in taxonomy:
+                    if safe(source.get(col)):
+                        alias[col] = source.get(col)
             alias.update({
                 "Marca": item.brand_original,
                 "Modelo": item.model_original,
                 "Status": "Script",
-                "Revisão": "PENDENTE",
-                "Próxima Ação": "REVISAR_MANUAL_VARIANTE_CODIGO",
+                "Revisão": "PROVÁVEL" if has_classification else "PENDENTE",
+                "Próxima Ação": (
+                    "VALIDAR_EQUIVALENCIA_MODELO" if has_classification
+                    else "REVISAR_MANUAL_VARIANTE_CODIGO"
+                ),
             })
             aliases.append(alias)
             exact.add(pair)
