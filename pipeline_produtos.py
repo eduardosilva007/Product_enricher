@@ -7563,7 +7563,7 @@ def _export_base_final(
             rec["Marca"], rec["Modelo"] = pair
             base[pair] = rec
             created += 1
-        if _is_bi_ok_value(rec.get("Revisão B.I")) or present(rec.get("Status")).upper() == "MANUAL":
+        if _is_bi_ok_value(rec.get("Revisão B.I")) or (present(rec.get("Status")) and safe(rec.get("Status")).upper() == "MANUAL"):
             continue
         src = by_key.get(business_key(*pair))
         if src is None:
