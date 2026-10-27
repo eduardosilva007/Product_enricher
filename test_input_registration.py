@@ -35,6 +35,28 @@ class InputRegistrationTests(unittest.TestCase):
             self.assertEqual(second_added, 0)
             self.assertEqual(len(twice), len(output))
 
+    def test_exact_model_variants_are_visible_for_procv(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            inp = folder / "entrada.xlsx"
+            master = folder / "consolidado.xlsx"
+            final = folder / "final.xlsx"
+            pd.DataFrame([
+                {"Marca": "TOTAL", "Modelo": "TS11218576/4"},
+                {"Marca": "TOTAL", "Modelo": "TS11218576 4"},
+                {"Marca": "TOTAL", "Modelo": "TS11218576/4"},
+            ]).to_excel(inp, index=False)
+            rules = p.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
+            p.persist_baseline_excels([], master, final, inp, rules)
+            exported, _ = p._read_business_sheet(final)
+            self.assertEqual(set(exported["Modelo"]), {"TS11218576/4", "TS11218576 4"})
+            alias = exported.loc[exported["Modelo"].eq("TS11218576 4")].iloc[0]
+            self.assertEqual(alias["Revisão"], "PENDENTE")
+            self.assertNotEqual(p.safe(alias["Revisão B.I"]), "OK")
+            p.persist_baseline_excels([], master, final, inp, rules)
+            exported_twice, _ = p._read_business_sheet(final)
+            self.assertEqual(len(exported_twice), 2)
+
     def test_persist_populates_final_without_classification(self):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
