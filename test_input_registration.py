@@ -6,6 +6,18 @@ import pandas as pd
 import pipeline_produtos as p
 
 class InputRegistrationTests(unittest.TestCase):
+    def test_rate_limiter_concurrent_slots_are_spaced(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import time
+        limiter = p.RateLimiter(1200)  # 50 ms entre slots
+        def take_slot(_):
+            limiter.wait()
+            return time.monotonic()
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            instants = sorted(pool.map(take_slot, range(6)))
+        gaps = [b - a for a, b in zip(instants, instants[1:])]
+        self.assertTrue(all(g >= 0.035 for g in gaps), gaps)
+
     def test_safe_missing_values_do_not_create_fake_classifications(self):
         self.assertEqual(p.safe(pd.NA), "")
         self.assertEqual(p.safe(float("nan")), "")
