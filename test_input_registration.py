@@ -6,6 +6,13 @@ import pandas as pd
 import pipeline_produtos as p
 
 class InputRegistrationTests(unittest.TestCase):
+    def test_safe_missing_values_do_not_create_fake_classifications(self):
+        self.assertEqual(p.safe(pd.NA), "")
+        self.assertEqual(p.safe(float("nan")), "")
+        self.assertEqual(p.safe(None), "")
+        self.assertEqual(p.safe(0), "0")
+        self.assertEqual(p.safe(False), "False")
+
     def test_register_missing_input_and_preserve_human_rows(self):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
