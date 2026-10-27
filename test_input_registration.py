@@ -84,6 +84,45 @@ class InputRegistrationTests(unittest.TestCase):
             exported_twice, _ = p._read_business_sheet(final)
             self.assertEqual(len(exported_twice), 2)
 
+    def test_stihl_variants_are_filled_and_preserved_across_syncs(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            inp, master, final = (folder / x for x in ("input.xlsx", "master.xlsx", "final.xlsx"))
+            pd.DataFrame([
+                {"Marca":"STIHL","Modelo":"FS 161 L"},
+                {"Marca":"STIHL","Modelo":"FS 161/L"},
+                {"Marca":"STIHL","Modelo":"FS 161L"},
+            ]).to_excel(inp, index=False)
+            pd.DataFrame([{
+                "Marca":"STIHL","Modelo":"FS 161 L",
+                "O que é (Tipo)":"TRIMMER","Alimentação":"PETROL",
+                "Category General":"PETROL HANDHELD","FAMILY":"PETROL TRIMMER",
+                "Título Real":"FS 161 L petrol brushcutter",
+                "Status":"Script","Revisão":"AUTO_APROVADO","Revisão B.I":"OK"
+            }]).to_excel(master, sheet_name="Consolidado", index=False)
+            # Existing empty variant must be repaired, not skipped.
+            pd.DataFrame([
+                {"Marca":"STIHL","Modelo":"FS 161 L",
+                 "O que é (Tipo)":"TRIMMER","Alimentação":"PETROL",
+                 "Category General":"PETROL HANDHELD","FAMILY":"PETROL TRIMMER",
+                 "Título Real":"FS 161 L petrol brushcutter",
+                 "Status":"Script","Revisão":"AUTO_APROVADO","Revisão B.I":"OK"},
+                {"Marca":"STIHL","Modelo":"FS 161/L","Status":"Script",
+                 "Revisão":"PENDENTE","Próxima Ação":"REVISAR_MANUAL_VARIANTE_CODIGO"},
+            ]).to_excel(final, sheet_name="Base Final", index=False)
+            rules = p.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
+            for _ in range(2):
+                p.persist_baseline_excels([], master, final, inp, rules)
+                actual, _ = p._read_business_sheet(final)
+                self.assertEqual(set(actual["Modelo"]), {"FS 161 L","FS 161/L","FS 161L"})
+                self.assertEqual(len(actual), 3)
+                for _, row in actual.iterrows():
+                    self.assertEqual(row["FAMILY"], "PETROL TRIMMER")
+                    self.assertEqual(row["O que é (Tipo)"], "TRIMMER")
+                    if row["Modelo"] != "FS 161 L":
+                        self.assertNotEqual(p.safe(row["Revisão B.I"]), "OK")
+                        self.assertEqual(row["Revisão"], "PROVÁVEL")
+
     def test_persist_populates_final_without_classification(self):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
