@@ -167,6 +167,52 @@ class InputRegistrationTests(unittest.TestCase):
             self.assertNotEqual(p.safe(variant["Revisão B.I"]),"OK")
             self.assertNotEqual(variant["Próxima Ação"],"CONCLUIDO_POR_EQUIVALENCIA_BI")
 
+    def test_total_variants_share_one_probable_review(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            inp, master, final = (folder / n for n in ("entrada.xlsx", "consolidado.xlsx", "final.xlsx"))
+            pd.DataFrame([
+                {"Marca":"TOTAL","Modelo":"TB20078/4"},
+                {"Marca":"TOTAL","Modelo":"TB20078_4"}
+            ]).to_excel(inp,index=False)
+            pd.DataFrame([{
+                "Marca":"TOTAL","Modelo":"TB20078/4",
+                "O que é (Tipo)":"HEAT GUN","Alimentação":"CORDED",
+                "Category General":"OTHERS","FAMILY":"HEAT GUN",
+                "Título Real":"TOTAL Heat gun 2.000W (TB20078)",
+                "Status":"Script","Revisão":"PROVÁVEL",
+                "Próxima Ação":"DOUBLE_CHECK",
+            }]).to_excel(master,index=False)
+            rules=p.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
+            for _ in range(2):
+                p.persist_baseline_excels([],master,final,inp,rules)
+                exported,_=p._read_business_sheet(final)
+                self.assertEqual(len(exported),2)
+                variant=exported.loc[exported["Modelo"].eq("TB20078_4")].iloc[0]
+                self.assertEqual(variant["FAMILY"],"HEAT GUN")
+                self.assertEqual(variant["Revisão"],"PROVÁVEL")
+                self.assertEqual(variant["Próxima Ação"],"AGUARDAR_REVISAO_PRODUTO_CANONICO")
+                self.assertEqual(sum(exported["Próxima Ação"].eq("VALIDAR_EQUIVALENCIA_MODELO")),0)
+
+    def test_technical_auto_approval_propagates_without_bi(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            inp, master, final = (folder / n for n in ("entrada.xlsx", "consolidado.xlsx", "final.xlsx"))
+            pd.DataFrame([{"Marca":"TOTAL","Modelo":"TB20078_4"}]).to_excel(inp,index=False)
+            pd.DataFrame([{
+                "Marca":"TOTAL","Modelo":"TB20078/4",
+                "O que é (Tipo)":"HEAT GUN","Alimentação":"CORDED",
+                "Category General":"OTHERS","FAMILY":"HEAT GUN",
+                "Status":"Script","Revisão":"AUTO_APROVADO","Próxima Ação":"CONCLUIDO",
+            }]).to_excel(master,index=False)
+            rules=p.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
+            p.persist_baseline_excels([],master,final,inp,rules)
+            exported,_=p._read_business_sheet(final)
+            variant=exported.loc[exported["Modelo"].eq("TB20078_4")].iloc[0]
+            self.assertEqual(variant["Revisão"],"AUTO_APROVADO")
+            self.assertEqual(variant["Próxima Ação"],"CONCLUIDO_POR_EQUIVALENCIA_TECNICA")
+            self.assertNotEqual(p.safe(variant["Revisão B.I"]),"OK")
+
     def test_persist_populates_final_without_classification(self):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
