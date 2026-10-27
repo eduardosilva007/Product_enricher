@@ -95,7 +95,7 @@ def safe(v: Any) -> str:
     try:
         import pandas as pd
         missing = pd.isna(v)
-        if isinstance(missing, (bool, type(pd.NA))) and missing is not pd.NA and missing:
+        if missing is pd.NA or (isinstance(missing, bool) and missing):
             return ""
     except (TypeError, ValueError, ImportError):
         pass
