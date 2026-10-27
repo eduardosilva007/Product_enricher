@@ -35,6 +35,31 @@ class InputRegistrationTests(unittest.TestCase):
             self.assertEqual(second_added, 0)
             self.assertEqual(len(twice), len(output))
 
+    def test_bi_ok_approved_row_not_broadcast_to_other_sku_variant(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            inp, master, final = (folder / n for n in ("entrada.xlsx", "consolidado.xlsx", "final.xlsx"))
+            pd.DataFrame([{"Marca":"3D", "Modelo":"L 37 PRO"}]).to_excel(inp, index=False)
+            pd.DataFrame([
+                {"Marca":"3D", "Modelo":"L 37 PRO", "Revisão B.I":"", "Status":"Script"}
+            ]).to_excel(master, sheet_name="Consolidado", index=False)
+            pd.DataFrame([{
+                "Marca":"3D", "Modelo":"L37PRO",
+                "Revisão B.I":"OK", "Revisão":"AUTO_APROVADO",
+                "Status":"Script", "O que é (Tipo)":"POLISHER",
+                "Alimentação":"UNKNOWN", "Category General":"OTHERS",
+                "FAMILY":"POLISHER", "Título Real":"Pulidora Dual Action",
+            }]).to_excel(final, sheet_name="Base Final", index=False)
+            rules = p.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
+            p.persist_baseline_excels([], master, final, inp, rules)
+            result, _ = p._read_business_sheet(final)
+            approved = result[result["Modelo"] == "L37PRO"].iloc[0]
+            variant = result[result["Modelo"] == "L 37 PRO"].iloc[0]
+            self.assertEqual(approved["Revisão B.I"], "OK")
+            self.assertEqual(approved["FAMILY"], "POLISHER")
+            self.assertNotEqual(p.safe(variant["Revisão B.I"]), "OK")
+            self.assertEqual(variant["Revisão"], "PENDENTE")
+
     def test_exact_model_variants_are_visible_for_procv(self):
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
