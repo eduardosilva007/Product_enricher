@@ -7491,56 +7491,110 @@ def _export_base_final(
 
     _assert_bi_lock_snapshot(out, bi_lock_snapshot or {}, "Base Final gerada")
 
-    # Cobertura física para PROCV: chave compacta é para matching, não substitui
-    # cada Marca+Modelo original. Não duplicar o B.I=OK nem replicar seu aval.
+    # Contrato de cobertura: cada par exato deve ser persistido, inclusive aliases
+    # de execuções anteriores. Chave compacta só serve para buscar classificação.
+    # O registro B.I. permanece byte-semanticamente protegido no par de origem.
+    taxonomy = ["O que é (Tipo)", "Alimentação", "Category General", "FAMILY", "Título Real"]
+    required = ["O que é (Tipo)", "Category General", "FAMILY"]
+    prior_exact = {}
+    if final_path.exists():
+        prior_df, _ = _read_business_sheet(final_path)
+        pb = find_col(prior_df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        pm = find_col(prior_df, ["Modelo", "Model", "SKU", "Part Number"])
+        for _, prev in prior_df.iterrows():
+            pair = (safe(prev.get(pb)), safe(prev.get(pm)))
+            if pair[0] and pair[1]:
+                prior_exact[pair] = prev
+
+    base = {}
+    for _, existing in out.iterrows():
+        pair = (safe(existing["Marca"]), safe(existing["Modelo"]))
+        base[pair] = {col: existing.get(col, pd.NA) for col in BASELINE_FINAL_COLUMNS}
+
+    def classified(rec):
+        return all(safe(rec.get(col)) for col in required)
+
+    # Escolhe evidência completa antes de linhas pendentes; B.I. tem autoridade,
+    # mas nunca se converte numa aprovação humana para uma variante.
+    by_key = {}
+    for rec in base.values():
+        key = business_key(safe(rec["Marca"]), safe(rec["Modelo"]))
+        score = (int(classified(rec)), int(_is_bi_ok_value(rec.get("Revisão B.I"))),
+                 sum(bool(safe(rec.get(c))) for c in taxonomy))
+        if key not in by_key or score > by_key[key][0]:
+            by_key[key] = (score, rec)
+    for pair, prev in prior_exact.items():
+        key = business_key(*pair)
+        rec = {col: prev.get(col, pd.NA) for col in BASELINE_FINAL_COLUMNS}
+        score = (int(classified(rec)), int(_is_bi_ok_value(rec.get("Revisão B.I"))),
+                 sum(bool(safe(rec.get(c))) for c in taxonomy))
+        if key not in by_key or score > by_key[key][0]:
+            by_key[key] = (score, rec)
+
+    requested = set(prior_exact)
+    input_pairs = set()
     if input_path and input_path.exists():
-        exact = {(safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"])}
-        by_key = {}
-        for _, existing in out.iterrows():
-            key = business_key(safe(existing["Marca"]), safe(existing["Modelo"]))
-            if key not in by_key or _is_bi_ok_value(existing.get("Revisão B.I")):
-                by_key[key] = existing
-        aliases = []
-        for item in read_input_rows(input_path):
-            pair = (item.brand_original, item.model_original)
-            if not item.valid or pair in exact:
-                continue
-            alias = {col: pd.NA for col in BASELINE_FINAL_COLUMNS}
-            source = by_key.get(item.key)
-            # Somente equivalência EXATA de business_key; reaproveita campos
-            # preenchidos, não a aprovação humana nem uma classificação inventada.
-            taxonomy = ["O que é (Tipo)", "Alimentação", "Category General", "FAMILY", "Título Real"]
-            has_classification = bool(
-                source is not None
-                and all(safe(source.get(col)) for col in
-                        ["O que é (Tipo)", "Category General", "FAMILY"])
-            )
-            if source is not None:
-                for col in taxonomy:
-                    if safe(source.get(col)):
-                        alias[col] = source.get(col)
-            alias.update({
-                "Marca": item.brand_original,
-                "Modelo": item.model_original,
-                "Status": "Script",
-                "Revisão": "PROVÁVEL" if has_classification else "PENDENTE",
-                "Próxima Ação": (
-                    "VALIDAR_EQUIVALENCIA_MODELO" if has_classification
-                    else "REVISAR_MANUAL_VARIANTE_CODIGO"
-                ),
-            })
-            aliases.append(alias)
-            exact.add(pair)
-        if aliases:
-            out = pd.concat([out, pd.DataFrame(aliases, columns=BASELINE_FINAL_COLUMNS)],
-                            ignore_index=True)
-        expected = {(x.brand_original, x.model_original) for x in read_input_rows(input_path) if x.valid}
-        actual = {(safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"])}
-        missing = expected - actual
-        if missing:
-            raise RuntimeError(f"BASE_FINAL_INPUT_COVERAGE_FAILED: {len(missing)} pares ausentes")
-        LOG.info("BASE FINAL PROCV COVERAGE OK | input_pairs=%d | aliases_added=%d",
-                 len(expected), len(aliases))
+        input_pairs = {
+            (item.brand_original, item.model_original)
+            for item in read_input_rows(input_path) if item.valid
+        }
+        requested.update(input_pairs)
+
+    created = 0
+    enriched = 0
+    for pair in sorted(requested | set(base)):
+        rec = base.get(pair)
+        if rec is None:
+            # Preserva exatamente os dados já disponíveis em outra variante
+            # previamente exportada, inclusive correções manuais.
+            prev = prior_exact.get(pair)
+            rec = ({col: prev.get(col, pd.NA) for col in BASELINE_FINAL_COLUMNS}
+                   if prev is not None else {col: pd.NA for col in BASELINE_FINAL_COLUMNS})
+            rec["Marca"], rec["Modelo"] = pair
+            base[pair] = rec
+            created += 1
+        if _is_bi_ok_value(rec.get("Revisão B.I")) or safe(rec.get("Status")).upper() == "MANUAL":
+            continue
+        src = by_key.get(business_key(*pair))
+        if src is None:
+            if not safe(rec.get("Status")):
+                rec["Status"] = "Script"
+            if not safe(rec.get("Revisão")):
+                rec["Revisão"] = "PENDENTE"
+            if not safe(rec.get("Próxima Ação")):
+                rec["Próxima Ação"] = "REVISAR_MANUAL_SEM_EVIDENCIA"
+            continue
+        source = src[1]
+        changed = False
+        for col in taxonomy:
+            if not safe(rec.get(col)) and safe(source.get(col)):
+                rec[col] = source[col]
+                changed = True
+        if changed:
+            enriched += 1
+        if not safe(rec.get("Status")):
+            rec["Status"] = "Script"
+        if classified(rec) and pair != (safe(source["Marca"]), safe(source["Modelo"])):
+            rec["Revisão"] = "PROVÁVEL"
+            rec["Próxima Ação"] = "VALIDAR_EQUIVALENCIA_MODELO"
+        elif not safe(rec.get("Revisão")):
+            rec["Revisão"] = "PENDENTE"
+            rec["Próxima Ação"] = "REVISAR_MANUAL_SEM_CLASSIFICACAO"
+
+    out = pd.DataFrame(base.values(), columns=BASELINE_FINAL_COLUMNS)
+    # Executa o hard-lock também sobre a base final reconstruída.
+    _assert_bi_lock_snapshot(out, bi_lock_snapshot or {}, "Base Final com variantes")
+    exported_pairs = {(safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"])}
+    missing = input_pairs - exported_pairs
+    if missing:
+        raise RuntimeError(f"BASE_FINAL_INPUT_COVERAGE_FAILED: {len(missing)} pares ausentes")
+    if len(out) != len(exported_pairs):
+        raise RuntimeError("BASE_FINAL_DUPLICATE_EXACT_PAIR")
+    LOG.info(
+        "BASE FINAL PROCV COVERAGE OK | input_pairs=%d | prior_pairs=%d | "
+        "aliases_added=%d | variants_enriched=%d | missing=0",
+        len(input_pairs), len(prior_exact), created, enriched,
+    )
 
     tmp = final_path.with_name(final_path.stem + f".tmp_{os.getpid()}" + final_path.suffix)
     final_path.parent.mkdir(parents=True, exist_ok=True)
