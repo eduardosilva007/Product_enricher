@@ -438,21 +438,27 @@ class OperationalPause(RuntimeError):
 
 
 class RateLimiter:
-    """Controla rajadas por requests/minute no processo local."""
+    """Agenda slots globais de requests/minute, inclusive entre threads."""
     def __init__(self, requests_per_minute: float):
+        import threading
         rpm = max(0.0, float(requests_per_minute or 0))
         self.interval = (60.0 / rpm) if rpm > 0 else 0.0
-        self._last = 0.0
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
 
     def wait(self) -> float:
         if self.interval <= 0:
             return 0.0
-        now = time.monotonic()
-        remaining = (self._last + self.interval) - now
-        if self._last and remaining > 0:
+        # Reserva um slot sob lock; não segura o lock enquanto dorme.
+        # Todas as threads compartilham o mesmo calendário de requests.
+        with self._lock:
+            now = time.monotonic()
+            slot = max(now, self._next_slot)
+            self._next_slot = slot + self.interval
+            remaining = max(0.0, slot - now)
+        if remaining:
             time.sleep(remaining)
-        self._last = time.monotonic()
-        return max(0.0, remaining)
+        return remaining
 
 
 def classify_api_error(exc: Exception) -> str:
