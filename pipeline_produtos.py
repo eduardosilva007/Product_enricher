@@ -7208,6 +7208,10 @@ def _sync_final_into_master(
                 stats["final_bi_lock_promoted"] += 1
                 continue
 
+            # Uma variante não aprovada nunca rebaixa campos da linha B.I.
+            master_bi = find_col(master_df, ["Revisão B.I", "Revisao B.I"], required=False)
+            if master_bi and _is_bi_ok_value(master_df.at[idx, master_bi]):
+                continue
             if frbi:
                 master_df.at[idx, "Revisão B.I"] = src.get(frbi)
 
