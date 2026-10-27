@@ -7622,12 +7622,17 @@ def _export_base_final(
                 rec["Revisão"] = "AUTO_APROVADO"
                 rec["Próxima Ação"] = "CONCLUIDO_POR_EQUIVALENCIA_BI"
                 inherited += 1
-            else:
+            elif key in conflict_keys:
                 rec["Revisão"] = "PROVÁVEL"
-                rec["Próxima Ação"] = (
-                    "REVISAR_CONFLITO_EQUIVALENCIA" if key in conflict_keys
-                    else "VALIDAR_EQUIVALENCIA_MODELO"
-                )
+                rec["Próxima Ação"] = "REVISAR_CONFLITO_EQUIVALENCIA"
+            elif safe(source.get("Revisão")).upper() == "AUTO_APROVADO":
+                rec["Revisão"] = "AUTO_APROVADO"
+                rec["Próxima Ação"] = "CONCLUIDO_POR_EQUIVALENCIA_TECNICA"
+            else:
+                # Uma única revisão por business_key: a fonte canônica mantém
+                # DOUBLE_CHECK; aliases não abrem novas tarefas de revisão.
+                rec["Revisão"] = "PROVÁVEL"
+                rec["Próxima Ação"] = "AGUARDAR_REVISAO_PRODUTO_CANONICO"
         elif not present(rec.get("Revisão")):
             rec["Revisão"] = "PENDENTE"
             rec["Próxima Ação"] = "REVISAR_MANUAL_SEM_CLASSIFICACAO"
