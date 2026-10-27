@@ -7026,7 +7026,7 @@ def _apply_review_bi_snapshot(
         approved = locks.get(key)
         if approved:
             if (brand, model) == (approved["Marca"], approved["Modelo"]):
-                df.at[idx, "Revisão B.I"] = "OK"
+                df.at[idx, "Revisão B.I"] = approved["Revisão B.I"]
         elif key in snapshot:
             df.at[idx, "Revisão B.I"] = snapshot[key]
     return df
