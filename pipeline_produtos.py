@@ -89,12 +89,15 @@ def now_iso() -> str:
 
 
 def safe(v: Any) -> str:
+    """Normaliza valores escalares vazios, incluindo pandas.NA, sem criar '<NA>'."""
     if v is None:
         return ""
     try:
-        if isinstance(v, float) and v != v:
+        import pandas as pd
+        missing = pd.isna(v)
+        if isinstance(missing, (bool, type(pd.NA))) and missing is not pd.NA and missing:
             return ""
-    except Exception:
+    except (TypeError, ValueError, ImportError):
         pass
     return str(v).strip()
 
