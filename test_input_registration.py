@@ -77,9 +77,9 @@ class InputRegistrationTests(unittest.TestCase):
             self.assertEqual(approved["Revisão B.I"], "OK")
             self.assertEqual(approved["FAMILY"], "POLISHER")
             self.assertNotEqual(p.safe(variant["Revisão B.I"]), "OK")
-            self.assertEqual(variant["Revisão"], "PROVÁVEL")
+            self.assertEqual(variant["Revisão"], "AUTO_APROVADO")
             self.assertEqual(variant["FAMILY"], "POLISHER")
-            self.assertEqual(variant["Próxima Ação"], "VALIDAR_EQUIVALENCIA_MODELO")
+            self.assertEqual(variant["Próxima Ação"], "CONCLUIDO_POR_EQUIVALENCIA_BI")
 
     def test_exact_model_variants_are_visible_for_procv(self):
         with tempfile.TemporaryDirectory() as td:
@@ -140,7 +140,32 @@ class InputRegistrationTests(unittest.TestCase):
                     self.assertEqual(row["O que é (Tipo)"], "TRIMMER")
                     if row["Modelo"] != "FS 161 L":
                         self.assertNotEqual(p.safe(row["Revisão B.I"]), "OK")
-                        self.assertEqual(row["Revisão"], "PROVÁVEL")
+                        self.assertEqual(row["Revisão"], "AUTO_APROVADO")
+
+    def test_conflicting_taxonomy_blocks_bi_inheritance(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            inp, master, final = (folder / n for n in ("entrada.xlsx", "consolidado.xlsx", "final.xlsx"))
+            pd.DataFrame([{"Marca":"TEST","Modelo":"AB/12"}]).to_excel(inp,index=False)
+            pd.DataFrame([{
+                "Marca":"TEST","Modelo":"AB12","O que é (Tipo)":"DRILL",
+                "Category General":"OTHERS","FAMILY":"DRILL",
+                "Status":"Script","Revisão":"AUTO_APROVADO","Revisão B.I":"OK",
+            }]).to_excel(master,index=False)
+            pd.DataFrame([
+                {"Marca":"TEST","Modelo":"AB12","O que é (Tipo)":"DRILL",
+                 "Category General":"OTHERS","FAMILY":"DRILL",
+                 "Status":"Script","Revisão":"AUTO_APROVADO","Revisão B.I":"OK"},
+                {"Marca":"TEST","Modelo":"AB/12","O que é (Tipo)":"SAW",
+                 "Category General":"OTHERS","FAMILY":"SAW",
+                 "Status":"Script","Revisão":"PROVÁVEL"},
+            ]).to_excel(final,index=False)
+            rules=p.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
+            p.persist_baseline_excels([],master,final,inp,rules)
+            exported,_=p._read_business_sheet(final)
+            variant=exported.loc[exported["Modelo"].eq("AB/12")].iloc[0]
+            self.assertNotEqual(p.safe(variant["Revisão B.I"]),"OK")
+            self.assertNotEqual(variant["Próxima Ação"],"CONCLUIDO_POR_EQUIVALENCIA_BI")
 
     def test_persist_populates_final_without_classification(self):
         with tempfile.TemporaryDirectory() as td:
