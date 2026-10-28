@@ -8022,8 +8022,11 @@ def _expected_cohort_accepted_after_run(
             continue
 
         resolution = safe(rec.get('Resolution State')).upper()
-        review = safe(rec.get('Revisão')).upper()
-        if _record_is_accepted(rec) or (resolution == 'CLASSIFIED_CLEF' and review == 'PROVÁVEL'):
+        typ = safe(rec.get('O que é (Tipo)')).upper()
+        category = safe(rec.get('Category General')).upper()
+        family = safe(rec.get('FAMILY')).upper()
+        has_taxonomy = typ not in {'', 'REVISAR', 'UNKNOWN'} and bool(category and family) and (category, family) != ('OTHERS', 'OTHERS')
+        if _record_is_accepted(rec) or (resolution == 'CLASSIFIED_CLEF' and has_taxonomy):
             expected.add(key)
         elif key in force_keys:
             expected.discard(key)
