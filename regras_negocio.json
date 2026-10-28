@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-13-v3.0.13-manual-taxonomy-gold-2",
+  "VERSION": "2026-10-28-v3.0.14-combo-family-canonical",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -688,7 +688,7 @@
     },
     {
       "category_general": "OTHERS",
-      "family": "POWER TOOL COMBO KIT"
+      "family": "COMBO KIT"
     },
     {
       "category_general": "OTHERS",
@@ -2967,7 +2967,7 @@
       ],
       "fallback_pair": [
         "OTHERS",
-        "POWER TOOL COMBO KIT"
+        "COMBO KIT"
       ]
     },
     "ROTARY TOOL": {
@@ -4557,7 +4557,7 @@
       "primary_type": "POWER TOOL COMBO KIT",
       "power": "*",
       "category_general": "OTHERS",
-      "family": "POWER TOOL COMBO KIT",
+      "family": "COMBO KIT",
       "priority": 230
     },
     {
