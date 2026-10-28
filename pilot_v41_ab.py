@@ -36,7 +36,7 @@ import requests
 import pipeline_produtos as pp
 
 
-PILOT_VERSION = "2026-10-28-v41-bge-hybrid-jsonld-gliner-ab"
+PILOT_VERSION = "2026-10-28-v41.1-fused-rule-bge-gliner-ab"
 DEFAULT_WEIGHTS = (0.40, 0.20, 0.40)
 DEFAULT_TOP_K = 8
 
@@ -272,6 +272,7 @@ class EvidenceBundle:
     identity: str
     identity_reasons: List[str]
     evidence: str
+    semantic_evidence: str
     source_count: int
     structured_count: int
     stage1_state: str
@@ -303,6 +304,7 @@ def build_evidence_bundle(
 
     identity_reasons: List[str] = []
     chunks = [f"TARGET BRAND: {brand}", f"TARGET MODEL: {model}"]
+    semantic_chunks = [f"TARGET BRAND: {brand}", f"TARGET MODEL: {model}"]
     structured_count = 0
     primary_confirmed = 0
     structured_confirmed = 0
@@ -324,13 +326,19 @@ def build_evidence_bundle(
                 structured_confirmed += 1
                 identity_reasons.append(f"S{src.source_id}:JSONLD_BRAND+MODEL")
 
+        content = _safe(src.content)
         chunks.append(
             f"SOURCE {src.source_id} [identity={src.relevance}; current_score={src.identity_score}]\n"
-            f"TITLE: {title}\nCONTENT: {_safe(src.content)[:source_chars]}"
+            f"TITLE: {title}\nCONTENT: {content[:source_chars]}"
         )
+        if title:
+            semantic_chunks.append(f"PRODUCT TITLE: {title}")
         st = _structured_text(products)
         if st:
             chunks.append(st)
+            semantic_chunks.append(st)
+        if content:
+            semantic_chunks.append(f"CONTENT HINT: {content[:220]}")
 
     identity = "TARGET_CONFIRMED" if (primary_confirmed or structured_confirmed) else "NOT_CONFIRMED"
     return EvidenceBundle(
@@ -339,12 +347,64 @@ def build_evidence_bundle(
         identity=identity,
         identity_reasons=list(dict.fromkeys(identity_reasons)),
         evidence="\n\n".join(chunks),
+        semantic_evidence="\n\n".join(semantic_chunks),
         source_count=len(ranked),
         structured_count=structured_count,
         stage1_state=_safe(s1.state),
         stage1_type=_safe(s1.product_type),
         stage1_power=_safe(s1.power) or "UNKNOWN",
     )
+
+
+def _type_alias_hits_for_combo(rules: Any, text: str) -> List[str]:
+    """Detecta tipos físicos distintos para a política genérica de combo kit."""
+    policy = (rules.raw.get("COMBO_KIT_POLICY", {}) or {}) if hasattr(rules, "raw") else {}
+    eligible = set(policy.get("eligible_primary_types", []) or [])
+    fold = pp.strip_accents(_safe(text)).casefold()
+    hits: List[str] = []
+    for typ in sorted(eligible):
+        meta = (rules.types.get(typ, {}) or {})
+        positives = [x for x in (meta.get("aliases", []) or []) if _safe(x)]
+        negatives = [x for x in (meta.get("negative_aliases", []) or []) if _safe(x)]
+        if negatives and any(pp.contains_alias_prepared(fold, x) for x in negatives):
+            continue
+        if any(pp.contains_alias_prepared(fold, x) for x in positives):
+            hits.append(typ)
+    return hits
+
+
+def _combo_kit_candidate(rules: Any, text: str) -> Tuple[bool, List[str]]:
+    policy = (rules.raw.get("COMBO_KIT_POLICY", {}) or {}) if hasattr(rules, "raw") else {}
+    if not policy.get("enabled", False):
+        return False, []
+    fold = pp.strip_accents(_safe(text)).casefold()
+    combo_terms = [x for x in (policy.get("combo_terms", []) or []) if _safe(x)]
+    combo_signal = any(pp.contains_alias_prepared(fold, x) for x in combo_terms)
+    # "kit" sozinho é fraco; só é aceito porque ainda exigimos dois tipos
+    # físicos distintos abaixo. Isso evita transformar kit de acessórios em combo.
+    if not combo_signal:
+        combo_signal = bool(re.search(r"\bkit\b", fold))
+    if not combo_signal:
+        return False, []
+    hits = _type_alias_hits_for_combo(rules, text)
+    minimum = max(2, int(policy.get("min_distinct_primary_types", 2) or 2))
+    return len(set(hits)) >= minimum, sorted(set(hits))
+
+
+def _select_fused_type(
+    bundle: EvidenceBundle,
+    pred: Dict[str, Any],
+    rules: Any,
+    query: str,
+) -> Tuple[str, str, List[str]]:
+    """Stage1 resolve primeiro; BGE amplia recall, nunca apaga regra fechada."""
+    combo_ok, combo_hits = _combo_kit_candidate(rules, query)
+    if combo_ok and "POWER TOOL COMBO KIT" in rules.types:
+        return "POWER TOOL COMBO KIT", "COMBO_POLICY", combo_hits
+    stage1_type = _safe(bundle.stage1_type)
+    if bundle.stage1_state == "RESOLVED_RULE" and stage1_type in rules.types:
+        return stage1_type, "STAGE1_RULE", combo_hits
+    return _safe(pred.get("winner")), "BGE_RERANK", combo_hits
 
 
 class HybridTypeClassifier:
@@ -371,14 +431,14 @@ class HybridTypeClassifier:
         meta = self.rules.types.get(typ, {}) or {}
         aliases = [_safe(x) for x in (meta.get("aliases", []) or []) if _safe(x)][:24]
         negs = [_safe(x) for x in (meta.get("negative_aliases", []) or []) if _safe(x)][:12]
-        pairs = sorted(pp._pair_label(x) for x in pp._taxonomy_pairs_for_type(self.rules, typ))
         chunks = [f"Canonical physical product type: {typ}."]
         if aliases:
             chunks.append("Known names and aliases: " + "; ".join(aliases) + ".")
         if negs:
             chunks.append("Do not confuse with: " + "; ".join(negs) + ".")
-        if pairs:
-            chunks.append("Business taxonomy mappings: " + "; ".join(pairs) + ".")
+        # TYPE retrieval must stay about the physical product. Business taxonomy
+        # labels are mapped only after TYPE is selected; leaking them into the
+        # embedding document creates semantic shortcuts unrelated to product identity.
         return " ".join(chunks)
 
     def load(self) -> None:
@@ -594,12 +654,20 @@ class OptionalGliner:
 
 
 def _auto_candidate(
-    bundle: EvidenceBundle, pred: Dict[str, Any], pair: Tuple[str, str], rules: Any
+    bundle: EvidenceBundle,
+    pred: Dict[str, Any],
+    pair: Tuple[str, str],
+    rules: Any,
+    decision_source: str,
 ) -> Tuple[bool, str]:
     if bundle.identity != "TARGET_CONFIRMED":
         return False, "IDENTITY_NOT_CONFIRMED"
     if pair not in rules.valid_pairs or pair == ("OTHERS", "OTHERS"):
         return False, "TAXONOMY_NOT_CLOSED"
+    if decision_source == "STAGE1_RULE":
+        return True, "RULE_GATE_OK"
+    if decision_source == "COMBO_POLICY":
+        return True, "COMBO_GATE_OK"
     if pred["rerank_probability"] < 0.55:
         return False, "RERANK_PROB_LOW"
     if pred["rerank_margin"] < 0.15:
@@ -671,22 +739,31 @@ def _run_arm(
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for idx, (bundle, s1, key) in enumerate(bundles, 1):
-        query = bundle.evidence
+        # The semantic query is intentionally compact/high-signal. Full source
+        # evidence is still used by GLiNER, but not fed wholesale into BGE/reranker.
+        query = bundle.semantic_evidence or bundle.evidence
         gliner_seconds = 0.0
         gliner_features = ""
         if gliner is not None:
-            gliner_features, gliner_seconds = gliner.extract(query)
+            gliner_features, gliner_seconds = gliner.extract(bundle.evidence)
             if gliner_features:
-                query = query + "\n\n" + gliner_features
+                # Put extracted features first so the reranker's token budget cannot
+                # silently truncate the very signal the B arm is meant to test.
+                query = gliner_features + "\n\n" + query
 
         started = time.monotonic()
         pred = classifier.classify(query)
         inference_total = time.monotonic() - started + gliner_seconds
+        final_type, decision_source, combo_hits = _select_fused_type(
+            bundle, pred, rules, query
+        )
         power = bundle.stage1_power or "UNKNOWN"
         cg, fam, tax_reason = rules.map_taxonomy(
-            pred["winner"], power, query, bundle.brand, bundle.model
+            final_type, power, query, bundle.brand, bundle.model
         )
-        auto, gate = _auto_candidate(bundle, pred, (cg, fam), rules)
+        auto, gate = _auto_candidate(
+            bundle, pred, (cg, fam), rules, decision_source
+        )
         g = gold.get(key, {})
         gold_type = _safe(g.get("type"))
         rows.append({
@@ -700,8 +777,12 @@ def _run_arm(
             "Stage1 State": bundle.stage1_state,
             "Stage1 Type": bundle.stage1_type,
             "Stage1 Power": power,
-            "Pred Type": pred["winner"],
+            "Decision Source": decision_source,
+            "BGE Raw Type": pred["winner"],
+            "BGE Raw Runner Up": pred["runner_up"],
+            "Pred Type": final_type,
             "Pred Runner Up": pred["runner_up"],
+            "Combo Evidence Types": " | ".join(combo_hits),
             "Rerank Probability": pred["rerank_probability"],
             "Rerank Margin": pred["rerank_margin"],
             "Hybrid Score": pred["hybrid_score"],
@@ -716,7 +797,7 @@ def _run_arm(
             "Local Auto Candidate": "SIM" if auto else "NÃO",
             "Local Gate Reason": gate,
             "Gold Type": gold_type,
-            "Type Correct": ("SIM" if pred["winner"] == gold_type else "NÃO") if gold_type else "",
+            "Type Correct": ("SIM" if final_type == gold_type else "NÃO") if gold_type else "",
             "BGE Seconds": pred["bge_seconds"],
             "Rerank Seconds": pred["rerank_seconds"],
             "GLiNER Seconds": gliner_seconds,
@@ -808,6 +889,9 @@ def main() -> None:
                 jsonld_cache.flush()
         jsonld_cache.flush()
 
+        # Warm-load once before either arm so first-row model initialization is not
+        # charged only to arm A and the A/B timing remains comparable.
+        classifier.load()
         rows_a = _run_arm("SEM_GLINER", bundles, classifier, None, rules, gold)
         rows_b: List[Dict[str, Any]] = []
         gliner_error = ""
@@ -835,7 +919,12 @@ def main() -> None:
                     "Gold Type": a["Gold Type"],
                     "Sem GLiNER": a["Pred Type"],
                     "Com GLiNER": b["Pred Type"],
+                    "Sem BGE Raw": a["BGE Raw Type"],
+                    "Com BGE Raw": b["BGE Raw Type"],
+                    "Sem Source": a["Decision Source"],
+                    "Com Source": b["Decision Source"],
                     "Mudou Type": "SIM" if a["Pred Type"] != b["Pred Type"] else "NÃO",
+                    "Mudou BGE Raw": "SIM" if a["BGE Raw Type"] != b["BGE Raw Type"] else "NÃO",
                     "Sem Correct": a["Type Correct"],
                     "Com Correct": b["Type Correct"],
                     "GLiNER Ganhou": "SIM" if a["Type Correct"] == "NÃO" and b["Type Correct"] == "SIM" else "NÃO",
