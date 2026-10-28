@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -187,6 +188,8 @@ class PilotV41IdentityTests(unittest.TestCase):
         self.assertEqual(1, bundle.semantic_source_count)
         self.assertIn("amoladora angular", bundle.semantic_evidence)
         self.assertNotIn("pressure washer", bundle.semantic_evidence.casefold())
+        self.assertNotIn("TARGET BRAND", bundle.semantic_evidence)
+        self.assertNotIn("TARGET MODEL", bundle.semantic_evidence)
         self.assertTrue(bundle.stage1_rule_target_supported)
 
     def test_stage1_resolved_type_is_not_overwritten_by_bge_when_target_supported(self):
@@ -324,6 +327,7 @@ class PilotV41IdentityTests(unittest.TestCase):
         doc = clf.type_docs["ANGLE GRINDER"]
         self.assertIn("amoladora angular", doc)
         self.assertNotIn("Business taxonomy mappings", doc)
+        self.assertNotIn("die grinder", doc)
 
     def test_pilot_reranker_does_not_inherit_192_token_truncation(self):
         class DummyRules:
@@ -341,6 +345,31 @@ class PilotV41IdentityTests(unittest.TestCase):
         self.assertAlmostEqual(0.5, float(a[0]), places=7)
         self.assertAlmostEqual(float(a[0]), float(b[0]), places=7)
         self.assertAlmostEqual(float(a[1]), float(b[1]), places=7)
+
+    def test_jsonld_transient_failure_is_not_cached_as_permanent_empty(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache = pilot.JsonLdCache(Path(td) / "jsonld.json")
+            with patch.object(pilot.requests, "get", side_effect=RuntimeError("network down")):
+                self.assertEqual([], cache.get("https://example.com/product"))
+            self.assertNotIn("https://example.com/product", cache.data)
+
+    def test_bge_local_auto_is_disabled_until_gold_calibration(self):
+        class DummyRules:
+            valid_pairs = {("OTHERS", "ANGLE GRINDER")}
+
+        ok, reason = pilot._auto_candidate(
+            _bundle(),
+            {
+                "rerank_probability": 0.99,
+                "rerank_margin": 0.90,
+                "hybrid_margin": 0.50,
+            },
+            ("OTHERS", "ANGLE GRINDER"),
+            DummyRules(),
+            "BGE_RERANK",
+        )
+        self.assertFalse(ok)
+        self.assertEqual("LOCAL_GATE_UNCALIBRATED", reason)
 
     def test_explicit_gold_columns_are_used_without_status_flag(self):
         with tempfile.TemporaryDirectory() as td:
@@ -360,6 +389,55 @@ class PilotV41IdentityTests(unittest.TestCase):
         self.assertEqual("OTHERS", row["category"])
         self.assertEqual("ANGLE GRINDER", row["family"])
         self.assertEqual("EXPLICIT_GOLD", row["source"])
+
+    def test_manual_gold_fallback_still_works_when_gold_columns_exist_but_are_blank(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "gold_fallback.xlsx"
+            pd.DataFrame([
+                {
+                    "Marca": "A", "Modelo": "1",
+                    "Gold O que é canônico": "ANGLE GRINDER",
+                    "Gold FAMILY": "ANGLE GRINDER",
+                    "O que é (Tipo)": "", "FAMILY": "",
+                    "Status": "Script", "Revisão B.I": "",
+                },
+                {
+                    "Marca": "B", "Modelo": "2",
+                    "Gold O que é canônico": "",
+                    "Gold FAMILY": "",
+                    "O que é (Tipo)": "HAMMER DRILL",
+                    "Category General": "OTHERS",
+                    "FAMILY": "IMPACT DRILL",
+                    "Status": "Manual", "Revisão B.I": "",
+                },
+            ]).to_excel(path, index=False)
+            gold = pilot._validated_gold_map(path)
+        self.assertEqual("EXPLICIT_GOLD", gold[pilot.pp.business_key("A", "1")]["source"])
+        self.assertEqual("VALIDATED_OUTPUT", gold[pilot.pp.business_key("B", "2")]["source"])
+        self.assertEqual("HAMMER DRILL", gold[pilot.pp.business_key("B", "2")]["type"])
+
+    def test_summary_measures_family_even_without_gold_type(self):
+        df = pd.DataFrame([{
+            "Arm": "SEM_GLINER",
+            "Identity": "TARGET_CONFIRMED",
+            "Semantic Evaluated": "SIM",
+            "Local Auto Candidate": "NÃO",
+            "Gold Type": "",
+            "Gold Category": "",
+            "Gold FAMILY": "ANGLE GRINDER",
+            "Type Correct": "",
+            "Category Correct": "",
+            "Family Correct": "SIM",
+            "Taxonomy Correct": "",
+            "BGE Seconds": 1.0,
+            "Rerank Seconds": 2.0,
+            "GLiNER Seconds": 0.0,
+            "Inference Total Seconds": 3.0,
+        }])
+        summary = pilot._summary(df, "SEM_GLINER")
+        self.assertEqual(1, summary["Gold FAMILY"])
+        self.assertEqual(100.0, summary["Family Accuracy %"])
+        self.assertEqual(0, summary["Gold Type"])
 
     def test_no_identity_means_no_bge_or_gliner_call(self):
         class NeverClassifier:
