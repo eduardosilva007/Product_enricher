@@ -18,6 +18,20 @@ class InputRegistrationTests(unittest.TestCase):
         gaps = [b - a for a, b in zip(instants, instants[1:])]
         self.assertTrue(all(g >= 0.035 for g in gaps), gaps)
 
+    def test_cohort_counts_complete_clef_candidates_without_bi_approval(self):
+        key = p.business_key("MAKITA", "HG6030")
+        rec = {
+            "Marca": "MAKITA", "Modelo": "HG6030",
+            "Resolution State": "CLASSIFIED_CLEF",
+            "O que é (Tipo)": "HEAT GUN",
+            "Category General": "OTHERS", "FAMILY": "HEAT GUN",
+            "Review Required": "SIM",
+        }
+        got = p._expected_cohort_accepted_after_run({key}, set(), [rec])
+        self.assertEqual(got, {key})
+        rec["FAMILY"] = ""
+        self.assertEqual(p._expected_cohort_accepted_after_run({key}, set(), [rec]), set())
+
     def test_safe_missing_values_do_not_create_fake_classifications(self):
         self.assertEqual(p.safe(pd.NA), "")
         self.assertEqual(p.safe(float("nan")), "")
