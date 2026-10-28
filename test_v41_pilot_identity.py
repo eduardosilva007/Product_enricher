@@ -653,6 +653,8 @@ class PilotV41IdentityTests(unittest.TestCase):
             {},
         )
         self.assertEqual("OPERATIONAL_ERROR", rows[0]["Decision Source"])
+        self.assertEqual("OPERATIONAL_ERROR", rows[0]["Local Gate Reason"])
+        self.assertEqual("OPERATIONAL_ERROR", rows[0]["Taxonomy Reason"])
         self.assertIn("synthetic bge failure", rows[0]["BGE Error"])
         self.assertEqual("", rows[0]["Pred Type"])
 
