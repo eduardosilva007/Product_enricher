@@ -36,7 +36,7 @@ import requests
 import pipeline_produtos as pp
 
 
-PILOT_VERSION = "2026-10-28-v41.1-fused-rule-bge-gliner-ab"
+PILOT_VERSION = "2026-10-28-v41.2-audited-identity-semantic-gates"
 DEFAULT_WEIGHTS = (0.40, 0.20, 0.40)
 DEFAULT_TOP_K = 8
 
@@ -58,11 +58,78 @@ def _phrase_tokens_occurs(needle: str, haystack: str) -> bool:
     return any(h[i:i + width] == n for i in range(0, len(h) - width + 1))
 
 
-def _brand_primary_occurs(brand: str, title: str, url: str) -> bool:
+def _known_longer_brand_conflict(
+    brand: str,
+    text: str,
+    known_brands: Sequence[str] = (),
+) -> bool:
+    """Bloqueia colisões como GLADIATOR vs GLADIATOR PRO quando ambas existem no cohort."""
+    target = pp.canonical_display(brand)
+    target_tokens = _norm_tokens(target)
+    if not target_tokens:
+        return False
+    for other in known_brands or ():
+        other = _safe(other)
+        if not other or pp.compact(other) == pp.compact(brand):
+            continue
+        other_tokens = _norm_tokens(other)
+        if len(other_tokens) <= len(target_tokens):
+            continue
+        if other_tokens[:len(target_tokens)] != target_tokens:
+            continue
+        if _phrase_tokens_occurs(other, text) or pp.compact(other) in pp.compact(text):
+            return True
+    return False
+
+
+def _brand_primary_occurs(
+    brand: str,
+    title: str,
+    url: str,
+    known_brands: Sequence[str] = (),
+) -> bool:
+    title = _safe(title)
+    host = urlparse(_safe(url)).netloc
+    if _known_longer_brand_conflict(brand, title, known_brands):
+        return False
     if _phrase_tokens_occurs(brand, title):
         return True
-    host = urlparse(_safe(url)).netloc
-    return _phrase_tokens_occurs(brand, host)
+    if _known_longer_brand_conflict(brand, host, known_brands):
+        return False
+    bc = pp.compact(brand)
+    hc = pp.compact(host)
+    return bool(bc and hc and bc in hc)
+
+
+def _structured_brand_equal(brand: str, observed: str) -> bool:
+    """Marca estruturada precisa ser a mesma identidade, não prefixo/submarca."""
+    target = set(pp._brand_identity_variants(brand))
+    seen = set(pp._brand_identity_variants(observed))
+    return bool(target and seen and target.intersection(seen))
+
+
+def _source_primary_target_anchor(
+    src: Any,
+    brand: str,
+    model: str,
+    cfg: Dict[str, Any],
+    known_brands: Sequence[str] = (),
+) -> bool:
+    """Confirma Brand+Model no mesmo contexto primário, sem depender do score legado."""
+    if bool(getattr(src, "identity_conflict", False)):
+        return False
+    suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
+    title_brand = _brand_primary_occurs(brand, _safe(src.title), "", known_brands)
+    title_model, _ = pp._model_match_in_field(model, _safe(src.title), suffixes)
+
+    host = urlparse(_safe(src.url)).netloc
+    host_brand = _brand_primary_occurs(brand, "", _safe(src.url), known_brands)
+    url_model, _ = pp._model_match_in_field(model, _safe(src.url), suffixes)
+
+    # Título Brand+Model é o caso mais forte. Domínio da marca também pode ancorar
+    # o modelo no título/URL. Não aceitamos Brand no título + modelo apenas no URL
+    # de um revendedor como STRONG por si só.
+    return bool((title_brand and title_model) or (host_brand and (title_model or url_model)))
 
 
 def _model_primary_occurs(model: str, title: str, url: str, cfg: Dict[str, Any]) -> bool:
@@ -240,7 +307,7 @@ def _structured_identity_confirmed(
     variants = {value for value, _ in pp._model_identity_variants(model, suffixes)}
     for row in products:
         b = _safe(row.get("brand"))
-        if not b or not (_phrase_tokens_occurs(brand, b) or _phrase_tokens_occurs(b, brand)):
+        if not b or not _structured_brand_equal(brand, b):
             continue
         ids = [
             _safe(row.get("sku")), _safe(row.get("mpn")), _safe(row.get("model")),
@@ -273,11 +340,15 @@ class EvidenceBundle:
     identity_reasons: List[str]
     evidence: str
     semantic_evidence: str
+    target_evidence: str
     source_count: int
+    semantic_source_count: int
     structured_count: int
+    target_source_ids: List[int]
     stage1_state: str
     stage1_type: str
     stage1_power: str
+    stage1_rule_target_supported: bool
 
 
 def build_evidence_bundle(
@@ -289,6 +360,7 @@ def build_evidence_bundle(
     max_sources: int = 4,
     source_chars: int = 550,
     fetch_jsonld: bool = True,
+    known_brands: Sequence[str] = (),
 ) -> EvidenceBundle:
     search_model = pp.derive_search_model(brand, model, cfg)
     ranked = sorted(
@@ -305,14 +377,18 @@ def build_evidence_bundle(
     identity_reasons: List[str] = []
     chunks = [f"TARGET BRAND: {brand}", f"TARGET MODEL: {model}"]
     semantic_chunks = [f"TARGET BRAND: {brand}", f"TARGET MODEL: {model}"]
+    target_chunks = [f"TARGET BRAND: {brand}", f"TARGET MODEL: {model}"]
     structured_count = 0
     primary_confirmed = 0
     structured_confirmed = 0
+    target_source_ids: List[int] = []
+    semantic_source_count = 0
+    stage1_rule_target_supported = False
 
     for src in ranked:
         title = _focused_product_title(src.title, brand, search_model, cfg)
-        strict = _brand_primary_occurs(brand, src.title, src.url) and _model_primary_occurs(
-            search_model, src.title, src.url, cfg
+        strict = _source_primary_target_anchor(
+            src, brand, search_model, cfg, known_brands
         )
         if strict:
             primary_confirmed += 1
@@ -331,14 +407,42 @@ def build_evidence_bundle(
             f"SOURCE {src.source_id} [identity={src.relevance}; current_score={src.identity_score}]\n"
             f"TITLE: {title}\nCONTENT: {content[:source_chars]}"
         )
-        if title:
-            semantic_chunks.append(f"PRODUCT TITLE: {title}")
         st = _structured_text(products)
+        structured_ok = _structured_identity_confirmed(
+            brand, search_model, products, cfg
+        ) if products else False
+        target_ok = bool(strict or structured_ok)
+        if target_ok:
+            target_source_ids.append(int(src.source_id))
+            target_chunks.append(
+                f"SOURCE {src.source_id}\nTITLE: {title}\nCONTENT: {content[:source_chars]}"
+            )
+            if st:
+                target_chunks.append(st)
+
+            # Evidência semântica só usa páginas target-confirmed e sem flags de
+            # qualidade. Isso impede uma página relacionada/compatibilidade de
+            # contaminar BGE/GLiNER mesmo que apareça no Top-4.
+            if not (getattr(src, "quality_flags", None) or []):
+                semantic_source_count += 1
+                if title:
+                    semantic_chunks.append(f"PRODUCT TITLE: {title}")
+                if st:
+                    semantic_chunks.append(st)
+                if content:
+                    semantic_chunks.append(f"CONTENT HINT: {content[:220]}")
+
+            stage1_type = _safe(s1.product_type)
+            supports_stage1 = bool(
+                stage1_type and (
+                    stage1_type in (getattr(src, "type_hits", {}) or {})
+                    or float((getattr(src, "type_scores", {}) or {}).get(stage1_type, 0.0) or 0.0) > 0.0
+                )
+            )
+            if supports_stage1 and not (getattr(src, "quality_flags", None) or []):
+                stage1_rule_target_supported = True
         if st:
             chunks.append(st)
-            semantic_chunks.append(st)
-        if content:
-            semantic_chunks.append(f"CONTENT HINT: {content[:220]}")
 
     identity = "TARGET_CONFIRMED" if (primary_confirmed or structured_confirmed) else "NOT_CONFIRMED"
     return EvidenceBundle(
@@ -348,61 +452,95 @@ def build_evidence_bundle(
         identity_reasons=list(dict.fromkeys(identity_reasons)),
         evidence="\n\n".join(chunks),
         semantic_evidence="\n\n".join(semantic_chunks),
+        target_evidence="\n\n".join(target_chunks),
         source_count=len(ranked),
+        semantic_source_count=semantic_source_count,
         structured_count=structured_count,
+        target_source_ids=list(dict.fromkeys(target_source_ids)),
         stage1_state=_safe(s1.state),
         stage1_type=_safe(s1.product_type),
         stage1_power=_safe(s1.power) or "UNKNOWN",
+        stage1_rule_target_supported=stage1_rule_target_supported,
     )
 
 
-def _type_alias_hits_for_combo(rules: Any, text: str) -> List[str]:
-    """Detecta tipos físicos distintos para a política genérica de combo kit."""
-    policy = (rules.raw.get("COMBO_KIT_POLICY", {}) or {}) if hasattr(rules, "raw") else {}
-    eligible = set(policy.get("eligible_primary_types", []) or [])
-    fold = pp.strip_accents(_safe(text)).casefold()
-    hits: List[str] = []
-    for typ in sorted(eligible):
-        meta = (rules.types.get(typ, {}) or {})
-        positives = [x for x in (meta.get("aliases", []) or []) if _safe(x)]
-        negatives = [x for x in (meta.get("negative_aliases", []) or []) if _safe(x)]
-        if negatives and any(pp.contains_alias_prepared(fold, x) for x in negatives):
-            continue
-        if any(pp.contains_alias_prepared(fold, x) for x in positives):
-            hits.append(typ)
-    return hits
+def _model_looks_composite(model: str) -> bool:
+    """Detecta modelo composto sem SKU específico: dois núcleos model-like."""
+    raw = _safe(model)
+    if not raw:
+        return False
+    groups = [x.strip() for x in re.split(r"[_|;]+", raw) if x.strip()]
+    if len(groups) >= 2:
+        model_like_groups = [
+            g for g in groups
+            if len(pp.compact(g)) >= 5
+            and bool(re.search(r"[A-Za-z]", g))
+            and bool(re.search(r"\d", g))
+        ]
+        if len(model_like_groups) >= 2:
+            return True
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9+./-]*", raw)
+    mixed = [
+        t for t in tokens
+        if len(pp.compact(t)) >= 5
+        and bool(re.search(r"[A-Za-z]", t))
+        and bool(re.search(r"\d", t))
+    ]
+    return len(mixed) >= 2
 
 
-def _combo_kit_candidate(rules: Any, text: str) -> Tuple[bool, List[str]]:
+def _safe_combo_kit_components(
+    bundle: EvidenceBundle,
+    s1: Any,
+    rules: Any,
+) -> List[str]:
+    """Combo só fecha com dois tipos na MESMA fonte target-confirmed."""
     policy = (rules.raw.get("COMBO_KIT_POLICY", {}) or {}) if hasattr(rules, "raw") else {}
     if not policy.get("enabled", False):
-        return False, []
-    fold = pp.strip_accents(_safe(text)).casefold()
-    combo_terms = [x for x in (policy.get("combo_terms", []) or []) if _safe(x)]
-    combo_signal = any(pp.contains_alias_prepared(fold, x) for x in combo_terms)
-    # "kit" sozinho é fraco; só é aceito porque ainda exigimos dois tipos
-    # físicos distintos abaixo. Isso evita transformar kit de acessórios em combo.
-    if not combo_signal:
-        combo_signal = bool(re.search(r"\bkit\b", fold))
-    if not combo_signal:
-        return False, []
-    hits = _type_alias_hits_for_combo(rules, text)
+        return []
+    eligible = {_safe(x) for x in (policy.get("eligible_primary_types", []) or []) if _safe(x)}
+    combo_terms = [_safe(x) for x in (policy.get("combo_terms", []) or []) if _safe(x)]
     minimum = max(2, int(policy.get("min_distinct_primary_types", 2) or 2))
-    return len(set(hits)) >= minimum, sorted(set(hits))
+    target_ids = set(bundle.target_source_ids)
+    composite_model = _model_looks_composite(bundle.model)
+
+    for src in (getattr(s1, "sources", None) or []):
+        if int(src.source_id) not in target_ids:
+            continue
+        if (getattr(src, "quality_flags", None) or []):
+            continue
+        folded = pp.norm_text(f"{_safe(src.title)}\n{_safe(src.content)[:1200]}")
+        explicit_combo = any(pp.contains_alias_prepared(folded, x) for x in combo_terms)
+        if not explicit_combo and not composite_model:
+            continue
+        explicit_types = {
+            typ for typ in eligible
+            if (
+                typ in (getattr(src, "type_hits", {}) or {})
+                or float((getattr(src, "type_scores", {}) or {}).get(typ, 0.0) or 0.0) > 0.0
+            )
+        }
+        if len(explicit_types) >= minimum:
+            return sorted(explicit_types)
+    return []
 
 
 def _select_fused_type(
     bundle: EvidenceBundle,
+    s1: Any,
     pred: Dict[str, Any],
     rules: Any,
-    query: str,
 ) -> Tuple[str, str, List[str]]:
-    """Stage1 resolve primeiro; BGE amplia recall, nunca apaga regra fechada."""
-    combo_ok, combo_hits = _combo_kit_candidate(rules, query)
-    if combo_ok and "POWER TOOL COMBO KIT" in rules.types:
+    """Hierarquia auditada: combo seguro -> regra target-supported -> BGE."""
+    combo_hits = _safe_combo_kit_components(bundle, s1, rules)
+    if combo_hits and "POWER TOOL COMBO KIT" in rules.types:
         return "POWER TOOL COMBO KIT", "COMBO_POLICY", combo_hits
     stage1_type = _safe(bundle.stage1_type)
-    if bundle.stage1_state == "RESOLVED_RULE" and stage1_type in rules.types:
+    if (
+        bundle.stage1_state == "RESOLVED_RULE"
+        and bundle.stage1_rule_target_supported
+        and stage1_type in rules.types
+    ):
         return stage1_type, "STAGE1_RULE", combo_hits
     return _safe(pred.get("winner")), "BGE_RERANK", combo_hits
 
@@ -418,7 +556,10 @@ class HybridTypeClassifier:
         self.embedding_device = _safe(fcfg.get("embedding_device")) or "cpu"
         self.reranker_device_cfg = _safe(fcfg.get("reranker_device")) or "auto"
         self.rerank_batch_size = max(1, int(fcfg.get("rerank_batch_size", 8) or 8))
-        self.rerank_max_length = max(128, int(fcfg.get("rerank_max_length", 192) or 192))
+        # O modelo oficial usa 512 no exemplo Transformers. Para o piloto de
+        # qualidade não herdamos o limite produtivo curto de 192, que truncava
+        # sinais úteis (especialmente no braço GLiNER).
+        self.rerank_max_length = max(512, int(fcfg.get("rerank_max_length", 192) or 192))
         self.type_labels = sorted(rules.types)
         self.type_docs = {t: self._type_document(t) for t in self.type_labels}
         self.model = None
@@ -540,8 +681,10 @@ class HybridTypeClassifier:
             scores.extend(vals.detach().cpu().numpy().astype(float).tolist())
 
         arr = np.array(scores, dtype=float)
-        exp = np.exp(arr - arr.max()) if len(arr) else np.array([])
-        probs_arr = exp / exp.sum() if len(exp) and exp.sum() else np.zeros_like(exp)
+        # bge-reranker-v2-m3 produz um relevance logit por par. A normalização
+        # documentada é sigmoid por par; softmax entre candidatos distorce a
+        # confiança e muda conforme o tamanho/composição do Top-K.
+        probs_arr = 1.0 / (1.0 + np.exp(-np.clip(arr, -60.0, 60.0))) if len(arr) else np.array([])
         logits_map = {label: float(score) for label, score in zip(labels, scores)}
         prob_map = {label: float(prob) for label, prob in zip(labels, probs_arr.tolist())}
         ranked = sorted(labels, key=lambda x: (-logits_map[x], x))
@@ -686,25 +829,55 @@ def _validated_gold_map(path: Optional[Path]) -> Dict[str, Dict[str, str]]:
         m = pp.find_col(df, ["Modelo", "Model", "SKU", "Part Number"])
     except Exception:
         return {}
+
+    # Gold explícito é benchmark congelado e não depende de Status/Revisão.
+    gold_typ = pp.find_col(
+        df, ["Gold O que é canônico", "Gold O que é canonico", "Gold O que é", "Gold Type"],
+        required=False,
+    )
+    gold_cg = pp.find_col(
+        df, ["Gold Category General", "Gold Category", "Gold CG"],
+        required=False,
+    )
+    gold_fam = pp.find_col(df, ["Gold FAMILY", "Gold Family"], required=False)
+
     typ = pp.find_col(df, ["O que é (Tipo)", "Tipo", "Product Type"], required=False)
     cg = pp.find_col(df, ["Category General"], required=False)
     fam = pp.find_col(df, ["FAMILY", "Family"], required=False)
     status = pp.find_col(df, ["Status"], required=False)
     rbi = pp.find_col(df, ["Revisão B.I", "Revisao B.I"], required=False)
+
     out: Dict[str, Dict[str, str]] = {}
     for _, row in df.iterrows():
+        brand, model = _safe(row.get(b)), _safe(row.get(m))
+        if not brand or not model:
+            continue
+
+        explicit_gold = bool(gold_typ or gold_cg or gold_fam)
+        if explicit_gold:
+            gt = _safe(row.get(gold_typ)).upper() if gold_typ else ""
+            gc = _safe(row.get(gold_cg)).upper() if gold_cg else ""
+            gf = _safe(row.get(gold_fam)).upper() if gold_fam else ""
+            if gt == "REVISAR":
+                gt = ""
+            if gt or gc or gf:
+                out[pp.business_key(brand, model)] = {
+                    "type": gt, "category": gc, "family": gf, "source": "EXPLICIT_GOLD"
+                }
+            continue
+
         valid = bool(rbi and _safe(row.get(rbi)).upper() == "OK") or bool(
             status and _safe(row.get(status)).upper() == "MANUAL"
         )
-        if not valid or not typ:
+        if not valid:
             continue
-        brand, model = _safe(row.get(b)), _safe(row.get(m))
-        gold_type = _safe(row.get(typ)).upper()
-        if brand and model and gold_type and gold_type != "REVISAR":
+        gt = _safe(row.get(typ)).upper() if typ else ""
+        if gt and gt != "REVISAR":
             out[pp.business_key(brand, model)] = {
-                "type": gold_type,
+                "type": gt,
                 "category": _safe(row.get(cg)).upper() if cg else "",
                 "family": _safe(row.get(fam)).upper() if fam else "",
+                "source": "VALIDATED_OUTPUT",
             }
     return out
 
@@ -741,31 +914,55 @@ def _run_arm(
     for idx, (bundle, s1, key) in enumerate(bundles, 1):
         # The semantic query is intentionally compact/high-signal. Full source
         # evidence is still used by GLiNER, but not fed wholesale into BGE/reranker.
-        query = bundle.semantic_evidence or bundle.evidence
+        query = bundle.semantic_evidence
         gliner_seconds = 0.0
         gliner_features = ""
-        if gliner is not None:
-            gliner_features, gliner_seconds = gliner.extract(bundle.evidence)
-            if gliner_features:
-                # Put extracted features first so the reranker's token budget cannot
-                # silently truncate the very signal the B arm is meant to test.
-                query = gliner_features + "\n\n" + query
 
-        started = time.monotonic()
-        pred = classifier.classify(query)
-        inference_total = time.monotonic() - started + gliner_seconds
-        final_type, decision_source, combo_hits = _select_fused_type(
-            bundle, pred, rules, query
+        # Identity vem antes de classificação. Sem fonte target-confirmed limpa,
+        # o piloto não roda BGE/GLiNER e não fabrica um TYPE aleatório.
+        semantic_ready = bool(
+            bundle.identity == "TARGET_CONFIRMED"
+            and bundle.semantic_source_count > 0
+            and query.strip()
         )
+        if not semantic_ready:
+            pred = {
+                "winner": "", "runner_up": "", "rerank_probability": 0.0,
+                "rerank_margin": 0.0, "hybrid_score": 0.0, "hybrid_margin": 0.0,
+                "top_candidates": [], "hybrid_top": [], "winner_dense": 0.0,
+                "winner_sparse": 0.0, "winner_colbert": 0.0, "rerank_logit": 0.0,
+                "bge_seconds": 0.0, "rerank_seconds": 0.0,
+            }
+            inference_total = 0.0
+            final_type, decision_source, combo_hits = "", "NEEDS_EVIDENCE", []
+        else:
+            if gliner is not None:
+                gliner_features, gliner_seconds = gliner.extract(bundle.target_evidence)
+                if gliner_features:
+                    query = gliner_features + "\n\n" + query
+
+            started = time.monotonic()
+            pred = classifier.classify(query)
+            inference_total = time.monotonic() - started + gliner_seconds
+            final_type, decision_source, combo_hits = _select_fused_type(
+                bundle, s1, pred, rules
+            )
         power = bundle.stage1_power or "UNKNOWN"
-        cg, fam, tax_reason = rules.map_taxonomy(
-            final_type, power, query, bundle.brand, bundle.model
-        )
-        auto, gate = _auto_candidate(
-            bundle, pred, (cg, fam), rules, decision_source
-        )
+        if final_type:
+            cg, fam, tax_reason = rules.map_taxonomy(
+                final_type, power, query, bundle.brand, bundle.model
+            )
+            auto, gate = _auto_candidate(
+                bundle, pred, (cg, fam), rules, decision_source
+            )
+        else:
+            cg, fam, tax_reason = "", "", "IDENTITY_OR_EVIDENCE_GATE"
+            auto, gate = False, "IDENTITY_OR_EVIDENCE_GATE"
+
         g = gold.get(key, {})
         gold_type = _safe(g.get("type"))
+        gold_category = _safe(g.get("category"))
+        gold_family = _safe(g.get("family"))
         rows.append({
             "Arm": name,
             "Marca": bundle.brand,
@@ -774,6 +971,9 @@ def _run_arm(
             "Identity Reasons": " | ".join(bundle.identity_reasons),
             "JSON-LD Products": bundle.structured_count,
             "Sources": bundle.source_count,
+            "Semantic Sources": bundle.semantic_source_count,
+            "Target Source IDs": " | ".join(str(x) for x in bundle.target_source_ids),
+            "Semantic Evaluated": "SIM" if semantic_ready else "NÃO",
             "Stage1 State": bundle.stage1_state,
             "Stage1 Type": bundle.stage1_type,
             "Stage1 Power": power,
@@ -797,7 +997,15 @@ def _run_arm(
             "Local Auto Candidate": "SIM" if auto else "NÃO",
             "Local Gate Reason": gate,
             "Gold Type": gold_type,
+            "Gold Category": gold_category,
+            "Gold FAMILY": gold_family,
+            "Gold Source": _safe(g.get("source")),
             "Type Correct": ("SIM" if final_type == gold_type else "NÃO") if gold_type else "",
+            "Category Correct": ("SIM" if cg == gold_category else "NÃO") if gold_category else "",
+            "Family Correct": ("SIM" if fam == gold_family else "NÃO") if gold_family else "",
+            "Taxonomy Correct": (
+                "SIM" if cg == gold_category and fam == gold_family else "NÃO"
+            ) if gold_category and gold_family else "",
             "BGE Seconds": pred["bge_seconds"],
             "Rerank Seconds": pred["rerank_seconds"],
             "GLiNER Seconds": gliner_seconds,
@@ -815,19 +1023,28 @@ def _run_arm(
 
 def _summary(df: pd.DataFrame, arm: str) -> Dict[str, Any]:
     d = df[df["Arm"] == arm]
-    gold = d[d["Gold Type"].astype(str).str.len() > 0]
+    evaluated = d[d["Semantic Evaluated"] == "SIM"] if len(d) else d
+    gold_type = d[d["Gold Type"].astype(str).str.len() > 0] if len(d) else d
+    gold_tax = d[
+        (d["Gold Category"].astype(str).str.len() > 0)
+        & (d["Gold FAMILY"].astype(str).str.len() > 0)
+    ] if len(d) else d
     return {
         "Arm": arm,
         "Produtos": len(d),
         "Identity Confirmed": int((d["Identity"] == "TARGET_CONFIRMED").sum()) if len(d) else 0,
+        "Semantic Evaluated": len(evaluated),
         "Local Auto Candidates": int((d["Local Auto Candidate"] == "SIM").sum()) if len(d) else 0,
         "Auto Coverage %": round(100 * (d["Local Auto Candidate"] == "SIM").mean(), 2) if len(d) else 0,
-        "Gold Validado": len(gold),
-        "Type Accuracy %": round(100 * (gold["Type Correct"] == "SIM").mean(), 2) if len(gold) else "",
-        "Avg BGE s": round(float(d["BGE Seconds"].mean()), 3) if len(d) else 0,
-        "Avg Rerank s": round(float(d["Rerank Seconds"].mean()), 3) if len(d) else 0,
-        "Avg GLiNER s": round(float(d["GLiNER Seconds"].mean()), 3) if len(d) else 0,
-        "Avg Total s": round(float(d["Inference Total Seconds"].mean()), 3) if len(d) else 0,
+        "Gold Type": len(gold_type),
+        "Gold Taxonomy": len(gold_tax),
+        "Type Accuracy %": round(100 * (gold_type["Type Correct"] == "SIM").mean(), 2) if len(gold_type) else "",
+        "Family Accuracy %": round(100 * (gold_tax["Family Correct"] == "SIM").mean(), 2) if len(gold_tax) else "",
+        "Taxonomy Accuracy %": round(100 * (gold_tax["Taxonomy Correct"] == "SIM").mean(), 2) if len(gold_tax) else "",
+        "Avg BGE s": round(float(evaluated["BGE Seconds"].mean()), 3) if len(evaluated) else 0,
+        "Avg Rerank s": round(float(evaluated["Rerank Seconds"].mean()), 3) if len(evaluated) else 0,
+        "Avg GLiNER s": round(float(evaluated["GLiNER Seconds"].mean()), 3) if len(evaluated) else 0,
+        "Avg Total s": round(float(evaluated["Inference Total Seconds"].mean()), 3) if len(evaluated) else 0,
     }
 
 
@@ -869,6 +1086,7 @@ def main() -> None:
     try:
         cohort = _cohort(input_path, store, args.max_items)
         print(f"PILOT {PILOT_VERSION} | cohort={len(cohort)} | gold_validado={len(gold)}")
+        known_brands = sorted({brand for brand, _, _ in cohort if _safe(brand)})
         bundles: List[Tuple[EvidenceBundle, Any, str]] = []
         skipped: List[Dict[str, Any]] = []
         for idx, (brand, model, key) in enumerate(cohort, 1):
@@ -880,6 +1098,7 @@ def main() -> None:
             bundle = build_evidence_bundle(
                 brand, model, s1, cfg, jsonld_cache,
                 fetch_jsonld=not args.no_jsonld_fetch,
+                known_brands=known_brands,
             )
             if not bundle.evidence.strip():
                 skipped.append({"Marca": brand, "Modelo": model, "Reason": "NO_EVIDENCE"})
@@ -889,15 +1108,18 @@ def main() -> None:
                 jsonld_cache.flush()
         jsonld_cache.flush()
 
-        # Warm-load once before either arm so first-row model initialization is not
-        # charged only to arm A and the A/B timing remains comparable.
+        # Warm-load + first forward pass antes dos braços para não cobrar cache/JIT
+        # do primeiro produto apenas no braço A.
         classifier.load()
+        classifier.classify("electric power tool product classification")
         rows_a = _run_arm("SEM_GLINER", bundles, classifier, None, rules, gold)
         rows_b: List[Dict[str, Any]] = []
         gliner_error = ""
         if not args.skip_gliner_arm:
             try:
                 gliner = OptionalGliner(args.gliner_model)
+                gliner.load()
+                gliner.extract("electric power tool 18V")
                 rows_b = _run_arm("COM_GLINER", bundles, classifier, gliner, rules, gold)
             except RuntimeError as exc:
                 gliner_error = str(exc)
@@ -917,6 +1139,8 @@ def main() -> None:
                     "Marca": key[0], "Modelo": key[1],
                     "Identity": a["Identity"],
                     "Gold Type": a["Gold Type"],
+                    "Gold Category": a["Gold Category"],
+                    "Gold FAMILY": a["Gold FAMILY"],
                     "Sem GLiNER": a["Pred Type"],
                     "Com GLiNER": b["Pred Type"],
                     "Sem BGE Raw": a["BGE Raw Type"],
@@ -931,6 +1155,10 @@ def main() -> None:
                     "GLiNER Perdeu": "SIM" if a["Type Correct"] == "SIM" and b["Type Correct"] == "NÃO" else "NÃO",
                     "Sem Auto": a["Local Auto Candidate"],
                     "Com Auto": b["Local Auto Candidate"],
+                    "Sem Taxonomy Correct": a["Taxonomy Correct"],
+                    "Com Taxonomy Correct": b["Taxonomy Correct"],
+                    "GLiNER Ganhou Taxonomia": "SIM" if a["Taxonomy Correct"] == "NÃO" and b["Taxonomy Correct"] == "SIM" else "NÃO",
+                    "GLiNER Perdeu Taxonomia": "SIM" if a["Taxonomy Correct"] == "SIM" and b["Taxonomy Correct"] == "NÃO" else "NÃO",
                     "Delta Tempo s": b["Inference Total Seconds"] - a["Inference Total Seconds"],
                     "GLiNER Features": b["GLiNER Features"],
                 })
