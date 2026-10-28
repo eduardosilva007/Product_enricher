@@ -818,13 +818,14 @@ def _auto_candidate(
         return True, "RULE_GATE_OK"
     if decision_source == "COMBO_POLICY":
         return True, "COMBO_GATE_OK"
-    if pred["rerank_probability"] < 0.55:
-        return False, "RERANK_PROB_LOW"
-    if pred["rerank_margin"] < 0.15:
-        return False, "RERANK_MARGIN_LOW"
-    if pred["hybrid_margin"] < 0.02:
-        return False, "HYBRID_MARGIN_LOW"
-    return True, "PILOT_LOCAL_GATE_OK"
+
+    # O braço BGE ainda é experimental. Depois de corrigir a normalização do
+    # reranker para sigmoid, os thresholds antigos deixaram de ter calibração
+    # válida. Mantemos scores/margens no relatório, mas não chamamos isso de AUTO
+    # até calibrar em Gold suficientemente grande.
+    if decision_source == "BGE_RERANK":
+        return False, "LOCAL_GATE_UNCALIBRATED"
+    return False, "DECISION_SOURCE_NOT_AUTO"
 
 
 def _validated_gold_map(path: Optional[Path]) -> Dict[str, Dict[str, str]]:
@@ -871,7 +872,7 @@ def _validated_gold_map(path: Optional[Path]) -> Dict[str, Dict[str, str]]:
                 out[pp.business_key(brand, model)] = {
                     "type": gt, "category": gc, "family": gf, "source": "EXPLICIT_GOLD"
                 }
-            continue
+                continue
 
         valid = bool(rbi and _safe(row.get(rbi)).upper() == "OK") or bool(
             status and _safe(row.get(status)).upper() == "MANUAL"
@@ -1032,6 +1033,8 @@ def _summary(df: pd.DataFrame, arm: str) -> Dict[str, Any]:
     d = df[df["Arm"] == arm]
     evaluated = d[d["Semantic Evaluated"] == "SIM"] if len(d) else d
     gold_type = d[d["Gold Type"].astype(str).str.len() > 0] if len(d) else d
+    gold_category = d[d["Gold Category"].astype(str).str.len() > 0] if len(d) else d
+    gold_family = d[d["Gold FAMILY"].astype(str).str.len() > 0] if len(d) else d
     gold_tax = d[
         (d["Gold Category"].astype(str).str.len() > 0)
         & (d["Gold FAMILY"].astype(str).str.len() > 0)
@@ -1044,9 +1047,12 @@ def _summary(df: pd.DataFrame, arm: str) -> Dict[str, Any]:
         "Local Auto Candidates": int((d["Local Auto Candidate"] == "SIM").sum()) if len(d) else 0,
         "Auto Coverage %": round(100 * (d["Local Auto Candidate"] == "SIM").mean(), 2) if len(d) else 0,
         "Gold Type": len(gold_type),
+        "Gold Category": len(gold_category),
+        "Gold FAMILY": len(gold_family),
         "Gold Taxonomy": len(gold_tax),
         "Type Accuracy %": round(100 * (gold_type["Type Correct"] == "SIM").mean(), 2) if len(gold_type) else "",
-        "Family Accuracy %": round(100 * (gold_tax["Family Correct"] == "SIM").mean(), 2) if len(gold_tax) else "",
+        "Category Accuracy %": round(100 * (gold_category["Category Correct"] == "SIM").mean(), 2) if len(gold_category) else "",
+        "Family Accuracy %": round(100 * (gold_family["Family Correct"] == "SIM").mean(), 2) if len(gold_family) else "",
         "Taxonomy Accuracy %": round(100 * (gold_tax["Taxonomy Correct"] == "SIM").mean(), 2) if len(gold_tax) else "",
         "Avg BGE s": round(float(evaluated["BGE Seconds"].mean()), 3) if len(evaluated) else 0,
         "Avg Rerank s": round(float(evaluated["Rerank Seconds"].mean()), 3) if len(evaluated) else 0,
@@ -1174,21 +1180,34 @@ def main() -> None:
         summary_rows = [_summary(both, "SEM_GLINER")]
         if rows_b:
             summary_rows.append(_summary(both, "COM_GLINER"))
-            gold_comp = comp[comp["Gold Type"].astype(str).str.len() > 0] if not comp.empty else comp
+            gold_type_comp = comp[comp["Gold Type"].astype(str).str.len() > 0] if not comp.empty else comp
+            gold_tax_comp = comp[
+                (comp["Gold Category"].astype(str).str.len() > 0)
+                & (comp["Gold FAMILY"].astype(str).str.len() > 0)
+            ] if not comp.empty else comp
             summary_rows.append({
                 "Arm": "DELTA_GLINER",
                 "Produtos": len(comp),
                 "Identity Confirmed": "",
+                "Semantic Evaluated": "",
                 "Local Auto Candidates": "",
                 "Auto Coverage %": "",
-                "Gold Validado": len(gold_comp),
+                "Gold Type": len(gold_type_comp),
+                "Gold Category": "",
+                "Gold FAMILY": "",
+                "Gold Taxonomy": len(gold_tax_comp),
                 "Type Accuracy %": "",
+                "Category Accuracy %": "",
+                "Family Accuracy %": "",
+                "Taxonomy Accuracy %": "",
                 "Avg BGE s": "",
                 "Avg Rerank s": "",
                 "Avg GLiNER s": "",
                 "Avg Total s": round(float(comp["Delta Tempo s"].mean()), 3) if len(comp) else 0,
-                "GLiNER ganhou casos": int((gold_comp["GLiNER Ganhou"] == "SIM").sum()) if len(gold_comp) else 0,
-                "GLiNER perdeu casos": int((gold_comp["GLiNER Perdeu"] == "SIM").sum()) if len(gold_comp) else 0,
+                "GLiNER ganhou TYPE": int((gold_type_comp["GLiNER Ganhou"] == "SIM").sum()) if len(gold_type_comp) else 0,
+                "GLiNER perdeu TYPE": int((gold_type_comp["GLiNER Perdeu"] == "SIM").sum()) if len(gold_type_comp) else 0,
+                "GLiNER ganhou taxonomia": int((gold_tax_comp["GLiNER Ganhou Taxonomia"] == "SIM").sum()) if len(gold_tax_comp) else 0,
+                "GLiNER perdeu taxonomia": int((gold_tax_comp["GLiNER Perdeu Taxonomia"] == "SIM").sum()) if len(gold_tax_comp) else 0,
             })
         if gliner_error:
             summary_rows.append({"Arm": "GLINER_SKIPPED", "Reason": gliner_error})
