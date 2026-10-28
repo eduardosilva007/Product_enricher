@@ -220,7 +220,7 @@ class PilotV41IdentityTests(unittest.TestCase):
             types = {"ANGLE GRINDER": {}, "PRESSURE WASHER": {}}
             raw = {"COMBO_KIT_POLICY": {"enabled": False}}
 
-        typ, source, _ = pilot._select_fused_type(
+        typ, source, _, _ = pilot._select_fused_type(
             _bundle(),
             SimpleNamespace(sources=[]),
             {"winner": "PRESSURE WASHER"},
@@ -234,7 +234,7 @@ class PilotV41IdentityTests(unittest.TestCase):
             types = {"ANGLE GRINDER": {}, "PRESSURE WASHER": {}}
             raw = {"COMBO_KIT_POLICY": {"enabled": False}}
 
-        typ, source, _ = pilot._select_fused_type(
+        typ, source, _, _ = pilot._select_fused_type(
             _bundle(stage1_rule_target_supported=False),
             SimpleNamespace(sources=[]),
             {"winner": "PRESSURE WASHER"},
@@ -298,24 +298,33 @@ class PilotV41IdentityTests(unittest.TestCase):
                     "eligible_primary_types": ["ANGLE GRINDER", "HAMMER DRILL"],
                 }
             }
+            types = {
+                "ANGLE GRINDER": {
+                    "aliases": ["angle grinder", "amoladora angular"],
+                    "negative_aliases": [],
+                },
+                "HAMMER DRILL": {
+                    "aliases": ["hammer drill", "taladro percutor"],
+                    "negative_aliases": [],
+                },
+            }
 
         src = SimpleNamespace(
             source_id=1,
             title="Kit Herramientas con amoladora angular y taladro percutor",
             content="",
             quality_flags=[],
-            type_hits={
-                "ANGLE GRINDER": ["amoladora angular"],
-                "HAMMER DRILL": ["taladro percutor"],
-            },
-            type_scores={"ANGLE GRINDER": 3.0, "HAMMER DRILL": 3.0},
+            type_hits={},
+            type_scores={},
         )
-        hits = pilot._safe_combo_kit_components(
+        evidence = pilot._safe_combo_kit_evidence(
             _bundle(model="TP413/7/220K", target_source_ids=[1]),
             SimpleNamespace(sources=[src]),
             DummyRules(),
         )
-        self.assertEqual(["ANGLE GRINDER", "HAMMER DRILL"], hits)
+        self.assertTrue(evidence.is_combo)
+        self.assertEqual(["ANGLE GRINDER", "HAMMER DRILL"], evidence.types)
+        self.assertEqual("COMBO_TERM+MULTI_TYPE", evidence.reason)
 
     def test_combo_does_not_merge_types_from_different_sources(self):
         class DummyRules:
@@ -327,25 +336,95 @@ class PilotV41IdentityTests(unittest.TestCase):
                     "eligible_primary_types": ["ANGLE GRINDER", "HAMMER DRILL"],
                 }
             }
+            types = {
+                "ANGLE GRINDER": {
+                    "aliases": ["angle grinder", "amoladora angular"],
+                    "negative_aliases": [],
+                },
+                "HAMMER DRILL": {
+                    "aliases": ["hammer drill", "taladro percutor"],
+                    "negative_aliases": [],
+                },
+            }
 
         s1 = SimpleNamespace(sources=[
             SimpleNamespace(
                 source_id=1, title="combo kit amoladora angular", content="",
-                quality_flags=[], type_hits={"ANGLE GRINDER": ["amoladora angular"]},
-                type_scores={"ANGLE GRINDER": 3.0},
+                quality_flags=[], type_hits={}, type_scores={},
             ),
             SimpleNamespace(
                 source_id=2, title="combo kit taladro percutor", content="",
-                quality_flags=[], type_hits={"HAMMER DRILL": ["taladro percutor"]},
-                type_scores={"HAMMER DRILL": 3.0},
+                quality_flags=[], type_hits={}, type_scores={},
             ),
         ])
-        hits = pilot._safe_combo_kit_components(
+        evidence = pilot._safe_combo_kit_evidence(
             _bundle(model="TP413/7/220K", target_source_ids=[1, 2]),
             s1,
             DummyRules(),
         )
-        self.assertEqual([], hits)
+        self.assertFalse(evidence.is_combo)
+
+    def test_composite_model_plus_kit_closes_combo_without_type_hits(self):
+        class DummyRules:
+            raw = {
+                "COMBO_KIT_POLICY": {
+                    "enabled": True,
+                    "min_distinct_primary_types": 2,
+                    "combo_terms": ["kit herramientas", "kit"],
+                    "eligible_primary_types": ["ANGLE GRINDER", "INVERTER WELDER"],
+                }
+            }
+            types = {
+                "ANGLE GRINDER": {"aliases": ["amoladora angular"], "negative_aliases": []},
+                "INVERTER WELDER": {"aliases": ["soldadora inverter"], "negative_aliases": []},
+            }
+
+        src = SimpleNamespace(
+            source_id=1,
+            title="GLADIATOR Kit Herramientas IE 6200/8/220 + AA615/5/220 PLUS",
+            content="",
+            quality_flags=[],
+            type_hits={},
+            type_scores={},
+        )
+        evidence = pilot._safe_combo_kit_evidence(
+            _bundle(
+                model="IE 6200/8/220_AA615/5/220 PLUS",
+                target_source_ids=[1],
+            ),
+            SimpleNamespace(sources=[src]),
+            DummyRules(),
+        )
+        self.assertTrue(evidence.is_combo)
+        self.assertEqual("COMPOSITE_MODEL+COMBO_TERM", evidence.reason)
+
+    def test_gliner_two_canonical_types_plus_combo_term_can_close_combo(self):
+        class DummyRules:
+            raw = {
+                "COMBO_KIT_POLICY": {
+                    "enabled": True,
+                    "min_distinct_primary_types": 2,
+                    "combo_terms": ["kit herramientas"],
+                    "eligible_primary_types": ["ANGLE GRINDER", "HAMMER DRILL"],
+                }
+            }
+            types = {
+                "ANGLE GRINDER": {"aliases": ["amoladora angular"], "negative_aliases": []},
+                "HAMMER DRILL": {"aliases": ["taladro percutor"], "negative_aliases": []},
+            }
+
+        evidence = pilot._safe_combo_kit_evidence(
+            _bundle(
+                model="TP413/7/220K",
+                target_source_ids=[1],
+                target_evidence="Kit Herramientas",
+            ),
+            SimpleNamespace(sources=[]),
+            DummyRules(),
+            ["ANGLE GRINDER", "HAMMER DRILL"],
+        )
+        self.assertTrue(evidence.is_combo)
+        self.assertEqual("GLINER_TYPES+COMBO_TERM", evidence.reason)
 
     def test_combo_family_matches_canonical_gold_taxonomy(self):
         rules = pilot.pp.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
@@ -387,6 +466,41 @@ class PilotV41IdentityTests(unittest.TestCase):
         self.assertIn("amoladora angular", doc)
         self.assertNotIn("Business taxonomy mappings", doc)
         self.assertNotIn("die grinder", doc)
+
+    def test_gliner_parser_preserves_entity_labels(self):
+        result = {
+            "entities": {
+                "product_type": ["amoladora angular", "taladro percutor"],
+                "power_source": ["batería"],
+                "voltage": ["18 V"],
+            }
+        }
+        self.assertEqual(
+            ["amoladora angular", "taladro percutor"],
+            pilot.OptionalGliner._label_values(result, "product_type", "product type"),
+        )
+        self.assertEqual(
+            ["batería"],
+            pilot.OptionalGliner._label_values(result, "power_source", "power source"),
+        )
+
+    def test_gliner_canonical_type_hints_ignore_power_and_voltage(self):
+        class DummyRules:
+            types = {
+                "ANGLE GRINDER": {
+                    "aliases": ["amoladora angular", "esmeriladora"],
+                    "negative_aliases": [],
+                },
+                "HAMMER DRILL": {
+                    "aliases": ["taladro percutor"],
+                    "negative_aliases": [],
+                },
+            }
+        hints = pilot.OptionalGliner._canonical_type_hints(
+            DummyRules(),
+            ["amoladora angular", "18 V", "batería"],
+        )
+        self.assertEqual(["ANGLE GRINDER"], hints)
 
     def test_pilot_reranker_does_not_inherit_192_token_truncation(self):
         class DummyRules:
@@ -492,6 +606,8 @@ class PilotV41IdentityTests(unittest.TestCase):
             "Arm": "SEM_GLINER",
             "Identity": "TARGET_CONFIRMED",
             "Semantic Evaluated": "SIM",
+            "BGE Evaluated": "SIM",
+            "GLiNER Evaluated": "NÃO",
             "Local Auto Candidate": "NÃO",
             "Gold Type": "",
             "Gold Category": "",
@@ -509,6 +625,30 @@ class PilotV41IdentityTests(unittest.TestCase):
         self.assertEqual(1, summary["Gold FAMILY"])
         self.assertEqual(100.0, summary["Family Accuracy %"])
         self.assertEqual(0, summary["Gold Type"])
+
+    def test_stage1_rule_short_circuits_bge(self):
+        class NeverClassifier:
+            def classify(self, query):
+                raise AssertionError("BGE must not run after resolved rule")
+
+        class DummyRules:
+            types = {"ANGLE GRINDER": {}}
+            raw = {"COMBO_KIT_POLICY": {"enabled": False}}
+            valid_pairs = {("OTHERS", "ANGLE GRINDER")}
+            def map_taxonomy(self, *args):
+                return "OTHERS", "ANGLE GRINDER", "TEST"
+
+        rows = pilot._run_arm(
+            "SEM_GLINER",
+            [(_bundle(), SimpleNamespace(sources=[]), "k")],
+            NeverClassifier(),
+            None,
+            DummyRules(),
+            {},
+        )
+        self.assertEqual("STAGE1_RULE", rows[0]["Decision Source"])
+        self.assertEqual("NÃO", rows[0]["BGE Evaluated"])
+        self.assertEqual(0.0, rows[0]["BGE Seconds"])
 
     def test_no_identity_means_no_bge_or_gliner_call(self):
         class NeverClassifier:
@@ -536,6 +676,8 @@ class PilotV41IdentityTests(unittest.TestCase):
         )
         self.assertEqual(1, len(rows))
         self.assertEqual("NÃO", rows[0]["Semantic Evaluated"])
+        self.assertEqual("NÃO", rows[0]["BGE Evaluated"])
+        self.assertEqual("NÃO", rows[0]["GLiNER Evaluated"])
         self.assertEqual("NEEDS_EVIDENCE", rows[0]["Decision Source"])
         self.assertEqual("", rows[0]["Pred Type"])
         self.assertEqual("IDENTITY_OR_EVIDENCE_GATE", rows[0]["Local Gate Reason"])
