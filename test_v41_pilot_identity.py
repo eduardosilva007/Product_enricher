@@ -627,6 +627,84 @@ class PilotV41IdentityTests(unittest.TestCase):
         self.assertEqual(100.0, summary["Family Accuracy %"])
         self.assertEqual(0, summary["Gold Type"])
 
+    def test_bge_operational_error_is_row_scoped(self):
+        class FailingClassifier:
+            def classify(self, query):
+                raise RuntimeError("synthetic bge failure")
+
+        class DummyRules:
+            types = {"ANGLE GRINDER": {}}
+            raw = {"COMBO_KIT_POLICY": {"enabled": False}}
+            valid_pairs = set()
+            def map_taxonomy(self, *args):
+                return "", "", ""
+
+        bundle = _bundle(
+            stage1_state="AMBIGUOUS",
+            stage1_type="",
+            stage1_rule_target_supported=False,
+        )
+        rows = pilot._run_arm(
+            "SEM_GLINER",
+            [(bundle, SimpleNamespace(sources=[]), "k")],
+            FailingClassifier(),
+            None,
+            DummyRules(),
+            {},
+        )
+        self.assertEqual("OPERATIONAL_ERROR", rows[0]["Decision Source"])
+        self.assertIn("synthetic bge failure", rows[0]["BGE Error"])
+        self.assertEqual("", rows[0]["Pred Type"])
+
+    def test_gliner_operational_error_falls_back_to_bge(self):
+        class WorkingClassifier:
+            def classify(self, query):
+                return {
+                    "winner": "ANGLE GRINDER",
+                    "runner_up": "",
+                    "rerank_probability": 0.9,
+                    "rerank_margin": 0.9,
+                    "hybrid_score": 0.8,
+                    "hybrid_margin": 0.8,
+                    "top_candidates": ["ANGLE GRINDER"],
+                    "hybrid_top": ["ANGLE GRINDER"],
+                    "winner_dense": 0.8,
+                    "winner_sparse": 0.8,
+                    "winner_colbert": 0.8,
+                    "rerank_logit": 2.0,
+                    "bge_seconds": 0.01,
+                    "rerank_seconds": 0.01,
+                }
+
+        class FailingGliner:
+            def extract(self, text, rules):
+                raise RuntimeError("synthetic gliner failure")
+
+        class DummyRules:
+            types = {"ANGLE GRINDER": {}}
+            raw = {"COMBO_KIT_POLICY": {"enabled": False}}
+            valid_pairs = {("OTHERS", "ANGLE GRINDER")}
+            def map_taxonomy(self, *args):
+                return "OTHERS", "ANGLE GRINDER", "TEST"
+
+        bundle = _bundle(
+            stage1_state="AMBIGUOUS",
+            stage1_type="",
+            stage1_rule_target_supported=False,
+        )
+        rows = pilot._run_arm(
+            "COM_GLINER",
+            [(bundle, SimpleNamespace(sources=[]), "k")],
+            WorkingClassifier(),
+            FailingGliner(),
+            DummyRules(),
+            {},
+        )
+        self.assertEqual("BGE_RERANK", rows[0]["Decision Source"])
+        self.assertEqual("ANGLE GRINDER", rows[0]["Pred Type"])
+        self.assertIn("synthetic gliner failure", rows[0]["GLiNER Error"])
+        self.assertEqual("SIM", rows[0]["BGE Evaluated"])
+
     def test_stage1_rule_short_circuits_bge(self):
         class NeverClassifier:
             def classify(self, query):
