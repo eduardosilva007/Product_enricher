@@ -106,6 +106,29 @@ class PilotV41IdentityTests(unittest.TestCase):
             pilot._structured_identity_confirmed("ADV3", "AA7000", products, self.cfg)
         )
 
+    def test_structured_semantic_evidence_keeps_only_target_product_node(self):
+        products = [
+            {
+                "brand": "GLADIATOR",
+                "sku": "AA518/220/PLUS",
+                "name": "Amoladora Angular",
+                "category": "Herramientas",
+            },
+            {
+                "brand": "OTHER",
+                "sku": "PW999",
+                "name": "Pressure Washer",
+                "category": "Washers",
+            },
+        ]
+        target = pilot._structured_target_products(
+            "GLADIATOR", "AA518/220/PLUS", products, self.cfg
+        )
+        self.assertEqual(1, len(target))
+        text = pilot._structured_text(target)
+        self.assertIn("Amoladora Angular", text)
+        self.assertNotIn("Pressure Washer", text)
+
     def test_jsonld_prefix_brand_is_not_same_brand(self):
         products = [{"brand": "GLADIATOR PRO", "sku": "AA518/220/PLUS"}]
         self.assertFalse(
@@ -219,6 +242,42 @@ class PilotV41IdentityTests(unittest.TestCase):
         )
         self.assertEqual("PRESSURE WASHER", typ)
         self.assertEqual("BGE_RERANK", source)
+
+    def test_composite_model_parts_are_individually_anchored_in_title(self):
+        title = (
+            "GLADIATOR Kit IE 6200/8/220 + AA615/5/220 PLUS "
+            "soldadora y amoladora"
+        )
+        src = SimpleNamespace(
+            title=title,
+            url="https://example.com/combo",
+            identity_conflict=False,
+        )
+        self.assertTrue(
+            pilot._source_primary_target_anchor(
+                src,
+                "GLADIATOR",
+                "IE 6200/8/220_AA615/5/220 PLUS",
+                self.cfg,
+                ["GLADIATOR", "GLADIATOR PRO"],
+            )
+        )
+
+    def test_space_separated_composite_model_is_anchored_in_title(self):
+        src = SimpleNamespace(
+            title="GLADIATOR TP413/6 + AA415/2/220K Kit Herramientas",
+            url="https://example.com/combo2",
+            identity_conflict=False,
+        )
+        self.assertTrue(
+            pilot._source_primary_target_anchor(
+                src,
+                "GLADIATOR",
+                "TP413/6 AA415/2/220K",
+                self.cfg,
+                ["GLADIATOR", "GLADIATOR PRO"],
+            )
+        )
 
     def test_model_composite_detection(self):
         self.assertTrue(
@@ -370,6 +429,18 @@ class PilotV41IdentityTests(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertEqual("LOCAL_GATE_UNCALIBRATED", reason)
+
+    def test_known_brand_catalog_uses_full_input_not_limited_cohort(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "brands.xlsx"
+            pd.DataFrame([
+                {"Marca": "GLADIATOR", "Modelo": "A1"},
+                {"Marca": "X", "Modelo": "X1"},
+                {"Marca": "GLADIATOR PRO", "Modelo": "P1"},
+            ]).to_excel(path, index=False)
+            brands = pilot._known_brands_from_input(path)
+        self.assertIn("GLADIATOR", brands)
+        self.assertIn("GLADIATOR PRO", brands)
 
     def test_explicit_gold_columns_are_used_without_status_flag(self):
         with tempfile.TemporaryDirectory() as td:
