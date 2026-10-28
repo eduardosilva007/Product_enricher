@@ -45,6 +45,13 @@ def _safe(v: Any) -> str:
     return pp.safe(v)
 
 
+def _sigmoid_scores(values: Sequence[float]) -> np.ndarray:
+    arr = np.array(list(values), dtype=float)
+    if not len(arr):
+        return np.array([])
+    return 1.0 / (1.0 + np.exp(-np.clip(arr, -60.0, 60.0)))
+
+
 def _norm_tokens(v: Any) -> List[str]:
     return re.findall(r"[a-z0-9]+", pp.strip_accents(_safe(v)).casefold())
 
@@ -684,7 +691,7 @@ class HybridTypeClassifier:
         # bge-reranker-v2-m3 produz um relevance logit por par. A normalização
         # documentada é sigmoid por par; softmax entre candidatos distorce a
         # confiança e muda conforme o tamanho/composição do Top-K.
-        probs_arr = 1.0 / (1.0 + np.exp(-np.clip(arr, -60.0, 60.0))) if len(arr) else np.array([])
+        probs_arr = _sigmoid_scores(arr)
         logits_map = {label: float(score) for label, score in zip(labels, scores)}
         prob_map = {label: float(prob) for label, prob in zip(labels, probs_arr.tolist())}
         ranked = sorted(labels, key=lambda x: (-logits_map[x], x))
