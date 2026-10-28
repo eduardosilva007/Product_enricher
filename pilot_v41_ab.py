@@ -38,7 +38,7 @@ import pipeline_produtos as pp
 
 PILOT_VERSION = "2026-10-28-v41.2-audited-identity-semantic-gates"
 DEFAULT_WEIGHTS = (0.40, 0.20, 0.40)
-DEFAULT_TOP_K = 8
+DEFAULT_TOP_K = 12
 
 
 def _safe(v: Any) -> str:
@@ -270,6 +270,7 @@ class JsonLdCache:
             cached = self.data[url]
             return cached if isinstance(cached, list) else []
         products: List[Dict[str, str]] = []
+        fetched_ok = False
         try:
             r = requests.get(
                 url,
@@ -279,6 +280,7 @@ class JsonLdCache:
                 stream=True,
             )
             if 200 <= r.status_code < 300:
+                fetched_ok = True
                 chunks = []
                 size = 0
                 for chunk in r.iter_content(chunk_size=65536):
@@ -297,7 +299,10 @@ class JsonLdCache:
                 products = parse_jsonld_products(html)
         except Exception:
             products = []
-        self.data[url] = products
+        # Falha HTTP/transiente não vira cache negativo permanente. Resposta 2xx
+        # válida sem Product JSON-LD pode ser cacheada como [].
+        if fetched_ok:
+            self.data[url] = products
         return products
 
     def flush(self) -> None:
@@ -383,7 +388,9 @@ def build_evidence_bundle(
 
     identity_reasons: List[str] = []
     chunks = [f"TARGET BRAND: {brand}", f"TARGET MODEL: {model}"]
-    semantic_chunks = [f"TARGET BRAND: {brand}", f"TARGET MODEL: {model}"]
+    # TYPE evidence não recebe Brand/Model soltos: identidade e classificação
+    # são camadas diferentes. IDs ficam apenas em target_evidence/auditoria.
+    semantic_chunks: List[str] = []
     target_chunks = [f"TARGET BRAND: {brand}", f"TARGET MODEL: {model}"]
     structured_count = 0
     primary_confirmed = 0
@@ -578,15 +585,13 @@ class HybridTypeClassifier:
     def _type_document(self, typ: str) -> str:
         meta = self.rules.types.get(typ, {}) or {}
         aliases = [_safe(x) for x in (meta.get("aliases", []) or []) if _safe(x)][:24]
-        negs = [_safe(x) for x in (meta.get("negative_aliases", []) or []) if _safe(x)][:12]
         chunks = [f"Canonical physical product type: {typ}."]
         if aliases:
             chunks.append("Known names and aliases: " + "; ".join(aliases) + ".")
-        if negs:
-            chunks.append("Do not confuse with: " + "; ".join(negs) + ".")
-        # TYPE retrieval must stay about the physical product. Business taxonomy
-        # labels are mapped only after TYPE is selected; leaking them into the
-        # embedding document creates semantic shortcuts unrelated to product identity.
+        # Negative aliases ficam no motor determinístico, não no documento BGE.
+        # Sparse/embedding tratariam o termo negativo como presença positiva e
+        # poderiam aumentar justamente a similaridade que queremos bloquear.
+        # Taxonomia comercial também só entra depois da escolha de TYPE.
         return " ".join(chunks)
 
     def load(self) -> None:
@@ -999,6 +1004,7 @@ def _run_arm(
             "Sparse": pred["winner_sparse"],
             "ColBERT": pred["winner_colbert"],
             "Top Candidates": " | ".join(pred["top_candidates"]),
+            "Hybrid Top Candidates": " | ".join(pred.get("hybrid_top", [])),
             "Category General": cg,
             "FAMILY": fam,
             "Taxonomy Reason": tax_reason,
