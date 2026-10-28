@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-28-v3.0.14-combo-family-canonical",
+  "VERSION": "2026-10-28-v3.0.15-audited-multilingual-tool-taxonomy",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -25,7 +25,7 @@
     "Stage 0 valida identidade/qualidade da evidência antes da classificação.",
     "Stage 1.5 reduz candidatos para a LLM por score, suporte e identidade; a LLM nunca recebe a taxonomia inteira.",
     "LOW_TARGET_EVIDENCE e TAXONOMY_GAP são estados distintos.",
-    "Category General e FAMILY podem usar TAXONOMY_EVIDENCE_RULES somente após TYPE resolvido e com evidência target-anchored; WATERPUMP/LIFT PUMP sem subtipo taxonômico comprovado devem permanecer em REVIEW, nunca cair em família genérica automática.",
+    "TAXONOMY_EVIDENCE_RULES refinam subtipos quando comprovados; WATERPUMP sem subtipo explícito pode cair em WATERPUMPS|WATERPUMP, enquanto famílias específicas nunca são inferidas sem evidência.",
     "Título Real é preservado na saída mesmo quando a classificação não fecha; Base Final exibe um único título útil, sem duplicar metadados de Título Referência.",
     "TAXONOMY_EVIDENCE_RULES podem gerar candidato de TYPE quando Brand/Model/alias já sustentam deterministicamente o mesmo tipo, evitando dead-end TAXONOMY_GAP_NO_ALIAS.",
     "AUTO_APROVADO exige identidade STRONG: Marca e Modelo devem estar ancorados no TITLE/URL da fonte que sustenta o TYPE; modelo isolado sem a marca pode gerar candidato/revisão, nunca aprovação automática.",
@@ -872,12 +872,19 @@
         "esmerilhadeira",
         "esmerilhadeira angular",
         "amoladora angular",
-        "rebarbadora"
+        "rebarbadora",
+        "esmeril angular",
+        "esmeriladora",
+        "esmeriladora angular",
+        "amoladora"
       ],
       "negative_aliases": [
         "die grinder",
         "straight grinder",
-        "bench grinder"
+        "bench grinder",
+        "esmeril de banco",
+        "amoladora de banco",
+        "rectificadora recta"
       ]
     },
     "DIE GRINDER": {
@@ -1793,6 +1800,10 @@
         "condensate pump",
         "condensation pump",
         "air conditioner condensate pump"
+      ],
+      "fallback_pair": [
+        "WATERPUMPS",
+        "WATERPUMP"
       ]
     },
     "ROBOTIC LAWN MOWER": {
@@ -8250,7 +8261,11 @@
       "kit de herramientas",
       "kit de ferramentas",
       "combo taladro",
-      "combo furadeira"
+      "combo furadeira",
+      "kit herramientas",
+      "kit taladro",
+      "kit furadeira",
+      "kit combinado de herramientas"
     ],
     "eligible_primary_types": [
       "DRILL",
