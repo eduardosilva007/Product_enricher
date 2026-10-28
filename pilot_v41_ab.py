@@ -1217,7 +1217,9 @@ def _run_arm(
 
 def _summary(df: pd.DataFrame, arm: str) -> Dict[str, Any]:
     d = df[df["Arm"] == arm]
-    evaluated = d[d["BGE Evaluated"] == "SIM"] if len(d) else d
+    semantic_ready = d[d["Semantic Evaluated"] == "SIM"] if len(d) else d
+    bge_rows = d[d["BGE Evaluated"] == "SIM"] if len(d) else d
+    gliner_rows = d[d["GLiNER Evaluated"] == "SIM"] if len(d) else d
     gold_type = d[d["Gold Type"].astype(str).str.len() > 0] if len(d) else d
     gold_category = d[d["Gold Category"].astype(str).str.len() > 0] if len(d) else d
     gold_family = d[d["Gold FAMILY"].astype(str).str.len() > 0] if len(d) else d
@@ -1229,9 +1231,10 @@ def _summary(df: pd.DataFrame, arm: str) -> Dict[str, Any]:
         "Arm": arm,
         "Produtos": len(d),
         "Identity Confirmed": int((d["Identity"] == "TARGET_CONFIRMED").sum()) if len(d) else 0,
-        "Semantic Evaluated": len(evaluated),
-        "BGE Evaluated": int((d["BGE Evaluated"] == "SIM").sum()) if len(d) else 0,
-        "GLiNER Evaluated": int((d["GLiNER Evaluated"] == "SIM").sum()) if len(d) else 0,
+        "Semantic Ready": len(semantic_ready),
+        "BGE Evaluated": len(bge_rows),
+        "GLiNER Evaluated": len(gliner_rows),
+        "Rule/Combo Closed": int(d["Decision Source"].isin(["STAGE1_RULE", "COMBO_POLICY"]).sum()) if len(d) else 0,
         "Local Auto Candidates": int((d["Local Auto Candidate"] == "SIM").sum()) if len(d) else 0,
         "Auto Coverage %": round(100 * (d["Local Auto Candidate"] == "SIM").mean(), 2) if len(d) else 0,
         "Gold Type": len(gold_type),
@@ -1242,10 +1245,10 @@ def _summary(df: pd.DataFrame, arm: str) -> Dict[str, Any]:
         "Category Accuracy %": round(100 * (gold_category["Category Correct"] == "SIM").mean(), 2) if len(gold_category) else "",
         "Family Accuracy %": round(100 * (gold_family["Family Correct"] == "SIM").mean(), 2) if len(gold_family) else "",
         "Taxonomy Accuracy %": round(100 * (gold_tax["Taxonomy Correct"] == "SIM").mean(), 2) if len(gold_tax) else "",
-        "Avg BGE s": round(float(evaluated["BGE Seconds"].mean()), 3) if len(evaluated) else 0,
-        "Avg Rerank s": round(float(evaluated["Rerank Seconds"].mean()), 3) if len(evaluated) else 0,
-        "Avg GLiNER s": round(float(evaluated["GLiNER Seconds"].mean()), 3) if len(evaluated) else 0,
-        "Avg Total s": round(float(evaluated["Inference Total Seconds"].mean()), 3) if len(evaluated) else 0,
+        "Avg BGE s": round(float(bge_rows["BGE Seconds"].mean()), 3) if len(bge_rows) else 0,
+        "Avg Rerank s": round(float(bge_rows["Rerank Seconds"].mean()), 3) if len(bge_rows) else 0,
+        "Avg GLiNER s": round(float(gliner_rows["GLiNER Seconds"].mean()), 3) if len(gliner_rows) else 0,
+        "Avg Total s": round(float(d["Inference Total Seconds"].mean()), 3) if len(d) else 0,
     }
 
 
@@ -1311,18 +1314,28 @@ def main() -> None:
                 jsonld_cache.flush()
         jsonld_cache.flush()
 
-        # Warm-load + first forward pass antes dos braços para não cobrar cache/JIT
-        # do primeiro produto apenas no braço A.
-        classifier.load()
-        classifier.classify("electric power tool product classification")
+        # Só carrega BGE se algum caso target-confirmed realmente ultrapassar
+        # regra/combo. Isso preserva a arquitetura RULE -> LOCAL e evita dezenas
+        # de segundos de startup em cohorts já resolvidos deterministicamente.
+        empty_pred = {"winner": ""}
+        needs_bge = any(
+            bundle.identity == "TARGET_CONFIRMED"
+            and bundle.semantic_source_count > 0
+            and _select_fused_type(bundle, s1, empty_pred, rules)[1] == "BGE_RERANK"
+            for bundle, s1, _ in bundles
+        )
+        if needs_bge:
+            classifier.load()
+            classifier.classify("electric power tool product classification")
         rows_a = _run_arm("SEM_GLINER", bundles, classifier, None, rules, gold)
         rows_b: List[Dict[str, Any]] = []
         gliner_error = ""
         if not args.skip_gliner_arm:
             try:
                 gliner = OptionalGliner(args.gliner_model)
-                gliner.load()
-                gliner.extract("electric power tool 18V", rules)
+                if needs_bge:
+                    gliner.load()
+                    gliner.extract("electric power tool 18V", rules)
                 rows_b = _run_arm("COM_GLINER", bundles, classifier, gliner, rules, gold)
             except RuntimeError as exc:
                 gliner_error = str(exc)
