@@ -301,6 +301,10 @@ class PilotV41IdentityTests(unittest.TestCase):
         self.assertEqual(("WATERPUMPS", "WATERPUMP"), (cg, fam))
         self.assertEqual("TYPE_FALLBACK_PAIR", reason)
 
+    def test_rules_operational_contract_has_no_validation_errors(self):
+        rules = pilot.pp.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
+        self.assertEqual([], rules.validate())
+
     def test_angle_grinder_multilingual_aliases_cover_esmeriladora(self):
         rules = pilot.pp.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
         aliases = set(rules.types["ANGLE GRINDER"]["aliases"])
