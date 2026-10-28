@@ -36,7 +36,7 @@ import requests
 import pipeline_produtos as pp
 
 
-PILOT_VERSION = "2026-10-28-v41.2-audited-identity-semantic-gates"
+PILOT_VERSION = "2026-10-28-v41.3-rule-first-combo-gliner-filtered"
 DEFAULT_WEIGHTS = (0.40, 0.20, 0.40)
 DEFAULT_TOP_K = 12
 
@@ -535,40 +535,110 @@ def _model_looks_composite(model: str) -> bool:
     return len(_composite_model_parts(model)) >= 2
 
 
-def _safe_combo_kit_components(
+def _type_hits_from_text(
+    rules: Any,
+    text: str,
+    eligible: Optional[Sequence[str]] = None,
+) -> List[str]:
+    """Resolve aliases físicos no texto sem usar BGE nem fuzzy."""
+    folded = pp.strip_accents(_safe(text)).casefold()
+    allowed = set(eligible or rules.types.keys())
+    hits: List[str] = []
+    for typ in sorted(allowed):
+        meta = (rules.types.get(typ, {}) or {})
+        positives = [_safe(typ)] + [
+            _safe(x) for x in (meta.get("aliases", []) or []) if _safe(x)
+        ]
+        negatives = [
+            _safe(x) for x in (meta.get("negative_aliases", []) or []) if _safe(x)
+        ]
+        if negatives and any(pp.contains_alias_prepared(folded, x) for x in negatives):
+            continue
+        if any(pp.contains_alias_prepared(folded, x) for x in positives):
+            hits.append(typ)
+    return hits
+
+
+@dataclass
+class ComboEvidence:
+    is_combo: bool
+    types: List[str]
+    reason: str = ""
+
+
+def _safe_combo_kit_evidence(
     bundle: EvidenceBundle,
     s1: Any,
     rules: Any,
-) -> List[str]:
-    """Combo só fecha com dois tipos na MESMA fonte target-confirmed."""
+    gliner_type_hints: Sequence[str] = (),
+) -> ComboEvidence:
+    """Fecha combo apenas com evidência target-confirmed e critérios estruturais."""
     policy = (rules.raw.get("COMBO_KIT_POLICY", {}) or {}) if hasattr(rules, "raw") else {}
     if not policy.get("enabled", False):
-        return []
+        return ComboEvidence(False, [], "")
     eligible = {_safe(x) for x in (policy.get("eligible_primary_types", []) or []) if _safe(x)}
     combo_terms = [_safe(x) for x in (policy.get("combo_terms", []) or []) if _safe(x)]
     minimum = max(2, int(policy.get("min_distinct_primary_types", 2) or 2))
     target_ids = set(bundle.target_source_ids)
-    composite_model = _model_looks_composite(bundle.model)
+    composite_parts = _composite_model_parts(bundle.model)
 
     for src in (getattr(s1, "sources", None) or []):
         if int(src.source_id) not in target_ids:
             continue
         if (getattr(src, "quality_flags", None) or []):
             continue
-        folded = pp.norm_text(f"{_safe(src.title)}\n{_safe(src.content)[:1200]}")
+        source_text = f"{_safe(src.title)}\n{_safe(src.content)[:1600]}"
+        folded = pp.strip_accents(source_text).casefold()
         explicit_combo = any(pp.contains_alias_prepared(folded, x) for x in combo_terms)
-        if not explicit_combo and not composite_model:
-            continue
-        explicit_types = {
+
+        lexical = set(_type_hits_from_text(rules, source_text, sorted(eligible)))
+        stage_hits = {
             typ for typ in eligible
             if (
                 typ in (getattr(src, "type_hits", {}) or {})
                 or float((getattr(src, "type_scores", {}) or {}).get(typ, 0.0) or 0.0) > 0.0
             )
         }
-        if len(explicit_types) >= minimum:
-            return sorted(explicit_types)
-    return []
+        explicit_types = sorted(lexical.union(stage_hits))
+
+        parts_in_source = bool(
+            len(composite_parts) >= 2
+            and all(_all_model_parts_occur(bundle.model, _safe(src.title), {}) or True for _ in [0])
+        )
+        if len(composite_parts) >= 2:
+            # Usa a mesma rotina estrutural da identidade, mas sem depender do cfg:
+            # cada componente precisa aparecer literalmente no mesmo título.
+            parts_in_source = all(
+                pp._model_exact_pattern(pp.compact(part)).search(
+                    pp.strip_accents(_safe(src.title)).casefold()
+                )
+                for part in composite_parts
+            )
+
+        if explicit_combo and len(explicit_types) >= minimum:
+            return ComboEvidence(True, explicit_types, "COMBO_TERM+MULTI_TYPE")
+        if parts_in_source and len(explicit_types) >= minimum:
+            return ComboEvidence(True, explicit_types, "COMPOSITE_MODEL+MULTI_TYPE")
+        if parts_in_source and explicit_combo:
+            return ComboEvidence(True, explicit_types, "COMPOSITE_MODEL+COMBO_TERM")
+
+    hints = sorted(set(_safe(x) for x in gliner_type_hints if _safe(x)) & eligible)
+    target_folded = pp.strip_accents(bundle.target_evidence).casefold()
+    target_combo = any(pp.contains_alias_prepared(target_folded, x) for x in combo_terms)
+    if target_combo and len(hints) >= minimum:
+        return ComboEvidence(True, hints, "GLINER_TYPES+COMBO_TERM")
+    return ComboEvidence(False, [], "")
+
+
+def _stage1_closed_type(bundle: EvidenceBundle, rules: Any) -> str:
+    stage1_type = _safe(bundle.stage1_type)
+    if (
+        bundle.stage1_state == "RESOLVED_RULE"
+        and bundle.stage1_rule_target_supported
+        and stage1_type in rules.types
+    ):
+        return stage1_type
+    return ""
 
 
 def _select_fused_type(
@@ -576,19 +646,16 @@ def _select_fused_type(
     s1: Any,
     pred: Dict[str, Any],
     rules: Any,
-) -> Tuple[str, str, List[str]]:
-    """Hierarquia auditada: combo seguro -> regra target-supported -> BGE."""
-    combo_hits = _safe_combo_kit_components(bundle, s1, rules)
-    if combo_hits and "POWER TOOL COMBO KIT" in rules.types:
-        return "POWER TOOL COMBO KIT", "COMBO_POLICY", combo_hits
-    stage1_type = _safe(bundle.stage1_type)
-    if (
-        bundle.stage1_state == "RESOLVED_RULE"
-        and bundle.stage1_rule_target_supported
-        and stage1_type in rules.types
-    ):
-        return stage1_type, "STAGE1_RULE", combo_hits
-    return _safe(pred.get("winner")), "BGE_RERANK", combo_hits
+    gliner_type_hints: Sequence[str] = (),
+) -> Tuple[str, str, List[str], str]:
+    """Hierarquia correta: combo/regra primeiro; BGE só se ambos falharem."""
+    combo = _safe_combo_kit_evidence(bundle, s1, rules, gliner_type_hints)
+    if combo.is_combo and "POWER TOOL COMBO KIT" in rules.types:
+        return "POWER TOOL COMBO KIT", "COMBO_POLICY", combo.types, combo.reason
+    stage1_type = _stage1_closed_type(bundle, rules)
+    if stage1_type:
+        return stage1_type, "STAGE1_RULE", [], ""
+    return _safe(pred.get("winner")), "BGE_RERANK", [], ""
 
 
 class HybridTypeClassifier:
@@ -796,48 +863,92 @@ class OptionalGliner:
             self.model = loader.from_pretrained(self.model_name)
 
     @staticmethod
-    def _flatten(obj: Any) -> List[str]:
+    def _span_texts(value: Any) -> List[str]:
+        out: List[str] = []
+        if isinstance(value, str):
+            if value.strip():
+                out.append(value.strip())
+        elif isinstance(value, dict):
+            if isinstance(value.get("text"), str) and value["text"].strip():
+                out.append(value["text"].strip())
+            else:
+                for v in value.values():
+                    out.extend(OptionalGliner._span_texts(v))
+        elif isinstance(value, list):
+            for v in value:
+                out.extend(OptionalGliner._span_texts(v))
+        return list(dict.fromkeys(out))
+
+    @staticmethod
+    def _label_values(result: Any, *names: str) -> List[str]:
+        if not isinstance(result, dict):
+            return []
+        entities = result.get("entities")
+        if not isinstance(entities, dict):
+            entities = result
+        normalized = {
+            str(k).casefold().replace("_", " ").strip(): v
+            for k, v in entities.items()
+        }
         vals: List[str] = []
-        if isinstance(obj, str):
-            if obj.strip():
-                vals.append(obj.strip())
-        elif isinstance(obj, dict):
-            for v in obj.values():
-                vals.extend(OptionalGliner._flatten(v))
-        elif isinstance(obj, list):
-            for v in obj:
-                vals.extend(OptionalGliner._flatten(v))
+        for name in names:
+            key = name.casefold().replace("_", " ").strip()
+            if key in normalized:
+                vals.extend(OptionalGliner._span_texts(normalized[key]))
         return list(dict.fromkeys(vals))
 
-    def extract(self, text: str) -> Tuple[str, float]:
+    @staticmethod
+    def _canonical_type_hints(rules: Any, spans: Sequence[str]) -> List[str]:
+        hints: List[str] = []
+        for span in spans:
+            hints.extend(_type_hits_from_text(rules, span))
+        return sorted(set(hints))
+
+    def extract(self, text: str, rules: Any) -> Tuple[Dict[str, Any], float]:
+        """Extrai estrutura GLiNER; somente TYPE canônico pode alimentar BGE."""
         self.load()
         started = time.monotonic()
-        labels = ["product type", "power source", "voltage"]
+        schema = {
+            "product_type": "physical product type such as angle grinder, hammer drill, water pump",
+            "power_source": "primary power source such as battery, petrol, corded electric",
+            "voltage": "input or battery voltage",
+        }
         result: Any = {}
         if hasattr(self.model, "extract_entities"):
             try:
-                result = self.model.extract_entities(text[:4000], labels)
-            except TypeError:
-                schema = {
-                    "product_type": "physical product type",
-                    "power_source": "primary power source",
-                    "voltage": "input voltage",
-                }
                 result = self.model.extract_entities(text[:4000], schema)
+            except TypeError:
+                result = self.model.extract_entities(
+                    text[:4000], ["product type", "power source", "voltage"]
+                )
         elif hasattr(self.model, "extract"):
             try:
-                schema = self.model.create_schema().entities({
-                    "product_type": "physical product type",
-                    "power_source": "primary power source",
-                    "voltage": "input voltage",
-                })
-                result = self.model.extract(text[:4000], schema)
+                built = self.model.create_schema().entities(schema)
+                result = self.model.extract(text[:4000], built)
             except Exception:
                 result = {}
-        vals = self._flatten(result)
+
+        product_spans = self._label_values(result, "product_type", "product type")
+        power_spans = self._label_values(result, "power_source", "power source")
+        voltage_spans = self._label_values(result, "voltage")
+        type_hints = self._canonical_type_hints(rules, product_spans)
         elapsed = time.monotonic() - started
-        summary = "GLINER EXTRACTED FEATURES: " + " | ".join(vals[:20]) if vals else ""
-        return summary, elapsed
+        return {
+            "product_spans": product_spans,
+            "power_spans": power_spans,
+            "voltage_spans": voltage_spans,
+            "type_hints": type_hints,
+            "query_hint": (
+                "GLINER CANONICAL TYPE HINTS: " + " | ".join(type_hints)
+                if type_hints else ""
+            ),
+            "report": (
+                "TYPE=[" + " | ".join(product_spans[:10]) + "] "
+                "CANONICAL=[" + " | ".join(type_hints[:10]) + "] "
+                "POWER=[" + " | ".join(power_spans[:10]) + "] "
+                "VOLTAGE=[" + " | ".join(voltage_spans[:10]) + "]"
+            ),
+        }, elapsed
 
 
 def _auto_candidate(
@@ -969,41 +1080,67 @@ def _run_arm(
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for idx, (bundle, s1, key) in enumerate(bundles, 1):
-        # The semantic query is intentionally compact/high-signal. Full source
-        # evidence is still used by GLiNER, but not fed wholesale into BGE/reranker.
         query = bundle.semantic_evidence
         gliner_seconds = 0.0
         gliner_features = ""
+        gliner_type_hints: List[str] = []
+        gliner_evaluated = False
+        bge_evaluated = False
 
-        # Identity vem antes de classificação. Sem fonte target-confirmed limpa,
-        # o piloto não roda BGE/GLiNER e não fabrica um TYPE aleatório.
         semantic_ready = bool(
             bundle.identity == "TARGET_CONFIRMED"
             and bundle.semantic_source_count > 0
             and query.strip()
         )
-        if not semantic_ready:
-            pred = {
-                "winner": "", "runner_up": "", "rerank_probability": 0.0,
-                "rerank_margin": 0.0, "hybrid_score": 0.0, "hybrid_margin": 0.0,
-                "top_candidates": [], "hybrid_top": [], "winner_dense": 0.0,
-                "winner_sparse": 0.0, "winner_colbert": 0.0, "rerank_logit": 0.0,
-                "bge_seconds": 0.0, "rerank_seconds": 0.0,
-            }
-            inference_total = 0.0
-            final_type, decision_source, combo_hits = "", "NEEDS_EVIDENCE", []
-        else:
-            if gliner is not None:
-                gliner_features, gliner_seconds = gliner.extract(bundle.target_evidence)
-                if gliner_features:
-                    query = gliner_features + "\n\n" + query
+        empty_pred = {
+            "winner": "", "runner_up": "", "rerank_probability": 0.0,
+            "rerank_margin": 0.0, "hybrid_score": 0.0, "hybrid_margin": 0.0,
+            "top_candidates": [], "hybrid_top": [], "winner_dense": 0.0,
+            "winner_sparse": 0.0, "winner_colbert": 0.0, "rerank_logit": 0.0,
+            "bge_seconds": 0.0, "rerank_seconds": 0.0,
+        }
 
-            started = time.monotonic()
-            pred = classifier.classify(query)
-            inference_total = time.monotonic() - started + gliner_seconds
-            final_type, decision_source, combo_hits = _select_fused_type(
+        if not semantic_ready:
+            pred = dict(empty_pred)
+            inference_total = 0.0
+            final_type, decision_source, combo_hits, combo_reason = (
+                "", "NEEDS_EVIDENCE", [], ""
+            )
+        else:
+            # Regra determinística vem ANTES do semantic engine.
+            pred = dict(empty_pred)
+            final_type, decision_source, combo_hits, combo_reason = _select_fused_type(
                 bundle, s1, pred, rules
             )
+
+            if decision_source == "BGE_RERANK":
+                if gliner is not None:
+                    gliner_evaluated = True
+                    g, gliner_seconds = gliner.extract(bundle.target_evidence, rules)
+                    gliner_type_hints = list(g.get("type_hints", []) or [])
+                    gliner_features = _safe(g.get("report"))
+                    query_hint = _safe(g.get("query_hint"))
+                    # GLiNER pode fechar COMBO apenas se os hints canônicos + sinal
+                    # explícito de combo sustentarem isso. Caso contrário, só TYPE
+                    # canônico filtrado é injetado no BGE.
+                    final_type, decision_source, combo_hits, combo_reason = _select_fused_type(
+                        bundle, s1, pred, rules, gliner_type_hints
+                    )
+                    if decision_source == "BGE_RERANK" and query_hint:
+                        query = query_hint + "\n\n" + query
+
+                if decision_source == "BGE_RERANK":
+                    started = time.monotonic()
+                    pred = classifier.classify(query)
+                    bge_evaluated = True
+                    final_type, decision_source, combo_hits, combo_reason = _select_fused_type(
+                        bundle, s1, pred, rules, gliner_type_hints
+                    )
+                    inference_total = time.monotonic() - started + gliner_seconds
+                else:
+                    inference_total = gliner_seconds
+            else:
+                inference_total = 0.0
         power = bundle.stage1_power or "UNKNOWN"
         if final_type:
             cg, fam, tax_reason = rules.map_taxonomy(
@@ -1031,6 +1168,8 @@ def _run_arm(
             "Semantic Sources": bundle.semantic_source_count,
             "Target Source IDs": " | ".join(str(x) for x in bundle.target_source_ids),
             "Semantic Evaluated": "SIM" if semantic_ready else "NÃO",
+            "BGE Evaluated": "SIM" if bge_evaluated else "NÃO",
+            "GLiNER Evaluated": "SIM" if gliner_evaluated else "NÃO",
             "Stage1 State": bundle.stage1_state,
             "Stage1 Type": bundle.stage1_type,
             "Stage1 Power": power,
@@ -1040,6 +1179,7 @@ def _run_arm(
             "Pred Type": final_type,
             "Pred Runner Up": pred["runner_up"],
             "Combo Evidence Types": " | ".join(combo_hits),
+            "Combo Reason": combo_reason,
             "Rerank Probability": pred["rerank_probability"],
             "Rerank Margin": pred["rerank_margin"],
             "Hybrid Score": pred["hybrid_score"],
@@ -1081,7 +1221,7 @@ def _run_arm(
 
 def _summary(df: pd.DataFrame, arm: str) -> Dict[str, Any]:
     d = df[df["Arm"] == arm]
-    evaluated = d[d["Semantic Evaluated"] == "SIM"] if len(d) else d
+    evaluated = d[d["BGE Evaluated"] == "SIM"] if len(d) else d
     gold_type = d[d["Gold Type"].astype(str).str.len() > 0] if len(d) else d
     gold_category = d[d["Gold Category"].astype(str).str.len() > 0] if len(d) else d
     gold_family = d[d["Gold FAMILY"].astype(str).str.len() > 0] if len(d) else d
@@ -1094,6 +1234,8 @@ def _summary(df: pd.DataFrame, arm: str) -> Dict[str, Any]:
         "Produtos": len(d),
         "Identity Confirmed": int((d["Identity"] == "TARGET_CONFIRMED").sum()) if len(d) else 0,
         "Semantic Evaluated": len(evaluated),
+        "BGE Evaluated": int((d["BGE Evaluated"] == "SIM").sum()) if len(d) else 0,
+        "GLiNER Evaluated": int((d["GLiNER Evaluated"] == "SIM").sum()) if len(d) else 0,
         "Local Auto Candidates": int((d["Local Auto Candidate"] == "SIM").sum()) if len(d) else 0,
         "Auto Coverage %": round(100 * (d["Local Auto Candidate"] == "SIM").mean(), 2) if len(d) else 0,
         "Gold Type": len(gold_type),
@@ -1184,7 +1326,7 @@ def main() -> None:
             try:
                 gliner = OptionalGliner(args.gliner_model)
                 gliner.load()
-                gliner.extract("electric power tool 18V")
+                gliner.extract("electric power tool 18V", rules)
                 rows_b = _run_arm("COM_GLINER", bundles, classifier, gliner, rules, gold)
             except RuntimeError as exc:
                 gliner_error = str(exc)
