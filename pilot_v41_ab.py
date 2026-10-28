@@ -115,6 +115,43 @@ def _structured_brand_equal(brand: str, observed: str) -> bool:
     return bool(target and seen and target.intersection(seen))
 
 
+def _composite_model_parts(model: str) -> List[str]:
+    """Extrai componentes de um identificador composto sem fuzzy matching."""
+    raw = _safe(model)
+    if not raw:
+        return []
+
+    # Separadores explícitos de composição têm precedência.
+    groups = [x.strip() for x in re.split(r"[_|;]+", raw) if x.strip()]
+    explicit = [
+        g for g in groups
+        if len(pp.compact(g)) >= 5
+        and bool(re.search(r"[A-Za-z]", g))
+        and bool(re.search(r"\d", g))
+    ]
+    if len(explicit) >= 2:
+        return explicit
+
+    # Também cobre dois SKUs na mesma célula separados apenas por espaço:
+    # TP413/6 AA415/2/220K.
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9+./-]*", raw)
+    mixed = [
+        t for t in tokens
+        if len(pp.compact(t)) >= 5
+        and bool(re.search(r"[A-Za-z]", t))
+        and bool(re.search(r"\d", t))
+    ]
+    return mixed if len(mixed) >= 2 else []
+
+
+def _all_model_parts_occur(model: str, text: str, cfg: Dict[str, Any]) -> bool:
+    parts = _composite_model_parts(model)
+    if len(parts) < 2:
+        return False
+    suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
+    return all(bool(pp._model_match_in_field(part, text, suffixes)[0]) for part in parts)
+
+
 def _source_primary_target_anchor(
     src: Any,
     brand: str,
@@ -128,6 +165,7 @@ def _source_primary_target_anchor(
     suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
     title_brand = _brand_primary_occurs(brand, _safe(src.title), "", known_brands)
     title_model, _ = pp._model_match_in_field(model, _safe(src.title), suffixes)
+    title_composite = _all_model_parts_occur(model, _safe(src.title), cfg)
 
     host = urlparse(_safe(src.url)).netloc
     host_brand = _brand_primary_occurs(brand, "", _safe(src.url), known_brands)
@@ -136,7 +174,10 @@ def _source_primary_target_anchor(
     # Título Brand+Model é o caso mais forte. Domínio da marca também pode ancorar
     # o modelo no título/URL. Não aceitamos Brand no título + modelo apenas no URL
     # de um revendedor como STRONG por si só.
-    return bool((title_brand and title_model) or (host_brand and (title_model or url_model)))
+    return bool(
+        (title_brand and (title_model or title_composite))
+        or (host_brand and (title_model or url_model or title_composite))
+    )
 
 
 def _model_primary_occurs(model: str, title: str, url: str, cfg: Dict[str, Any]) -> bool:
@@ -312,11 +353,16 @@ class JsonLdCache:
         )
 
 
-def _structured_identity_confirmed(
-    brand: str, model: str, products: Sequence[Dict[str, str]], cfg: Dict[str, Any]
-) -> bool:
+def _structured_target_products(
+    brand: str,
+    model: str,
+    products: Sequence[Dict[str, str]],
+    cfg: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    """Retém somente Product JSON-LD que comprova a identidade do target."""
     suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
     variants = {value for value, _ in pp._model_identity_variants(model, suffixes)}
+    out: List[Dict[str, str]] = []
     for row in products:
         b = _safe(row.get("brand"))
         if not b or not _structured_brand_equal(brand, b):
@@ -325,10 +371,15 @@ def _structured_identity_confirmed(
             _safe(row.get("sku")), _safe(row.get("mpn")), _safe(row.get("model")),
             _safe(row.get("productID")),
         ]
-        for value in ids:
-            if value and pp.compact(value) in variants:
-                return True
-    return False
+        if any(value and pp.compact(value) in variants for value in ids):
+            out.append(row)
+    return out
+
+
+def _structured_identity_confirmed(
+    brand: str, model: str, products: Sequence[Dict[str, str]], cfg: Dict[str, Any]
+) -> bool:
+    return bool(_structured_target_products(brand, model, products, cfg))
 
 
 def _structured_text(products: Sequence[Dict[str, str]]) -> str:
@@ -422,17 +473,19 @@ def build_evidence_bundle(
             f"TITLE: {title}\nCONTENT: {content[:source_chars]}"
         )
         st = _structured_text(products)
-        structured_ok = _structured_identity_confirmed(
+        target_products = _structured_target_products(
             brand, search_model, products, cfg
-        ) if products else False
+        ) if products else []
+        target_st = _structured_text(target_products)
+        structured_ok = bool(target_products)
         target_ok = bool(strict or structured_ok)
         if target_ok:
             target_source_ids.append(int(src.source_id))
             target_chunks.append(
                 f"SOURCE {src.source_id}\nTITLE: {title}\nCONTENT: {content[:source_chars]}"
             )
-            if st:
-                target_chunks.append(st)
+            if target_st:
+                target_chunks.append(target_st)
 
             # Evidência semântica só usa páginas target-confirmed e sem flags de
             # qualidade. Isso impede uma página relacionada/compatibilidade de
@@ -441,8 +494,8 @@ def build_evidence_bundle(
                 semantic_source_count += 1
                 if title:
                     semantic_chunks.append(f"PRODUCT TITLE: {title}")
-                if st:
-                    semantic_chunks.append(st)
+                if target_st:
+                    semantic_chunks.append(target_st)
                 if content:
                     semantic_chunks.append(f"CONTENT HINT: {content[:220]}")
 
@@ -479,28 +532,7 @@ def build_evidence_bundle(
 
 
 def _model_looks_composite(model: str) -> bool:
-    """Detecta modelo composto sem SKU específico: dois núcleos model-like."""
-    raw = _safe(model)
-    if not raw:
-        return False
-    groups = [x.strip() for x in re.split(r"[_|;]+", raw) if x.strip()]
-    if len(groups) >= 2:
-        model_like_groups = [
-            g for g in groups
-            if len(pp.compact(g)) >= 5
-            and bool(re.search(r"[A-Za-z]", g))
-            and bool(re.search(r"\d", g))
-        ]
-        if len(model_like_groups) >= 2:
-            return True
-    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9+./-]*", raw)
-    mixed = [
-        t for t in tokens
-        if len(pp.compact(t)) >= 5
-        and bool(re.search(r"[A-Za-z]", t))
-        and bool(re.search(r"\d", t))
-    ]
-    return len(mixed) >= 2
+    return len(_composite_model_parts(model)) >= 2
 
 
 def _safe_combo_kit_components(
@@ -895,6 +927,18 @@ def _validated_gold_map(path: Optional[Path]) -> Dict[str, Dict[str, str]]:
     return out
 
 
+def _known_brands_from_input(input_path: Optional[Path]) -> List[str]:
+    """Catálogo de marcas do input inteiro, independente do --max-items."""
+    if not input_path or not input_path.exists():
+        return []
+    df = pd.read_excel(input_path, dtype=object)
+    try:
+        b = pp.find_col(df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    except Exception:
+        return []
+    return sorted({_safe(v) for v in df[b].tolist() if _safe(v)})
+
+
 def _cohort(input_path: Optional[Path], store: Any, limit: int) -> List[Tuple[str, str, str]]:
     if input_path and input_path.exists():
         df = pd.read_excel(input_path, dtype=object)
@@ -1105,7 +1149,9 @@ def main() -> None:
     try:
         cohort = _cohort(input_path, store, args.max_items)
         print(f"PILOT {PILOT_VERSION} | cohort={len(cohort)} | gold_validado={len(gold)}")
-        known_brands = sorted({brand for brand, _, _ in cohort if _safe(brand)})
+        known_brands = _known_brands_from_input(input_path)
+        if not known_brands:
+            known_brands = sorted({brand for brand, _, _ in cohort if _safe(brand)})
         bundles: List[Tuple[EvidenceBundle, Any, str]] = []
         skipped: List[Dict[str, Any]] = []
         for idx, (brand, model, key) in enumerate(cohort, 1):
