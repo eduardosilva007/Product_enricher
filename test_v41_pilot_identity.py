@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 import pilot_v41_ab as pilot
 
@@ -89,6 +90,79 @@ class PilotV41IdentityTests(unittest.TestCase):
         self.assertEqual(1, len(rows))
         self.assertEqual("BAROVO", rows[0]["brand"])
         self.assertEqual("BIM-TPA13B", rows[0]["sku"])
+
+
+    def test_stage1_resolved_type_is_not_overwritten_by_bge(self):
+        bundle = pilot.EvidenceBundle(
+            brand="GLADIATOR",
+            model="AA518/220/PLUS",
+            identity="TARGET_CONFIRMED",
+            identity_reasons=[],
+            evidence="",
+            semantic_evidence="amoladora angular",
+            source_count=1,
+            structured_count=0,
+            stage1_state="RESOLVED_RULE",
+            stage1_type="ANGLE GRINDER",
+            stage1_power="CORDED",
+        )
+        class DummyRules:
+            types = {"ANGLE GRINDER": {}, "PRESSURE WASHER": {}}
+            raw = {"COMBO_KIT_POLICY": {"enabled": False}}
+        typ, source, _ = pilot._select_fused_type(
+            bundle, {"winner": "PRESSURE WASHER"}, DummyRules(), "amoladora angular"
+        )
+        self.assertEqual("ANGLE GRINDER", typ)
+        self.assertEqual("STAGE1_RULE", source)
+
+    def test_combo_policy_requires_two_distinct_tool_types(self):
+        class DummyRules:
+            raw = {
+                "COMBO_KIT_POLICY": {
+                    "enabled": True,
+                    "min_distinct_primary_types": 2,
+                    "combo_terms": ["combo kit"],
+                    "eligible_primary_types": ["ANGLE GRINDER", "HAMMER DRILL"],
+                }
+            }
+            types = {
+                "ANGLE GRINDER": {
+                    "aliases": ["angle grinder", "amoladora angular"],
+                    "negative_aliases": [],
+                },
+                "HAMMER DRILL": {
+                    "aliases": ["hammer drill", "taladro percutor"],
+                    "negative_aliases": [],
+                },
+            }
+        ok, hits = pilot._combo_kit_candidate(
+            DummyRules(),
+            "Combo kit con amoladora angular y taladro percutor",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(["ANGLE GRINDER", "HAMMER DRILL"], hits)
+
+    def test_combo_family_matches_canonical_gold_taxonomy(self):
+        rules = pilot.pp.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
+        cg, fam, _ = rules.map_taxonomy(
+            "POWER TOOL COMBO KIT", "UNKNOWN", "combo kit drill grinder"
+        )
+        self.assertEqual("OTHERS", cg)
+        self.assertEqual("COMBO KIT", fam)
+
+    def test_type_document_does_not_embed_business_taxonomy(self):
+        class DummyRules:
+            types = {
+                "ANGLE GRINDER": {
+                    "aliases": ["angle grinder", "amoladora angular"],
+                    "negative_aliases": ["die grinder"],
+                }
+            }
+        clf = pilot.HybridTypeClassifier(DummyRules(), {"semantic_funnel": {}})
+        doc = clf.type_docs["ANGLE GRINDER"]
+        self.assertIn("amoladora angular", doc)
+        self.assertNotIn("Business taxonomy mappings", doc)
+
 
 
 if __name__ == "__main__":
