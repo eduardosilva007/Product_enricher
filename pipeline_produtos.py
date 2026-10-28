@@ -8021,7 +8021,9 @@ def _expected_cohort_accepted_after_run(
         if key not in cohort_keys:
             continue
 
-        if _record_is_accepted(rec):
+        resolution = safe(rec.get('Resolution State')).upper()
+        review = safe(rec.get('Revisão')).upper()
+        if _record_is_accepted(rec) or (resolution == 'CLASSIFIED_CLEF' and review == 'PROVÁVEL'):
             expected.add(key)
         elif key in force_keys:
             expected.discard(key)
