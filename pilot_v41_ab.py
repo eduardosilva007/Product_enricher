@@ -1162,8 +1162,12 @@ def _run_arm(
                 bundle, pred, (cg, fam), rules, decision_source
             )
         else:
-            cg, fam, tax_reason = "", "", "IDENTITY_OR_EVIDENCE_GATE"
-            auto, gate = False, "IDENTITY_OR_EVIDENCE_GATE"
+            if decision_source == "OPERATIONAL_ERROR":
+                cg, fam, tax_reason = "", "", "OPERATIONAL_ERROR"
+                auto, gate = False, "OPERATIONAL_ERROR"
+            else:
+                cg, fam, tax_reason = "", "", "IDENTITY_OR_EVIDENCE_GATE"
+                auto, gate = False, "IDENTITY_OR_EVIDENCE_GATE"
 
         g = gold.get(key, {})
         gold_type = _safe(g.get("type"))
