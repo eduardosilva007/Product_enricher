@@ -1258,6 +1258,7 @@ def main() -> None:
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--cache", default="")
     p.add_argument("--input", default="")
+    p.add_argument("--gold", default="", help="Excel opcional com colunas Gold; usado somente para métricas")
     p.add_argument("--max-items", type=int, default=0)
     p.add_argument("--output", default="Piloto_V41_BGE_GLiNER_AB.xlsx")
     p.add_argument("--jsonld-cache", default="pilot_v41_jsonld_cache.json")
@@ -1274,6 +1275,9 @@ def main() -> None:
     input_path = Path(args.input) if args.input else None
     if input_path and not input_path.is_absolute():
         input_path = base / input_path
+    gold_path = Path(args.gold) if args.gold else input_path
+    if gold_path and not gold_path.is_absolute():
+        gold_path = base / gold_path
     out_path = Path(args.output)
     if not out_path.is_absolute():
         out_path = base / out_path
@@ -1285,7 +1289,7 @@ def main() -> None:
     engine = pp.DeterministicEngine(rules, cfg)
     classifier = HybridTypeClassifier(rules, cfg, top_k=args.top_k)
     jsonld_cache = JsonLdCache(jsonld_path)
-    gold = _validated_gold_map(input_path)
+    gold = _validated_gold_map(gold_path)
 
     try:
         cohort = _cohort(input_path, store, args.max_items)
