@@ -608,6 +608,7 @@ class PilotV41IdentityTests(unittest.TestCase):
             "Semantic Evaluated": "SIM",
             "BGE Evaluated": "SIM",
             "GLiNER Evaluated": "NÃO",
+            "Decision Source": "BGE_RERANK",
             "Local Auto Candidate": "NÃO",
             "Gold Type": "",
             "Gold Category": "",
