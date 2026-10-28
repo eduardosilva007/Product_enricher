@@ -601,13 +601,9 @@ def _safe_combo_kit_evidence(
         }
         explicit_types = sorted(lexical.union(stage_hits))
 
-        parts_in_source = bool(
-            len(composite_parts) >= 2
-            and all(_all_model_parts_occur(bundle.model, _safe(src.title), {}) or True for _ in [0])
-        )
+        parts_in_source = False
         if len(composite_parts) >= 2:
-            # Usa a mesma rotina estrutural da identidade, mas sem depender do cfg:
-            # cada componente precisa aparecer literalmente no mesmo título.
+            # Cada componente precisa aparecer literalmente no mesmo título.
             parts_in_source = all(
                 pp._model_exact_pattern(pp.compact(part)).search(
                     pp.strip_accents(_safe(src.title)).casefold()
