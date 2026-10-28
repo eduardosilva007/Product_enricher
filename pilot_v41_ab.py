@@ -913,10 +913,13 @@ class OptionalGliner:
         if hasattr(self.model, "extract_entities"):
             try:
                 result = self.model.extract_entities(text[:4000], schema)
-            except TypeError:
-                result = self.model.extract_entities(
-                    text[:4000], ["product type", "power source", "voltage"]
-                )
+            except Exception:
+                try:
+                    result = self.model.extract_entities(
+                        text[:4000], ["product type", "power source", "voltage"]
+                    )
+                except Exception:
+                    result = {}
         elif hasattr(self.model, "extract"):
             try:
                 built = self.model.create_schema().entities(schema)
@@ -1082,6 +1085,8 @@ def _run_arm(
         gliner_type_hints: List[str] = []
         gliner_evaluated = False
         bge_evaluated = False
+        gliner_error = ""
+        bge_error = ""
 
         semantic_ready = bool(
             bundle.identity == "TARGET_CONFIRMED"
@@ -1112,7 +1117,11 @@ def _run_arm(
             if decision_source == "BGE_RERANK":
                 if gliner is not None:
                     gliner_evaluated = True
-                    g, gliner_seconds = gliner.extract(bundle.target_evidence, rules)
+                    try:
+                        g, gliner_seconds = gliner.extract(bundle.target_evidence, rules)
+                    except Exception as exc:
+                        g = {}
+                        gliner_error = f"{type(exc).__name__}: {exc}"[:500]
                     gliner_type_hints = list(g.get("type_hints", []) or [])
                     gliner_features = _safe(g.get("report"))
                     query_hint = _safe(g.get("query_hint"))
@@ -1127,11 +1136,18 @@ def _run_arm(
 
                 if decision_source == "BGE_RERANK":
                     started = time.monotonic()
-                    pred = classifier.classify(query)
-                    bge_evaluated = True
-                    final_type, decision_source, combo_hits, combo_reason = _select_fused_type(
-                        bundle, s1, pred, rules, gliner_type_hints
-                    )
+                    try:
+                        pred = classifier.classify(query)
+                        bge_evaluated = True
+                        final_type, decision_source, combo_hits, combo_reason = _select_fused_type(
+                            bundle, s1, pred, rules, gliner_type_hints
+                        )
+                    except Exception as exc:
+                        pred = dict(empty_pred)
+                        bge_error = f"{type(exc).__name__}: {exc}"[:500]
+                        final_type, decision_source, combo_hits, combo_reason = (
+                            "", "OPERATIONAL_ERROR", [], ""
+                        )
                     inference_total = time.monotonic() - started + gliner_seconds
                 else:
                     inference_total = gliner_seconds
@@ -1205,6 +1221,8 @@ def _run_arm(
             "GLiNER Seconds": gliner_seconds,
             "Inference Total Seconds": inference_total,
             "GLiNER Features": gliner_features,
+            "GLiNER Error": gliner_error,
+            "BGE Error": bge_error,
         })
         if idx % 10 == 0 or idx == len(bundles):
             print(
@@ -1341,8 +1359,8 @@ def main() -> None:
                     gliner.load()
                     gliner.extract("electric power tool 18V", rules)
                 rows_b = _run_arm("COM_GLINER", bundles, classifier, gliner, rules, gold)
-            except RuntimeError as exc:
-                gliner_error = str(exc)
+            except Exception as exc:
+                gliner_error = f"{type(exc).__name__}: {exc}"
                 print("GLINER ARM SKIPPED:", gliner_error)
 
         dfa = pd.DataFrame(rows_a)
@@ -1367,6 +1385,11 @@ def main() -> None:
                     "Com BGE Raw": b["BGE Raw Type"],
                     "Sem Source": a["Decision Source"],
                     "Com Source": b["Decision Source"],
+                    "Sem Combo Reason": a.get("Combo Reason", ""),
+                    "Com Combo Reason": b.get("Combo Reason", ""),
+                    "Sem BGE Evaluated": a.get("BGE Evaluated", ""),
+                    "Com BGE Evaluated": b.get("BGE Evaluated", ""),
+                    "Com GLiNER Evaluated": b.get("GLiNER Evaluated", ""),
                     "Mudou Type": "SIM" if a["Pred Type"] != b["Pred Type"] else "NÃO",
                     "Mudou BGE Raw": "SIM" if a["BGE Raw Type"] != b["BGE Raw Type"] else "NÃO",
                     "Sem Correct": a["Type Correct"],
@@ -1396,7 +1419,10 @@ def main() -> None:
                 "Arm": "DELTA_GLINER",
                 "Produtos": len(comp),
                 "Identity Confirmed": "",
-                "Semantic Evaluated": "",
+                "Semantic Ready": "",
+                "BGE Evaluated": "",
+                "GLiNER Evaluated": "",
+                "Rule/Combo Closed": "",
                 "Local Auto Candidates": "",
                 "Auto Coverage %": "",
                 "Gold Type": len(gold_type_comp),
