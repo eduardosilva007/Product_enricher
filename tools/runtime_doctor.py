@@ -63,7 +63,11 @@ def main() -> int:
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--gliner-model", default="")
-    p.add_argument("--provider", choices=["clef", "none"], default="clef")
+    p.add_argument(
+        "--provider",
+        choices=["jev", "clef", "none"],
+        default=(os.getenv("V42_PROVIDER", "").strip().lower() or "jev"),
+    )
     args = p.parse_args()
 
     d = Doctor()
@@ -97,7 +101,14 @@ def main() -> int:
 
     if args.mode == "local":
         d.check(".env", lambda: str(ROOT / ".env") if env_info.get("exists") else (_ for _ in ()).throw(RuntimeError(".env ausente")))
-        if args.provider == "clef":
+        if args.provider == "jev":
+            d.check(
+                "TYPESAFE/JEV API KEY",
+                lambda: "configured" if (
+                    os.getenv("TYPESAFE_API_KEY") or os.getenv("JEV_API_KEY")
+                ) else (_ for _ in ()).throw(RuntimeError("TYPESAFE_API_KEY/JEV_API_KEY ausente")),
+            )
+        elif args.provider == "clef":
             d.check("CLOUDFLARE_ACCOUNT_ID", lambda: os.environ["CLOUDFLARE_ACCOUNT_ID"][:4] + "***")
             d.check("CLOUDFLARE_API_TOKEN", lambda: "configured" if (os.getenv("CLOUDFLARE_API_TOKEN") or os.getenv("CLOUDFLARE_AUTH_TOKEN")) else (_ for _ in ()).throw(RuntimeError("token ausente")))
 
@@ -141,20 +152,29 @@ def main() -> int:
             return f"BGE={emb}; reranker={rer}"
         d.check("BGE-M3 + reranker load", bge_check)
 
-        if args.provider == "clef":
+        if args.provider in {"jev", "clef"}:
             def provider_check():
-                from v42_adapters import ClefCandidateDecisionProvider
+                from v42_adapters import ClefCandidateDecisionProvider, JevDecisionProvider
                 cfg, rules = cfg_holder["cfg"], rules_holder["rules"]
                 db_path = Path(pp.safe((cfg.get("files", {}) or {}).get("classification_db")) or "pipeline_v3.sqlite")
                 if not db_path.is_absolute():
                     db_path = ROOT / db_path
                 db = pp.ClassificationDB(db_path)
                 try:
-                    prov = ClefCandidateDecisionProvider(rules, cfg, db, model=pp.safe((cfg.get("clef", {}) or {}).get("model")) or "clef")
+                    if args.provider == "jev":
+                        prov = JevDecisionProvider(
+                            rules, cfg, db,
+                            model=pp.safe((cfg.get("jev", {}) or {}).get("model")) or "jev-latest",
+                        )
+                        return prov.preflight(validate_remote=True)
+                    prov = ClefCandidateDecisionProvider(
+                        rules, cfg, db,
+                        model=pp.safe((cfg.get("clef", {}) or {}).get("model")) or "clef",
+                    )
                     return prov.preflight()
                 finally:
                     db.close()
-            d.check("DecisionProvider preflight", provider_check)
+            d.check(f"DecisionProvider preflight ({args.provider.upper()})", provider_check)
 
     def excel_smoke():
         with tempfile.TemporaryDirectory() as td:
