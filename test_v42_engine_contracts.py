@@ -186,6 +186,71 @@ class V42EngineContracts(unittest.TestCase):
         self.assertEqual(v42.OPERATIONAL_ERROR, out.state)
         self.assertEqual("PROVIDER_OUTSIDE_CLOSED_SCHEMA", out.reason_code)
 
+    def test_context_builder_uses_only_confirmed_target_source(self):
+        good = SimpleNamespace(
+            source_id=1,
+            title="BRAND MODEL123 angle grinder",
+            content="angle grinder 220V",
+            url="https://brand.example/model123",
+            identity_conflict=False,
+            quality_flags=[],
+            type_hits={"ANGLE GRINDER": ["angle grinder"]},
+            type_scores={"ANGLE GRINDER": 3.0},
+        )
+        noise = SimpleNamespace(
+            source_id=2,
+            title="OTHER MODEL999 pressure washer",
+            content="pressure washer",
+            url="https://other.example/model999",
+            identity_conflict=False,
+            quality_flags=[],
+            type_hits={"PRESSURE WASHER": ["pressure washer"]},
+            type_scores={"PRESSURE WASHER": 3.0},
+        )
+        s1 = SimpleNamespace(
+            state="RESOLVED_RULE",
+            product_type="ANGLE GRINDER",
+            power="CORDED",
+            sources=[good, noise],
+            identity_best="STRONG",
+        )
+        cfg = {"identity": {"regional_suffixes": []}}
+        built = v42.build_context_from_stage1(
+            "BRAND", "MODEL123", "brand|model123", "raw", s1,
+            cfg, self.rules, ["BRAND", "OTHER"],
+        )
+        self.assertEqual(v42.IDENTITY_CONFIRMED, built.identity)
+        self.assertEqual([1], built.target_source_ids)
+        self.assertIn("angle grinder", built.semantic_text)
+        self.assertNotIn("pressure washer", built.semantic_text)
+        self.assertTrue(built.rule_target_supported)
+
+    def test_context_builder_brand_prefix_conflict_does_not_confirm_shorter_brand(self):
+        src = SimpleNamespace(
+            source_id=1,
+            title="BRAND PRO MODEL123 angle grinder",
+            content="angle grinder",
+            url="https://example.com/model123",
+            identity_conflict=False,
+            quality_flags=[],
+            type_hits={"ANGLE GRINDER": ["angle grinder"]},
+            type_scores={"ANGLE GRINDER": 2.0},
+        )
+        s1 = SimpleNamespace(
+            state="RESOLVED_RULE",
+            product_type="ANGLE GRINDER",
+            power="CORDED",
+            sources=[src],
+            identity_best="STRONG",
+        )
+        cfg = {"identity": {"regional_suffixes": []}}
+        built = v42.build_context_from_stage1(
+            "BRAND", "MODEL123", "brand|model123", "raw", s1,
+            cfg, self.rules, ["BRAND", "BRAND PRO"],
+        )
+        self.assertNotEqual(v42.IDENTITY_CONFIRMED, built.identity)
+        self.assertEqual([], built.target_source_ids)
+
     def test_query_planner_is_targeted_and_deduped(self):
         qs = v42.QueryPlanner().plan("BRAND", "MODEL123", "IDENTITY_MODEL_ONLY", "ANGLE GRINDER")
         self.assertGreaterEqual(len(qs), 3)
