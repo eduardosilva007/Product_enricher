@@ -1,22 +1,27 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
 import classification_engine_v42 as v42
 import classify_v42
 from semantic_bge_v42 import BGEHybridSemanticProvider
-from v42_adapters import GLiNEREntityExtractor, LegacyClefDecisionProvider
+from v42_adapters import GLiNEREntityExtractor, JevDecisionProvider, LegacyClefDecisionProvider
 
 
 class DummyRules:
     def __init__(self):
         self.types = {
-            "ANGLE GRINDER": {},
-            "HAMMER DRILL": {},
-            "POWER TOOL COMBO KIT": {},
+            "ANGLE GRINDER": {"fallback_pair": ["OTHERS", "ANGLE GRINDER"]},
+            "HAMMER DRILL": {"fallback_pair": ["OTHERS", "IMPACT DRILL"]},
+            "POWER TOOL COMBO KIT": {"fallback_pair": ["OTHERS", "COMBO KIT"]},
         }
+        self.taxonomy_rules = []
+        self.taxonomy_evidence_rules = []
+        self.allowed_powers = ["CORDED", "BATTERY", "PETROL", "UNKNOWN"]
+        self.hash = "rules-hash"
         self.valid_pairs = {
             ("OTHERS", "ANGLE GRINDER"),
             ("OTHERS", "IMPACT DRILL"),
@@ -434,6 +439,94 @@ class V42EngineContracts(unittest.TestCase):
         self.assertEqual(1, llm.calls)
         self.assertEqual(v42.CLASSIFIED_LLM, out.state)
         self.assertEqual(["amoladora angular"], c.extracted_entities.product_type)
+    def test_jev_composite_target_forces_combo_candidate_without_sku_hardcode(self):
+        class FakeDB:
+            def get_llm(self, *args, **kwargs):
+                return None
+            def put_llm(self, *args, **kwargs):
+                pass
+
+        provider = JevDecisionProvider(
+            self.rules,
+            {"jev": {"model": "jev-latest"}},
+            FakeDB(),
+        )
+        semantic = v42.SemanticDecision(
+            candidates=["ANGLE GRINDER", "HAMMER DRILL"],
+            calibrated_close=False,
+        )
+        c = ctx(
+            model="ANY_COMPOSITE_MODEL",
+            role=v42.ROLE_UNKNOWN,
+            role_reasons=["COMPOSITE_TARGET_ROLE_UNRESOLVED"],
+        )
+        candidates = provider._type_candidates(c, semantic)
+        self.assertEqual("POWER TOOL COMBO KIT", candidates[0])
+        self.assertIn("ANGLE GRINDER", candidates)
+
+    def test_jev_resolves_only_joint_closed_schema_choice(self):
+        class FakeDB:
+            def __init__(self):
+                self.saved = None
+            def get_llm(self, *args, **kwargs):
+                return None
+            def put_llm(self, *args, **kwargs):
+                self.saved = args
+
+        class FakeResponse:
+            ok = True
+            status_code = 200
+            text = ""
+            def json(self):
+                return {
+                    "model": "jev-latest",
+                    "answers": {
+                        "joint_classification": {
+                            "type": "choice",
+                            "choice": "ANGLE GRINDER || OTHERS | ANGLE GRINDER",
+                            "confidence": 0.91,
+                            "probabilities": {
+                                "ANGLE GRINDER || OTHERS | ANGLE GRINDER": 0.92,
+                                "HAMMER DRILL || OTHERS | IMPACT DRILL": 0.08,
+                            },
+                        },
+                        "power_source": {
+                            "type": "choice",
+                            "choice": "CORDED",
+                            "confidence": 0.88,
+                            "probabilities": {"CORDED": 0.9, "UNKNOWN": 0.1},
+                        },
+                    },
+                    "usage": {"input_tokens": 100, "output_tokens": 8},
+                }
+
+        db = FakeDB()
+        provider = JevDecisionProvider(
+            self.rules,
+            {"jev": {"model": "jev-latest", "retry_attempts": 1}},
+            db,
+        )
+        provider._api_key = lambda: "test-key"
+        semantic = v42.SemanticDecision(
+            product_type="ANGLE GRINDER",
+            candidates=["ANGLE GRINDER", "HAMMER DRILL"],
+            calibrated_close=False,
+        )
+        with patch("requests.post", return_value=FakeResponse()) as post:
+            out = provider.decide(ctx(), semantic)
+
+        self.assertEqual("RESOLVED", out.status)
+        self.assertEqual("ANGLE GRINDER", out.product_type)
+        self.assertEqual("OTHERS", out.category_general)
+        self.assertEqual("ANGLE GRINDER", out.family)
+        payload = post.call_args.kwargs["json"]
+        self.assertIn("joint_classification", payload["questions"])
+        self.assertNotIn("taxonomy_pair", payload["questions"])
+        self.assertIn(
+            "ANGLE GRINDER || OTHERS | ANGLE GRINDER",
+            payload["questions"]["joint_classification"]["criteria"],
+        )
+
     def test_legacy_clef_adapter_maps_resolved_decision(self):
         class FakeClef:
             model = "clef"
