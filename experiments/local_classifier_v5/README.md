@@ -17,7 +17,7 @@ The historical manual review focused on Category General and FAMILY. Therefore T
 
 ## Candidates
 
-1. `tfidf`: character + word TF-IDF with calibrated LinearSVC.
+1. `tfidf`: character + word TF-IDF with LinearSVC. Ranking scores are normalized; AUTO thresholds are learned on VALIDATION and measured on TEST, avoiding calibration failures on rare/singleton taxonomy classes.
 2. `small`: multilingual MiniLM sentence embeddings + LogisticRegression.
 3. `bge`: local BGE-M3 dense embeddings + LogisticRegression.
 
