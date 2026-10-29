@@ -68,6 +68,25 @@ class V5TaxonomyBenchmarkContracts(unittest.TestCase):
             bt.canonical_pair(" OTHERS ", " BLADE   FAN ", aliases),
         )
 
+    def test_tfidf_supports_singleton_taxonomy_classes(self):
+        texts = [
+            "BRAND A MODEL A1",
+            "BRAND A MODEL A2",
+            "BRAND B MODEL B1",
+            "BRAND C MODEL C1",
+        ]
+        labels = np.array([
+            "OTHERS || A",
+            "OTHERS || A",
+            "OTHERS || B",
+            "OTHERS || C",
+        ])
+        estimator = bt.TfidfSVC().fit(texts, labels)
+        X = estimator.transform(texts)
+        proba = estimator.model.predict_proba(X)
+        self.assertEqual((4, 3), proba.shape)
+        np.testing.assert_allclose(proba.sum(axis=1), np.ones(4), atol=1e-8)
+
     def test_threshold_is_selected_on_validation(self):
         y = np.array(["A", "A", "B", "B"])
         pred = np.array(["A", "A", "B", "A"])
