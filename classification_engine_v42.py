@@ -254,6 +254,8 @@ class RoleResolver:
                 return ROLE_BUNDLE, ["TARGET_COMBO_EVIDENCE"], types
 
         if target_ids:
+            if composite:
+                return ROLE_UNKNOWN, ["COMPOSITE_TARGET_ROLE_UNRESOLVED"], []
             return ROLE_PRIMARY, ["TARGET_CONFIRMED_PRIMARY"], []
         return ROLE_UNKNOWN, ["ROLE_NOT_ESTABLISHED"], []
 
@@ -410,6 +412,7 @@ class V42ClassificationEngine:
         if (
             getattr(ctx.s1, "state", "") == "RESOLVED_RULE"
             and ctx.rule_target_supported
+            and ctx.role == ROLE_PRIMARY
             and stage1_type in self.rules.types
         ):
             power = pp.safe(getattr(ctx.s1, "power", "")) or "UNKNOWN"
@@ -481,13 +484,22 @@ class V42ClassificationEngine:
         try:
             decision = self.decision_provider.decide(ctx, semantic)
         except Exception as exc:
+            failure_metadata: Dict[str, Any] = dict(entity_metadata)
+            if semantic is not None:
+                failure_metadata.update(semantic.metadata or {})
+                failure_metadata.setdefault("Local Confidence", semantic.confidence)
+                failure_metadata.setdefault("Local Margin", semantic.margin)
+                failure_metadata.setdefault(
+                    "Local Candidates", " | ".join(semantic.candidates)
+                )
+            failure_metadata["Operational Error"] = str(exc)
             return ClassificationResult(
                 ctx.brand, ctx.model, OPERATIONAL_ERROR,
                 identity=ctx.identity, role=ctx.role,
                 decision_source=getattr(self.decision_provider, "name", "LLM"),
                 reason_code=f"DECISION_PROVIDER_ERROR:{type(exc).__name__}",
                 next_action="CORRIGIR_OPERACAO",
-                metadata={**entity_metadata, "Operational Error": str(exc)},
+                metadata=failure_metadata,
             )
 
         if decision.status == "INSUFFICIENT":
