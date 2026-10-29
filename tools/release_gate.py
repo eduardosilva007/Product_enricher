@@ -25,7 +25,7 @@ def main() -> int:
     p.add_argument("--result", default="")
     p.add_argument("--gold", default="acceptance/v42_gladiator_10.csv")
     p.add_argument("--gliner-model", default="")
-    p.add_argument("--provider", choices=["clef", "none"], default="clef")
+    p.add_argument("--provider", choices=["jev", "clef", "none"], default="jev")
     args = p.parse_args()
 
     py = sys.executable
