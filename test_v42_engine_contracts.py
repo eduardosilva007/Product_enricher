@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 import classification_engine_v42 as v42
-from v42_adapters import LegacyClefDecisionProvider
+from v42_adapters import GLiNEREntityExtractor, LegacyClefDecisionProvider
 
 
 class DummyRules:
@@ -252,6 +252,54 @@ class V42EngineContracts(unittest.TestCase):
         self.assertNotEqual(v42.IDENTITY_CONFIRMED, built.identity)
         self.assertEqual([], built.target_source_ids)
 
+    def test_gliner_adapter_returns_raw_entities_only(self):
+        class FakeModel:
+            def extract_entities(self, text, schema):
+                return {
+                    "entities": {
+                        "product_type": ["amoladora angular"],
+                        "power_source": ["batería"],
+                        "voltage": ["18 V"],
+                    }
+                }
+
+        extractor = GLiNEREntityExtractor("dummy")
+        extractor.model = FakeModel()
+        out = extractor.extract("Amoladora angular a batería 18 V")
+        self.assertEqual(["amoladora angular"], out.product_type)
+        self.assertEqual(["batería"], out.power_source)
+        self.assertEqual(["18 V"], out.voltage)
+        self.assertFalse(hasattr(out, "canonical_type"))
+        self.assertFalse(hasattr(out, "category_general"))
+        self.assertFalse(hasattr(out, "family"))
+
+    def test_entity_extractor_cannot_close_classification(self):
+        class FakeExtractor:
+            name = "GLINER_ENTITY_EXTRACTOR"
+            def __init__(self):
+                self.calls = 0
+            def extract(self, text):
+                self.calls += 1
+                return v42.ExtractedEntities(
+                    product_type=["amoladora angular"],
+                    power_source=["batería"],
+                    voltage=["18 V"],
+                )
+
+        extractor = FakeExtractor()
+        llm = FakeDecision()
+        c = ctx()
+        engine = v42.V42ClassificationEngine(
+            self.rules,
+            semantic_provider=None,
+            decision_provider=llm,
+            entity_extractor=extractor,
+        )
+        out = engine.classify(c)
+        self.assertEqual(1, extractor.calls)
+        self.assertEqual(1, llm.calls)
+        self.assertEqual(v42.CLASSIFIED_LLM, out.state)
+        self.assertEqual(["amoladora angular"], c.extracted_entities.product_type)
     def test_legacy_clef_adapter_maps_resolved_decision(self):
         class FakeClef:
             model = "clef"
