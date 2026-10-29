@@ -1,3 +1,8 @@
+---
+name: runtime-doctor
+description: Run local runtime preflight checks for env, dependencies, cache, models, providers, and output generation before classification.
+---
+
 # Runtime Doctor
 
 ## Goal
