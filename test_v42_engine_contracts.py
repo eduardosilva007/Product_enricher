@@ -1,7 +1,11 @@
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import classification_engine_v42 as v42
+import classify_v42
 from semantic_bge_v42 import BGEHybridSemanticProvider
 from v42_adapters import GLiNEREntityExtractor, LegacyClefDecisionProvider
 
@@ -383,6 +387,34 @@ class V42EngineContracts(unittest.TestCase):
         out = adapter.decide(ctx(), None)
         self.assertEqual("INSUFFICIENT", out.status)
 
+    def test_v42_runtime_env_loads_before_provider_preflight(self):
+        old_account = os.environ.pop("CLOUDFLARE_ACCOUNT_ID", None)
+        old_token = os.environ.pop("CLOUDFLARE_API_TOKEN", None)
+        old_gliner = os.environ.pop("GLINER_MODEL_PATH", None)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                base = Path(td)
+                (base / ".env").write_text(
+                    "CLOUDFLARE_ACCOUNT_ID=test-account\n"
+                    "CLOUDFLARE_API_TOKEN=test-token\n"
+                    "GLINER_MODEL_PATH=C:\\\\models\\\\gliner\n",
+                    encoding="utf-8",
+                )
+                info = classify_v42._load_runtime_env(base)
+                self.assertTrue(info["exists"])
+                self.assertEqual("test-account", os.getenv("CLOUDFLARE_ACCOUNT_ID"))
+                self.assertEqual("test-token", os.getenv("CLOUDFLARE_API_TOKEN"))
+                self.assertTrue(os.getenv("GLINER_MODEL_PATH", "").endswith("gliner"))
+        finally:
+            for key, value in {
+                "CLOUDFLARE_ACCOUNT_ID": old_account,
+                "CLOUDFLARE_API_TOKEN": old_token,
+                "GLINER_MODEL_PATH": old_gliner,
+            }.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
     def test_query_planner_is_targeted_and_deduped(self):
         qs = v42.QueryPlanner().plan("BRAND", "MODEL123", "IDENTITY_MODEL_ONLY", "ANGLE GRINDER")
         self.assertGreaterEqual(len(qs), 3)
