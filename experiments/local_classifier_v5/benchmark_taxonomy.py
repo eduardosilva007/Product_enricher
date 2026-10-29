@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PAIR_SEP = " || "
 RANDOM_STATE = 42
 TARGET_PRECISIONS = (0.95, 0.97, 0.98, 0.99)
+DEFAULT_NORMALIZATION = Path(__file__).with_name("taxonomy_normalization.json")
 
 
 def safe(value) -> str:
@@ -110,6 +111,38 @@ def split_pair(value: str) -> Tuple[str, str]:
         return "", ""
     return tuple(safe(x) for x in value.split(PAIR_SEP, 1))  # type: ignore[return-value]
 
+def load_taxonomy_normalization(path: Path) -> Dict[str, object]:
+    if not path.exists():
+        return {"pair_aliases": [], "catchall_pairs": [["OTHERS", "OTHERS"]]}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def taxonomy_alias_map(config: Dict[str, object]) -> Dict[Tuple[str, str], Tuple[str, str]]:
+    out: Dict[Tuple[str, str], Tuple[str, str]] = {}
+    for item in config.get("pair_aliases", []) or []:
+        if not isinstance(item, dict):
+            continue
+        source = item.get("from") or []
+        target = item.get("to") or []
+        if len(source) >= 2 and len(target) >= 2:
+            out[(safe(source[0]), safe(source[1]))] = (safe(target[0]), safe(target[1]))
+    return out
+
+
+def canonical_pair(category: str, family: str, aliases: Dict[Tuple[str, str], Tuple[str, str]]) -> Tuple[str, str]:
+    pair = (" ".join(safe(category).split()), " ".join(safe(family).split()))
+    return aliases.get(pair, pair)
+
+
+def catchall_labels(config: Dict[str, object]) -> set[str]:
+    out: set[str] = set()
+    for pair in config.get("catchall_pairs", []) or []:
+        if isinstance(pair, list) and len(pair) >= 2:
+            out.add(label_pair(safe(pair[0]), safe(pair[1])))
+    return out or {label_pair("OTHERS", "OTHERS")}
+
+
 
 @dataclass
 class DatasetBundle:
@@ -118,7 +151,7 @@ class DatasetBundle:
     cols: Dict[str, str]
 
 
-def load_gold(path: Path) -> DatasetBundle:
+def load_gold(path: Path, normalization: Dict[str, object]) -> DatasetBundle:
     df = pd.read_excel(path, dtype=object)
     cols = {
         "brand": find_col(df, ["Marca", "Fabricante", "Brand", "Manufacturer"]),
@@ -131,8 +164,21 @@ def load_gold(path: Path) -> DatasetBundle:
     work = df.copy()
     work["__brand"] = work[cols["brand"]].map(safe)
     work["__model"] = work[cols["model"]].map(safe)
-    work["__category"] = work[cols["category"]].map(safe)
-    work["__family"] = work[cols["family"]].map(safe)
+    work["__raw_category"] = work[cols["category"]].map(safe)
+    work["__raw_family"] = work[cols["family"]].map(safe)
+    aliases = taxonomy_alias_map(normalization)
+    canonical = [
+        canonical_pair(c, f, aliases)
+        for c, f in zip(work["__raw_category"], work["__raw_family"])
+    ]
+    work["__category"] = [x[0] for x in canonical]
+    work["__family"] = [x[1] for x in canonical]
+    work["__taxonomy_normalized"] = [
+        "SIM" if (safe(rc), safe(rf)) != (c, f) else "NÃO"
+        for rc, rf, (c, f) in zip(
+            work["__raw_category"], work["__raw_family"], canonical
+        )
+    ]
     work = work[
         (work["__brand"] != "")
         & (work["__model"] != "")
@@ -420,6 +466,25 @@ def evaluate_candidate(
         "Seconds": round(time.perf_counter() - started, 2),
     }
 
+    catchall_set = set(getattr(args, "_catchall_labels", set()))
+    actionable_test_mask = np.array([x not in catchall_set for x in y_test], dtype=bool)
+    if actionable_test_mask.any():
+        metrics["Actionable Test N"] = int(actionable_test_mask.sum())
+        metrics["Actionable Top1 Accuracy"] = float(
+            np.mean(test_pred[actionable_test_mask] == y_test[actionable_test_mask])
+        )
+        metrics["Actionable Top3 Recall"] = candidate_recall(
+            y_test[actionable_test_mask], classes, test_rank[actionable_test_mask], 3
+        )
+        metrics["Actionable Top5 Recall"] = candidate_recall(
+            y_test[actionable_test_mask], classes, test_rank[actionable_test_mask], 5
+        )
+    else:
+        metrics["Actionable Test N"] = 0
+        metrics["Actionable Top1 Accuracy"] = 0.0
+        metrics["Actionable Top3 Recall"] = 0.0
+        metrics["Actionable Top5 Recall"] = 0.0
+
     cat_true = np.array([split_pair(x)[0] for x in y_test])
     fam_true = np.array([split_pair(x)[1] for x in y_test])
     cat_pred = np.array([split_pair(x)[0] for x in test_pred])
@@ -428,9 +493,28 @@ def evaluate_candidate(
     metrics["FAMILY Accuracy"] = float(np.mean(fam_true == fam_pred))
 
     coverage_rows = []
+    validation_non_catchall = np.array([p not in catchall_set for p in val_pred], dtype=bool)
+    test_non_catchall = np.array([p not in catchall_set for p in test_pred], dtype=bool)
     for target in TARGET_PRECISIONS:
         threshold = threshold_from_validation(y_val, val_pred, val_conf, target)
         out = apply_threshold(y_test, test_pred, test_conf, threshold)
+
+        actionable_threshold = threshold_from_validation(
+            y_val[validation_non_catchall],
+            val_pred[validation_non_catchall],
+            val_conf[validation_non_catchall],
+            target,
+        ) if validation_non_catchall.any() else None
+        actionable_mask = test_non_catchall & (
+            test_conf >= actionable_threshold if actionable_threshold is not None else False
+        )
+        actionable_selected = int(actionable_mask.sum())
+        actionable_precision = (
+            float(np.mean(test_pred[actionable_mask] == y_test[actionable_mask]))
+            if actionable_selected else None
+        )
+        actionable_coverage = float(actionable_selected / max(1, len(y_test)))
+
         coverage_rows.append({
             "Candidate": candidate,
             "Feature Mode": mode,
@@ -439,9 +523,15 @@ def evaluate_candidate(
             "Test Selected": out["selected"],
             "Test Coverage": out["coverage"],
             "Test Precision": out["precision"],
+            "Actionable Threshold": actionable_threshold,
+            "Actionable Selected": actionable_selected,
+            "Actionable Coverage": actionable_coverage,
+            "Actionable Precision": actionable_precision,
         })
         metrics[f"Coverage@{int(target*100)}"] = out["coverage"]
         metrics[f"Precision@{int(target*100)}"] = out["precision"]
+        metrics[f"Actionable Coverage@{int(target*100)}"] = actionable_coverage
+        metrics[f"Actionable Precision@{int(target*100)}"] = actionable_precision
 
     pred_rows = []
     for local_i, global_i in enumerate(test_idx):
@@ -482,6 +572,11 @@ def main() -> int:
     p.add_argument("--test-size", type=float, default=0.15)
     p.add_argument("--val-size", type=float, default=0.15)
     p.add_argument("--audit-only", action="store_true")
+    p.add_argument(
+        "--taxonomy-normalization",
+        default=str(DEFAULT_NORMALIZATION),
+        help="JSON com aliases conservadores de Category General + FAMILY",
+    )
     args = p.parse_args()
 
     input_path = Path(args.input)
@@ -494,8 +589,14 @@ def main() -> int:
     if not cache_dir.is_absolute():
         cache_dir = ROOT / cache_dir
 
-    bundle = load_gold(input_path)
+    normalization_path = Path(args.taxonomy_normalization)
+    if not normalization_path.is_absolute():
+        normalization_path = ROOT / normalization_path
+    normalization = load_taxonomy_normalization(normalization_path)
+
+    bundle = load_gold(input_path, normalization)
     df = bundle.df
+    catchalls = catchall_labels(normalization)
     if len(df) < 100:
         raise RuntimeError(f"Poucos registros classificados utilizáveis: {len(df)}")
 
@@ -506,11 +607,23 @@ def main() -> int:
     df = df.copy()
     df["__split"] = split_names
 
+    raw_input_rows = len(pd.read_excel(input_path, dtype=object))
+    raw_pair_count = bundle.df[["__raw_category", "__raw_family"]].drop_duplicates().shape[0]
+    normalized_rows = int((bundle.df["__taxonomy_normalized"] == "SIM").sum())
+    catchall_rows = int(bundle.df["__label"].isin(catchalls).sum())
+    taxonomy_counts_full = bundle.df["__label"].value_counts()
     audit = pd.DataFrame([{
-        "Input Rows": len(pd.read_excel(input_path, dtype=object)),
+        "Input Rows": raw_input_rows,
         "Usable Gold Rows": len(df),
-        "Conflicting Brand+Model Rows Excluded": len(bundle.conflicts),
-        "Unique Taxonomy Pairs": df["__label"].nunique(),
+        "Conflicting Brand+Model Keys Excluded": bundle.conflicts["__key"].nunique() if len(bundle.conflicts) else 0,
+        "Conflicting Rows Excluded": len(bundle.conflicts),
+        "Taxonomy Rows Canonicalized": normalized_rows,
+        "Raw Taxonomy Pairs": raw_pair_count,
+        "Canonical Taxonomy Pairs": df["__label"].nunique(),
+        "Catchall Rows": catchall_rows,
+        "Catchall %": catchall_rows / max(1, len(df)),
+        "Singleton Classes": int((taxonomy_counts_full == 1).sum()),
+        "Classes <=5 Examples": int((taxonomy_counts_full <= 5).sum()),
         "Unique Groups": df["__group"].nunique(),
         "Train Rows": int((df["__split"] == "TRAIN").sum()),
         "Validation Rows": int((df["__split"] == "VALIDATION").sum()),
@@ -519,7 +632,12 @@ def main() -> int:
         "Group Leakage Train/Validation": len(set(df.loc[df["__split"] == "TRAIN", "__group"]) & set(df.loc[df["__split"] == "VALIDATION", "__group"])),
     }])
 
-    split_export_cols = ["__brand", "__model", "__category", "__family", "__label", "__group", "__split"]
+    split_export_cols = [
+        "__brand", "__model",
+        "__raw_category", "__raw_family",
+        "__category", "__family", "__taxonomy_normalized",
+        "__label", "__group", "__split",
+    ]
 
     if args.audit_only:
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
@@ -543,6 +661,7 @@ def main() -> int:
 
     cache = EmbeddingCache(cache_dir)
     labels = df["__label"].to_numpy()
+    args._catchall_labels = catchalls
     metrics_rows = []
     coverage_parts = []
     prediction_parts = []
@@ -589,6 +708,12 @@ def main() -> int:
         df.groupby(["__category", "__family", "__label"])
         .size().reset_index(name="N").sort_values("N", ascending=False)
     )
+    taxonomy_counts["Frequency Bucket"] = pd.cut(
+        taxonomy_counts["N"],
+        bins=[0, 1, 2, 5, 10, 20, 50, float("inf")],
+        labels=["1", "2", "3-5", "6-10", "11-20", "21-50", "51+"],
+        include_lowest=True,
+    ).astype(str)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         audit.to_excel(writer, sheet_name="Audit", index=False)
@@ -614,7 +739,8 @@ def main() -> int:
         show = [
             "Candidate", "Feature Mode", "Pair Top1 Accuracy", "Category Accuracy",
             "FAMILY Accuracy", "Pair Top3 Recall", "Pair Top5 Recall",
-            "Precision@98", "Coverage@98", "Seconds",
+            "Actionable Top1 Accuracy", "Actionable Top3 Recall", "Actionable Top5 Recall",
+            "Actionable Precision@98", "Actionable Coverage@98", "Seconds",
         ]
         print(metrics_df[show].to_string(index=False))
     if len(skipped_df):
