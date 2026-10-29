@@ -255,6 +255,76 @@ def _composite_model_parts(model: str) -> List[str]:
     return mixed if len(mixed) >= 2 else []
 
 
+def build_context_from_stage1(
+    brand: str,
+    model: str,
+    key: str,
+    raw_hash: str,
+    s1: Any,
+    cfg: Dict[str, Any],
+    rules: Any,
+    known_brands: Sequence[str] = (),
+) -> ClassificationContext:
+    """Single adapter from legacy Stage1 into the V4.2 contract."""
+    identity, identity_reasons, target_ids = IdentityResolver(
+        cfg, known_brands
+    ).resolve(brand, model, s1)
+
+    role, role_reasons, combo_components = RoleResolver(rules).resolve(
+        model, s1, target_ids
+    )
+
+    target_set = set(target_ids)
+    evidence_chunks: List[str] = []
+    semantic_chunks: List[str] = []
+    rule_target_supported = False
+    stage1_type = pp.safe(getattr(s1, "product_type", ""))
+
+    for src in (getattr(s1, "sources", None) or []):
+        if int(src.source_id) not in target_set:
+            continue
+        title = pp.safe(getattr(src, "title", ""))
+        content = pp.safe(getattr(src, "content", ""))
+        chunk = f"TITLE: {title}\nCONTENT: {content[:1800]}".strip()
+        if chunk:
+            evidence_chunks.append(chunk)
+
+        quality_flags = list(getattr(src, "quality_flags", None) or [])
+        if not quality_flags:
+            # Semantic engine receives only clean target-confirmed evidence.
+            if title:
+                semantic_chunks.append(f"PRODUCT TITLE: {title}")
+            if content:
+                semantic_chunks.append(f"CONTENT: {content[:700]}")
+
+        supports_stage1 = bool(
+            stage1_type
+            and (
+                stage1_type in (getattr(src, "type_hits", {}) or {})
+                or float((getattr(src, "type_scores", {}) or {}).get(stage1_type, 0.0) or 0.0) > 0.0
+            )
+        )
+        if supports_stage1 and not quality_flags:
+            rule_target_supported = True
+
+    return ClassificationContext(
+        brand=brand,
+        model=model,
+        key=key,
+        raw_hash=raw_hash,
+        s1=s1,
+        identity=identity,
+        identity_reasons=identity_reasons,
+        role=role,
+        role_reasons=role_reasons,
+        evidence_text="\n---TARGET SOURCE---\n".join(evidence_chunks),
+        semantic_text="\n\n".join(semantic_chunks),
+        target_source_ids=target_ids,
+        rule_target_supported=rule_target_supported,
+        combo_components=combo_components,
+    )
+
+
 class QueryPlanner:
     def plan(self, brand: str, model: str, reason: str, type_hint: str = "") -> List[str]:
         base = f'"{brand}" "{model}"'
