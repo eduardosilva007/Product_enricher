@@ -1,3 +1,8 @@
+---
+name: architecture-guardian
+description: Protect Product Enricher classification architecture and prevent responsibility drift or SKU-specific patches.
+---
+
 # Architecture Guardian
 
 ## Goal
