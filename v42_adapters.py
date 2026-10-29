@@ -10,6 +10,66 @@ import classification_engine_v42 as v42
 import pipeline_produtos as pp
 
 
+class GLiNEREntityExtractor:
+    """GLiNER2 adapter restricted to entity extraction only.
+
+    It never maps spans to canonical TYPEs, never decides ROLE/COMBO, and never
+    selects Category General/FAMILY. Those responsibilities remain downstream.
+    """
+
+    name = "GLINER_ENTITY_EXTRACTOR"
+
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+        self.model = None
+
+    def load(self) -> None:
+        if self.model is not None:
+            return
+        if not self.model_name:
+            raise RuntimeError("GLINER_MODEL_PATH_NOT_CONFIGURED")
+        try:
+            from gliner2 import AutoExtractor
+        except ImportError as exc:
+            raise RuntimeError("GLINER2_NOT_INSTALLED") from exc
+        self.model = AutoExtractor.from_pretrained(self.model_name)
+
+    @staticmethod
+    def _values(result: Any, label: str) -> list[str]:
+        if not isinstance(result, dict):
+            return []
+        entities = result.get("entities", {})
+        if not isinstance(entities, dict):
+            return []
+        raw = entities.get(label, [])
+        out: list[str] = []
+        for item in raw if isinstance(raw, list) else [raw]:
+            if isinstance(item, str) and item.strip():
+                out.append(item.strip())
+            elif isinstance(item, dict):
+                text = pp.safe(item.get("text"))
+                if text:
+                    out.append(text)
+        return list(dict.fromkeys(out))
+
+    def extract(self, text: str) -> v42.ExtractedEntities:
+        self.load()
+        result = self.model.extract_entities(
+            pp.safe(text)[:4000],
+            {
+                "product_type": "literal phrase naming the physical product type",
+                "power_source": "literal phrase naming the product power source",
+                "voltage": "literal voltage expression associated with the product",
+            },
+        )
+        return v42.ExtractedEntities(
+            product_type=self._values(result, "product_type"),
+            power_source=self._values(result, "power_source"),
+            voltage=self._values(result, "voltage"),
+            metadata={"raw_entity_labels": ["product_type", "power_source", "voltage"]},
+        )
+
+
 class LegacyClefDecisionProvider:
     """Migration adapter.
 
