@@ -18,7 +18,8 @@ import pandas as pd
 
 import classification_engine_v42 as v42
 import pipeline_produtos as pp
-from v42_adapters import LegacyClefDecisionProvider
+from semantic_bge_v42 import BGEHybridSemanticProvider
+from v42_adapters import ClefCandidateDecisionProvider, GLiNEREntityExtractor
 
 
 def _load_input(path: Path, max_items: int) -> List[Tuple[str, str, str]]:
@@ -72,6 +73,8 @@ def main() -> None:
     p.add_argument("--max-items", type=int, default=0)
     p.add_argument("--provider", choices=["clef", "none"], default="clef")
     p.add_argument("--clef-model", default="")
+    p.add_argument("--gliner-model", default=os.getenv("GLINER_MODEL_PATH", ""))
+    p.add_argument("--no-gliner", action="store_true")
     args = p.parse_args()
 
     base = Path(__file__).resolve().parent
@@ -105,11 +108,15 @@ def main() -> None:
     known_brands = _known_brands(input_path)
     store = pp.TavilyReadOnlyStore(cache_path)
     stage1 = pp.DeterministicEngine(rules, cfg)
-    db = None
-    clef = None
+    db = pp.ClassificationDB(db_path)
+    semantic_provider = BGEHybridSemanticProvider(rules, cfg)
+    entity_extractor = None
     provider = None
 
     try:
+        if not args.no_gliner and pp.safe(args.gliner_model):
+            entity_extractor = GLiNEREntityExtractor(pp.safe(args.gliner_model))
+
         if args.provider == "clef":
             model = (
                 pp.safe(args.clef_model)
@@ -117,15 +124,14 @@ def main() -> None:
                 or pp.safe((cfg.get("clef", {}) or {}).get("model"))
                 or pp.DEFAULT_CLEF_MODEL
             )
-            db = pp.ClassificationDB(db_path)
-            clef = pp.ClefFunnelClassifier(rules, cfg, db, provider="clef", model=model)
-            clef.preflight()
-            provider = LegacyClefDecisionProvider(clef)
+            provider = ClefCandidateDecisionProvider(rules, cfg, db, model=model)
+            provider.preflight()
 
         engine = v42.V42ClassificationEngine(
             rules=rules,
-            semantic_provider=None,
+            semantic_provider=semantic_provider,
             decision_provider=provider,
+            entity_extractor=entity_extractor,
         )
 
         rows: List[Dict[str, Any]] = []
@@ -167,6 +173,15 @@ def main() -> None:
                 "Target Source IDs": " | ".join(str(x) for x in ctx.target_source_ids),
                 "Rule Target Supported": "SIM" if ctx.rule_target_supported else "NÃO",
                 "Raw State": raw.state,
+                "GLiNER Product Type Entities": " | ".join(
+                    ctx.extracted_entities.product_type if ctx.extracted_entities else []
+                ),
+                "GLiNER Power Entities": " | ".join(
+                    ctx.extracted_entities.power_source if ctx.extracted_entities else []
+                ),
+                "GLiNER Voltage Entities": " | ".join(
+                    ctx.extracted_entities.voltage if ctx.extracted_entities else []
+                ),
             })
             rows.append(row)
             stats[result.state] = stats.get(result.state, 0) + 1
@@ -198,6 +213,10 @@ def main() -> None:
                 2,
             ),
             "Provider": args.provider.upper(),
+            "Semantic Provider": semantic_provider.name,
+            "Entity Extractor": (
+                entity_extractor.name if entity_extractor is not None else "DISABLED"
+            ),
         }])
 
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
@@ -208,8 +227,7 @@ def main() -> None:
         print(summary.to_dict(orient="records")[0])
     finally:
         store.close()
-        if db is not None:
-            db.close()
+        db.close()
 
 
 if __name__ == "__main__":
