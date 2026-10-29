@@ -16,7 +16,6 @@ import numpy as np
 import pandas as pd
 
 try:
-    from sklearn.calibration import CalibratedClassifierCV
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics import accuracy_score, f1_score
     from sklearn.model_selection import GroupShuffleSplit
@@ -307,6 +306,37 @@ def per_class_table(y_true: np.ndarray, pred: np.ndarray) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["N", "Gold Pair"], ascending=[False, True])
 
 
+class LinearSVCScoreModel:
+    """LinearSVC with normalized ranking scores.
+
+    We intentionally do not use CalibratedClassifierCV here because the reviewed
+    taxonomy has a large long tail with classes that may have fewer than three
+    training examples. AUTO thresholds are learned on the held-out validation
+    split and then measured on TEST, so absolute probability calibration is not
+    required for a valid precision/coverage gate.
+    """
+
+    def __init__(self):
+        self.base = LinearSVC(C=2.0, class_weight="balanced")
+
+    @property
+    def classes_(self):
+        return self.base.classes_
+
+    def fit(self, X, y):
+        self.base.fit(X, y)
+        return self
+
+    def predict_proba(self, X):
+        scores = np.asarray(self.base.decision_function(X), dtype=np.float64)
+        if scores.ndim == 1:
+            scores = np.column_stack([-scores, scores])
+        scores -= scores.max(axis=1, keepdims=True)
+        exp_scores = np.exp(np.clip(scores, -50.0, 50.0))
+        denom = exp_scores.sum(axis=1, keepdims=True)
+        return exp_scores / np.maximum(denom, 1e-12)
+
+
 class TfidfSVC:
     def __init__(self):
         self.vectorizer = FeatureUnion([
@@ -319,11 +349,7 @@ class TfidfSVC:
                 max_features=100000, sublinear_tf=True,
             )),
         ])
-        self.model = CalibratedClassifierCV(
-            LinearSVC(C=2.0, class_weight="balanced"),
-            method="sigmoid",
-            cv=3,
-        )
+        self.model = LinearSVCScoreModel()
 
     def fit(self, texts, labels):
         X = self.vectorizer.fit_transform(texts)
