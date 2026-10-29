@@ -19,7 +19,7 @@ import pandas as pd
 import classification_engine_v42 as v42
 import pipeline_produtos as pp
 from semantic_bge_v42 import BGEHybridSemanticProvider
-from v42_adapters import ClefCandidateDecisionProvider, GLiNEREntityExtractor
+from v42_adapters import ClefCandidateDecisionProvider, GLiNEREntityExtractor, JevDecisionProvider
 
 
 def _load_input(path: Path, max_items: int) -> List[Tuple[str, str, str]]:
@@ -79,19 +79,29 @@ def main() -> None:
     p.add_argument("--cache", default="")
     p.add_argument("--output", default="Classificacao_V42.xlsx")
     p.add_argument("--max-items", type=int, default=0)
-    p.add_argument("--provider", choices=["clef", "none"], default="clef")
+    p.add_argument(
+        "--provider",
+        choices=["jev", "clef", "none"],
+        default=(os.getenv("V42_PROVIDER", "").strip().lower() or "jev"),
+    )
+    p.add_argument("--jev-model", default="")
     p.add_argument("--clef-model", default="")
     p.add_argument("--gliner-model", default=os.getenv("GLINER_MODEL_PATH", ""))
     p.add_argument("--no-gliner", action="store_true")
     args = p.parse_args()
 
     if env_info.get("exists"):
+        jev_ready = bool(
+            os.getenv("TYPESAFE_API_KEY", "").strip()
+            or os.getenv("JEV_API_KEY", "").strip()
+        )
         clef_ready = bool(os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()) and bool(
             os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
             or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
         )
         print(
             "V42 ENV | .env=CARREGADO | "
+            f"JEV={'CONFIGURADO' if jev_ready else 'AUSENTE'} | "
             f"CLEF={'CONFIGURADO' if clef_ready else 'AUSENTE'} | "
             f"GLINER={'CONFIGURADO' if bool(os.getenv('GLINER_MODEL_PATH', '').strip()) else 'AUSENTE'}"
         )
@@ -136,7 +146,17 @@ def main() -> None:
         if not args.no_gliner and pp.safe(args.gliner_model):
             entity_extractor = GLiNEREntityExtractor(pp.safe(args.gliner_model))
 
-        if args.provider == "clef":
+        if args.provider == "jev":
+            model = (
+                pp.safe(args.jev_model)
+                or os.getenv("TYPESAFE_MODEL", "").strip()
+                or os.getenv("JEV_MODEL", "").strip()
+                or pp.safe((cfg.get("jev", {}) or {}).get("model"))
+                or "jev-latest"
+            )
+            provider = JevDecisionProvider(rules, cfg, db, model=model)
+            provider.preflight()
+        elif args.provider == "clef":
             model = (
                 pp.safe(args.clef_model)
                 or os.getenv("CLOUDFLARE_CLEF_MODEL", "").strip()
