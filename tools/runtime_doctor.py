@@ -101,19 +101,19 @@ def main() -> int:
             d.check("CLOUDFLARE_ACCOUNT_ID", lambda: os.environ["CLOUDFLARE_ACCOUNT_ID"][:4] + "***")
             d.check("CLOUDFLARE_API_TOKEN", lambda: "configured" if (os.getenv("CLOUDFLARE_API_TOKEN") or os.getenv("CLOUDFLARE_AUTH_TOKEN")) else (_ for _ in ()).throw(RuntimeError("token ausente")))
 
-    def cache_check():
-        cfg = cfg_holder["cfg"]
-        cache = Path(pp.safe((cfg.get("files", {}) or {}).get("cache")) or "cache_tavily.sqlite")
-        if not cache.is_absolute():
-            cache = ROOT / cache
-        store = pp.TavilyReadOnlyStore(cache)
-        try:
-            return f"{cache.name}; products={len(store.catalog())}"
-        finally:
-            store.close()
-    d.check("SQLite cache", cache_check)
-
     if args.mode == "local":
+        def cache_check():
+            cfg = cfg_holder["cfg"]
+            cache = Path(pp.safe((cfg.get("files", {}) or {}).get("cache")) or "cache_tavily.sqlite")
+            if not cache.is_absolute():
+                cache = ROOT / cache
+            store = pp.TavilyReadOnlyStore(cache)
+            try:
+                return f"{cache.name}; products={len(store.catalog())}"
+            finally:
+                store.close()
+        d.check("SQLite cache", cache_check)
+
         def gliner_check():
             from v42_adapters import GLiNEREntityExtractor
             cfg = cfg_holder["cfg"]
