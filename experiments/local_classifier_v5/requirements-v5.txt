@@ -1,0 +1,2 @@
+-r ../../requirements-v42.txt
+scikit-learn>=1.5,<2
