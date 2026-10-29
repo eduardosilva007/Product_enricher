@@ -510,11 +510,20 @@ class V42ClassificationEngine:
                 next_action="CORRIGIR_OPERACAO",
             )
 
+        merged_metadata: Dict[str, Any] = {}
+        if semantic is not None:
+            merged_metadata.update(semantic.metadata or {})
+            merged_metadata.setdefault("Local Confidence", semantic.confidence)
+            merged_metadata.setdefault("Local Margin", semantic.margin)
+            merged_metadata.setdefault(
+                "Local Candidates", " | ".join(semantic.candidates)
+            )
+        merged_metadata.update(decision.metadata or {})
         return ClassificationResult(
             ctx.brand, ctx.model, CLASSIFIED_LLM,
             decision.product_type, decision.power, decision.category_general,
             decision.family, ctx.identity, ctx.role,
             getattr(self.decision_provider, "name", "LLM"),
             decision.reason or "LLM_RESOLVED", "CONCLUIDO",
-            metadata=decision.metadata,
+            metadata=merged_metadata,
         )
