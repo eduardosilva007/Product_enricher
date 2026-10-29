@@ -168,12 +168,19 @@ class IdentityResolver:
                     return True
         return False
 
-    def _brand_primary(self, brand: str, title: str, url: str) -> bool:
+    def _brand_primary(self, brand: str, title: str, url: str, content: str = "") -> bool:
         host = pp.safe(url)
-        if self._longer_brand_conflict(brand, title) or self._longer_brand_conflict(brand, host):
+        body = pp.safe(content)[:1600]
+        if (
+            self._longer_brand_conflict(brand, title)
+            or self._longer_brand_conflict(brand, host)
+            or self._longer_brand_conflict(brand, body)
+        ):
             return False
-        return _phrase_tokens_occurs(brand, title) or (
-            bool(pp.compact(brand)) and pp.compact(brand) in pp.compact(host)
+        return (
+            _phrase_tokens_occurs(brand, title)
+            or _phrase_tokens_occurs(brand, body)
+            or (bool(pp.compact(brand)) and pp.compact(brand) in pp.compact(host))
         )
 
     def resolve(self, brand: str, model: str, s1: Any) -> Tuple[str, List[str], List[int]]:
@@ -189,10 +196,11 @@ class IdentityResolver:
                 continue
             title = pp.safe(getattr(src, "title", ""))
             url = pp.safe(getattr(src, "url", ""))
+            content = pp.safe(getattr(src, "content", ""))
             title_model = bool(pp._model_match_in_field(model, title, self.suffixes)[0])
             url_model = bool(pp._model_match_in_field(model, url, self.suffixes)[0])
             model_primary = title_model or url_model
-            brand_primary = self._brand_primary(brand, title, url)
+            brand_primary = self._brand_primary(brand, title, url, content)
             if brand_primary and model_primary:
                 confirmed_ids.append(int(src.source_id))
                 reasons.append(f"S{src.source_id}:BRAND+MODEL_PRIMARY")
@@ -242,6 +250,16 @@ class RoleResolver:
         minimum = max(2, int(policy.get("min_distinct_primary_types", 2) or 2))
         target_ids = {int(x) for x in target_source_ids}
         composite = len(_composite_model_parts(model)) >= 2
+        component_types = {
+            pp.safe(x)
+            for x in ((self.rules.raw.get("TYPE_POLICY", {}) or {}).get("component_primary_types", []) or [])
+            if pp.safe(x)
+        }
+        composite_eligible = [
+            typ for typ in self.rules.types
+            if typ not in component_types and typ != "POWER TOOL COMBO KIT"
+        ]
+        composite_hits: set[str] = set()
 
         for src in (getattr(s1, "sources", None) or []):
             if int(src.source_id) not in target_ids or getattr(src, "quality_flags", None):
@@ -250,8 +268,13 @@ class RoleResolver:
             folded = pp.strip_accents(text).casefold()
             combo_term = any(pp.contains_alias_prepared(folded, x) for x in combo_terms)
             types = self._text_type_hits(text, eligible)
+            if composite:
+                composite_hits.update(self._text_type_hits(text, composite_eligible))
             if (combo_term and len(types) >= minimum) or (composite and combo_term):
                 return ROLE_BUNDLE, ["TARGET_COMBO_EVIDENCE"], types
+
+        if composite and len(composite_hits) >= minimum:
+            return ROLE_BUNDLE, ["COMPOSITE_MULTI_TYPE_EVIDENCE"], sorted(composite_hits)
 
         if target_ids:
             if composite:
@@ -379,7 +402,13 @@ class V42ClassificationEngine:
             ctx.model,
         )
 
-    def _needs_evidence(self, ctx: ClassificationContext, code: str, type_hint: str = "") -> ClassificationResult:
+    def _needs_evidence(
+        self,
+        ctx: ClassificationContext,
+        code: str,
+        type_hint: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> ClassificationResult:
         return ClassificationResult(
             brand=ctx.brand,
             model=ctx.model,
@@ -390,6 +419,7 @@ class V42ClassificationEngine:
             reason_code=code,
             next_action="RECOLETA_DIRIGIDA",
             recollection_queries=self.query_planner.plan(ctx.brand, ctx.model, code, type_hint),
+            metadata=dict(metadata or {}),
         )
 
     def classify(self, ctx: ClassificationContext) -> ClassificationResult:
@@ -503,7 +533,21 @@ class V42ClassificationEngine:
             )
 
         if decision.status == "INSUFFICIENT":
-            return self._needs_evidence(ctx, decision.reason or "LLM_INSUFFICIENT", semantic.product_type if semantic else "")
+            insufficient_metadata: Dict[str, Any] = dict(entity_metadata)
+            if semantic is not None:
+                insufficient_metadata.update(semantic.metadata or {})
+                insufficient_metadata.setdefault("Local Confidence", semantic.confidence)
+                insufficient_metadata.setdefault("Local Margin", semantic.margin)
+                insufficient_metadata.setdefault(
+                    "Local Candidates", " | ".join(semantic.candidates)
+                )
+            insufficient_metadata.update(decision.metadata or {})
+            return self._needs_evidence(
+                ctx,
+                decision.reason or "LLM_INSUFFICIENT",
+                semantic.product_type if semantic else "",
+                metadata=insufficient_metadata,
+            )
         if decision.status != "RESOLVED":
             return ClassificationResult(
                 ctx.brand, ctx.model, OPERATIONAL_ERROR,
