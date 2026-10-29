@@ -293,6 +293,26 @@ class V42EngineContracts(unittest.TestCase):
         provider = BGEHybridSemanticProvider(Rules(), {"semantic_funnel": {}})
         hints = provider._normalize_entity_spans(["amoladora angular", "18 V"])
         self.assertEqual(["ANGLE GRINDER"], hints)
+    def test_gliner_failure_falls_back_to_semantic_and_decision_provider(self):
+        class BrokenExtractor:
+            name = "BROKEN_GLINER"
+            def extract(self, text):
+                raise RuntimeError("boom")
+
+        semantic = FakeSemantic(False)
+        decision = FakeDecision()
+        out = v42.V42ClassificationEngine(
+            self.rules,
+            semantic_provider=semantic,
+            decision_provider=decision,
+            entity_extractor=BrokenExtractor(),
+        ).classify(ctx())
+
+        self.assertEqual(v42.CLASSIFIED_LLM, out.state)
+        self.assertEqual(1, semantic.calls)
+        self.assertEqual(1, decision.calls)
+        self.assertEqual("ERROR_FALLBACK", out.metadata.get("Entity Extractor Status"))
+        self.assertIn("RuntimeError", out.metadata.get("Entity Extractor Error", ""))
     def test_gliner_adapter_returns_raw_entities_only(self):
         class FakeModel:
             def extract_entities(self, text, schema):
