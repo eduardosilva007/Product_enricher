@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 import classification_engine_v42 as v42
+from v42_adapters import LegacyClefDecisionProvider
 
 
 class DummyRules:
@@ -250,6 +251,52 @@ class V42EngineContracts(unittest.TestCase):
         )
         self.assertNotEqual(v42.IDENTITY_CONFIRMED, built.identity)
         self.assertEqual([], built.target_source_ids)
+
+    def test_legacy_clef_adapter_maps_resolved_decision(self):
+        class FakeClef:
+            model = "clef"
+            def classify(self, key, raw_hash, brand, model, s1):
+                return (
+                    {
+                        "decision": "RESOLVED",
+                        "product_type": "ANGLE GRINDER",
+                        "power": "CORDED",
+                        "category_general": "OTHERS",
+                        "family": "ANGLE GRINDER",
+                        "evidence_source_ids": [1],
+                    },
+                    False,
+                    {
+                        "provider": "clef",
+                        "model": "clef",
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                    },
+                )
+
+        adapter = LegacyClefDecisionProvider(FakeClef())
+        out = adapter.decide(ctx(), None)
+        self.assertEqual("RESOLVED", out.status)
+        self.assertEqual("ANGLE GRINDER", out.product_type)
+        self.assertEqual("ANGLE GRINDER", out.family)
+
+    def test_legacy_clef_adapter_maps_insufficient(self):
+        class FakeClef:
+            model = "clef"
+            def classify(self, key, raw_hash, brand, model, s1):
+                return (
+                    {
+                        "decision": "INSUFFICIENT",
+                        "product_type": "INSUFFICIENT",
+                    },
+                    True,
+                    {"provider": "clef", "model": "clef"},
+                )
+
+        adapter = LegacyClefDecisionProvider(FakeClef())
+        out = adapter.decide(ctx(), None)
+        self.assertEqual("INSUFFICIENT", out.status)
 
     def test_query_planner_is_targeted_and_deduped(self):
         qs = v42.QueryPlanner().plan("BRAND", "MODEL123", "IDENTITY_MODEL_ONLY", "ANGLE GRINDER")
