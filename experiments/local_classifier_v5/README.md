@@ -99,3 +99,33 @@ If a candidate reaches high Top-3/Top-5 recall but low safe AUTO coverage, it is
 ## GLiNER
 
 GLiNER is intentionally excluded from this first benchmark. After the baseline is measured, it can be tested as an ablation only on uncertain cases. That tells us whether GLiNER actually increases candidate recall/automation coverage enough to justify its CPU cost.
+
+
+## Reviewed Gold update — 2026-10-29
+
+The manually reviewed workbook now contains about 9,070 rows with Category General + FAMILY almost fully populated.
+
+The V5 benchmark treats only Category General + FAMILY as authoritative Gold. It does not assume that historical TYPE or power fields were reviewed with the same rigor.
+
+Before splitting:
+
+- exact/normalized Brand+Model duplicates are deduplicated;
+- Brand+Model keys carrying conflicting taxonomy labels are excluded and exported;
+- only conservative taxonomy aliases/typos from `taxonomy_normalization.json` are canonicalized;
+- the source workbook is never modified.
+
+`OTHERS || OTHERS` is preserved as a real reviewed catchall label, but it is excluded from **Actionable** automation metrics. This prevents a large catchall class from making local automation look better than it is.
+
+The benchmark therefore reports two views:
+
+- **overall**: performance over every reviewed label, including catchall;
+- **actionable**: performance/coverage only when the prediction is a concrete taxonomy pair.
+
+For production decisions, use the Actionable metrics first:
+
+- Actionable Precision@98
+- Actionable Coverage@98
+- Actionable Top-3 Recall
+- Actionable Top-5 Recall
+
+The current production `regras_negocio.json` should not be bulk-expanded from every long-tail reviewed label before this benchmark. The reviewed Gold contains a large number of rare/singleton taxonomy pairs; adding all of them blindly to the runtime closed schema would convert historical noise and edge cases into executable policy. The ML benchmark is the safer place to measure which taxonomy classes are learnable and which require fallback.
