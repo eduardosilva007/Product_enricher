@@ -31,6 +31,43 @@ class V5TaxonomyBenchmarkContracts(unittest.TestCase):
         self.assertFalse(tg & xg)
         self.assertFalse(vg & xg)
 
+    def test_taxonomy_aliases_are_canonicalized_conservatively(self):
+        config = bt.load_taxonomy_normalization(
+            HERE / "taxonomy_normalization.json"
+        )
+        aliases = bt.taxonomy_alias_map(config)
+        self.assertEqual(
+            ("WATERPUMPS", "WATERPUMP"),
+            bt.canonical_pair("WATERPUMPS", "WATER PUMP", aliases),
+        )
+        self.assertEqual(
+            ("OTHERS", "COMBO KIT"),
+            bt.canonical_pair("OTHERS", "POWER TOOL COMBO KIT", aliases),
+        )
+        self.assertEqual(
+            ("OTHERS", "ANGLE GRINDER"),
+            bt.canonical_pair("OTHERS", "ANGLE GRINDER", aliases),
+        )
+
+    def test_others_others_is_catchall_not_actionable_taxonomy(self):
+        config = bt.load_taxonomy_normalization(
+            HERE / "taxonomy_normalization.json"
+        )
+        self.assertIn(
+            "OTHERS || OTHERS",
+            bt.catchall_labels(config),
+        )
+
+    def test_whitespace_is_normalized_before_alias_lookup(self):
+        config = bt.load_taxonomy_normalization(
+            HERE / "taxonomy_normalization.json"
+        )
+        aliases = bt.taxonomy_alias_map(config)
+        self.assertEqual(
+            ("OTHERS", "FAN BLADE"),
+            bt.canonical_pair(" OTHERS ", " BLADE   FAN ", aliases),
+        )
+
     def test_threshold_is_selected_on_validation(self):
         y = np.array(["A", "A", "B", "B"])
         pred = np.array(["A", "A", "B", "A"])
