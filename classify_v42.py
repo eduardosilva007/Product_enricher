@@ -63,7 +63,15 @@ def _raw_missing_result(brand: str, model: str, raw_state: str) -> Dict[str, Any
     ).as_dict()
 
 
+def _load_runtime_env(base: Path) -> Dict[str, Any]:
+    """Load repository .env before any CLI defaults/preflight inspect os.environ."""
+    return pp.load_env_file(base / ".env")
+
+
 def main() -> None:
+    base = Path(__file__).resolve().parent
+    env_info = _load_runtime_env(base)
+
     p = argparse.ArgumentParser(description="V4.2 classification engine")
     p.add_argument("--input", default="Base de Produtos.xlsx")
     p.add_argument("--config", default="pipeline_config.json")
@@ -77,7 +85,18 @@ def main() -> None:
     p.add_argument("--no-gliner", action="store_true")
     args = p.parse_args()
 
-    base = Path(__file__).resolve().parent
+    if env_info.get("exists"):
+        clef_ready = bool(os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()) and bool(
+            os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+            or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
+        )
+        print(
+            "V42 ENV | .env=CARREGADO | "
+            f"CLEF={'CONFIGURADO' if clef_ready else 'AUSENTE'} | "
+            f"GLINER={'CONFIGURADO' if bool(os.getenv('GLINER_MODEL_PATH', '').strip()) else 'AUSENTE'}"
+        )
+    else:
+        print(f"V42 ENV | .env=AUSENTE | path={base / '.env'}")
     input_path = Path(args.input)
     if not input_path.is_absolute():
         input_path = base / input_path
