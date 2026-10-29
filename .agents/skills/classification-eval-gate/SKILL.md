@@ -1,3 +1,8 @@
+---
+name: classification-eval-gate
+description: Evaluate classification outputs against frozen Gold acceptance cohorts and block regressions before scale.
+---
+
 # Classification Eval Gate
 
 ## Goal
