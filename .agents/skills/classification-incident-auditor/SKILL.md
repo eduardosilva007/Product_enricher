@@ -1,3 +1,8 @@
+---
+name: classification-incident-auditor
+description: Diagnose classification failures by layer before any rule or alias change is attempted.
+---
+
 # Classification Incident Auditor
 
 ## Goal
