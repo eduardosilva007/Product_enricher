@@ -1,3 +1,8 @@
+---
+name: release-gate
+description: Orchestrate architecture, repository, tests, runtime, and acceptance checks and emit only BLOCKED, READY_FOR_CONTROL_RUN, or READY_FOR_SCALE.
+---
+
 # Release Gate
 
 ## Goal
