@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 import classification_engine_v42 as v42
+from semantic_bge_v42 import BGEHybridSemanticProvider
 from v42_adapters import GLiNEREntityExtractor, LegacyClefDecisionProvider
 
 
@@ -150,6 +151,26 @@ class V42EngineContracts(unittest.TestCase):
         self.assertEqual(1, sem.calls)
         self.assertEqual(0, llm.calls)
 
+    def test_llm_result_preserves_semantic_diagnostics(self):
+        class DiagnosticSemantic(FakeSemantic):
+            def resolve(self, context):
+                self.calls += 1
+                return v42.SemanticDecision(
+                    product_type="ANGLE GRINDER",
+                    power="CORDED",
+                    confidence=0.91,
+                    margin=0.31,
+                    calibrated_close=False,
+                    candidates=["ANGLE GRINDER", "HAMMER DRILL"],
+                    metadata={"BGE Raw Winner": "ANGLE GRINDER"},
+                )
+
+        out = v42.V42ClassificationEngine(
+            self.rules, DiagnosticSemantic(False), FakeDecision()
+        ).classify(ctx())
+        self.assertEqual(v42.CLASSIFIED_LLM, out.state)
+        self.assertEqual("ANGLE GRINDER", out.metadata["BGE Raw Winner"])
+        self.assertEqual(0.91, out.metadata["Local Confidence"])
     def test_uncalibrated_local_routes_to_llm(self):
         sem, llm = FakeSemantic(False), FakeDecision()
         engine = v42.V42ClassificationEngine(self.rules, sem, llm)
@@ -252,6 +273,22 @@ class V42EngineContracts(unittest.TestCase):
         self.assertNotEqual(v42.IDENTITY_CONFIRMED, built.identity)
         self.assertEqual([], built.target_source_ids)
 
+    def test_bge_normalizer_maps_raw_entity_span_outside_gliner(self):
+        class Rules:
+            types = {
+                "ANGLE GRINDER": {
+                    "aliases": ["angle grinder", "amoladora angular"],
+                    "negative_aliases": [],
+                },
+                "HAMMER DRILL": {
+                    "aliases": ["hammer drill", "taladro percutor"],
+                    "negative_aliases": [],
+                },
+            }
+
+        provider = BGEHybridSemanticProvider(Rules(), {"semantic_funnel": {}})
+        hints = provider._normalize_entity_spans(["amoladora angular", "18 V"])
+        self.assertEqual(["ANGLE GRINDER"], hints)
     def test_gliner_adapter_returns_raw_entities_only(self):
         class FakeModel:
             def extract_entities(self, text, schema):
