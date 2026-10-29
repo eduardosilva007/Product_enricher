@@ -357,9 +357,9 @@ class V42ClassificationEngine:
     def __init__(
         self,
         rules: Any,
-        entity_extractor: Optional[EntityExtractor] = None,
         semantic_provider: Optional[SemanticProvider] = None,
         decision_provider: Optional[DecisionProvider] = None,
+        entity_extractor: Optional[EntityExtractor] = None,
         query_planner: Optional[QueryPlanner] = None,
     ):
         self.rules = rules
