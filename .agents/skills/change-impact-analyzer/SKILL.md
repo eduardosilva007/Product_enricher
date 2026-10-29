@@ -1,3 +1,8 @@
+---
+name: change-impact-analyzer
+description: Analyze changed files, affected runtime layers, required tests, and regression risk before release.
+---
+
 # Change Impact Analyzer
 
 ## Goal
