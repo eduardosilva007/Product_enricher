@@ -1,3 +1,8 @@
+---
+name: repo-auditor
+description: Audit the repository execution path, configuration, env loading, dependencies, cache, outputs, tests, and CI before changes are approved.
+---
+
 # Repository Auditor
 
 ## Goal
