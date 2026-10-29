@@ -55,6 +55,20 @@ class ProviderDecision:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class ExtractedEntities:
+    """Raw entity spans only. No canonical taxonomy decisions live here."""
+    product_type: List[str] = field(default_factory=list)
+    power_source: List[str] = field(default_factory=list)
+    voltage: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class EntityExtractor(Protocol):
+    name: str
+    def extract(self, text: str) -> ExtractedEntities: ...
+
+
 class SemanticProvider(Protocol):
     name: str
     def resolve(self, ctx: "ClassificationContext") -> SemanticDecision: ...
@@ -85,6 +99,7 @@ class ClassificationContext:
     target_source_ids: List[int]
     rule_target_supported: bool
     combo_components: List[str] = field(default_factory=list)
+    extracted_entities: Optional[ExtractedEntities] = None
 
 
 @dataclass
@@ -342,11 +357,13 @@ class V42ClassificationEngine:
     def __init__(
         self,
         rules: Any,
+        entity_extractor: Optional[EntityExtractor] = None,
         semantic_provider: Optional[SemanticProvider] = None,
         decision_provider: Optional[DecisionProvider] = None,
         query_planner: Optional[QueryPlanner] = None,
     ):
         self.rules = rules
+        self.entity_extractor = entity_extractor
         self.semantic_provider = semantic_provider
         self.decision_provider = decision_provider
         self.query_planner = query_planner or QueryPlanner()
@@ -402,6 +419,21 @@ class V42ClassificationEngine:
                     ctx.brand, ctx.model, CLASSIFIED_RULE, stage1_type, power,
                     cg, fam, ctx.identity, ctx.role, "STAGE1_RULE", reason,
                     "CONCLUIDO",
+                )
+
+        # Entity extraction is deliberately non-decisional. Extracted spans may
+        # enrich the semantic evidence, but cannot close TYPE/ROLE/TAXONOMY.
+        if self.entity_extractor is not None and ctx.extracted_entities is None:
+            try:
+                ctx.extracted_entities = self.entity_extractor.extract(ctx.evidence_text)
+            except Exception as exc:
+                return ClassificationResult(
+                    ctx.brand, ctx.model, OPERATIONAL_ERROR,
+                    identity=ctx.identity, role=ctx.role,
+                    decision_source=getattr(self.entity_extractor, "name", "ENTITY_EXTRACTOR"),
+                    reason_code=f"ENTITY_EXTRACTOR_ERROR:{type(exc).__name__}",
+                    next_action="CORRIGIR_OPERACAO",
+                    metadata={"Operational Error": str(exc)},
                 )
 
         semantic: Optional[SemanticDecision] = None
