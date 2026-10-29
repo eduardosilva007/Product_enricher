@@ -251,6 +251,31 @@ class V42EngineContracts(unittest.TestCase):
         self.assertNotIn("pressure washer", built.semantic_text)
         self.assertTrue(built.rule_target_supported)
 
+    def test_context_builder_marks_unresolved_composite_role(self):
+        src = SimpleNamespace(
+            source_id=1,
+            title="BRAND IE6200_AA615 inverter welder angle grinder",
+            content="inverter welder and angle grinder",
+            url="https://brand.example/ie6200-aa615",
+            identity_conflict=False,
+            quality_flags=[],
+            type_hits={"ANGLE GRINDER": ["angle grinder"]},
+            type_scores={"ANGLE GRINDER": 2.0},
+        )
+        s1 = SimpleNamespace(
+            state="RESOLVED_RULE",
+            product_type="ANGLE GRINDER",
+            power="CORDED",
+            sources=[src],
+            identity_best="STRONG",
+        )
+        built = v42.build_context_from_stage1(
+            "BRAND", "IE6200_AA615", "brand|combo", "raw", s1,
+            {"identity": {"regional_suffixes": []}}, self.rules, ["BRAND"],
+        )
+        self.assertEqual(v42.IDENTITY_CONFIRMED, built.identity)
+        self.assertEqual(v42.ROLE_UNKNOWN, built.role)
+        self.assertIn("COMPOSITE_TARGET_ROLE_UNRESOLVED", built.role_reasons)
     def test_context_builder_brand_prefix_conflict_does_not_confirm_shorter_brand(self):
         src = SimpleNamespace(
             source_id=1,
@@ -293,6 +318,54 @@ class V42EngineContracts(unittest.TestCase):
         provider = BGEHybridSemanticProvider(Rules(), {"semantic_funnel": {}})
         hints = provider._normalize_entity_spans(["amoladora angular", "18 V"])
         self.assertEqual(["ANGLE GRINDER"], hints)
+    def test_composite_target_does_not_close_single_product_stage1_rule(self):
+        sem, llm = FakeSemantic(False), FakeDecision()
+        s1 = SimpleNamespace(
+            state="RESOLVED_RULE",
+            product_type="ANGLE GRINDER",
+            power="CORDED",
+            sources=[],
+        )
+        out = v42.V42ClassificationEngine(self.rules, sem, llm).classify(
+            ctx(
+                model="IE6200_AA615",
+                s1=s1,
+                role=v42.ROLE_UNKNOWN,
+                role_reasons=["COMPOSITE_TARGET_ROLE_UNRESOLVED"],
+                rule_target_supported=True,
+            )
+        )
+        self.assertEqual(v42.CLASSIFIED_LLM, out.state)
+        self.assertEqual(1, sem.calls)
+        self.assertEqual(1, llm.calls)
+
+    def test_provider_error_preserves_semantic_diagnostics(self):
+        class DiagnosticSemantic(FakeSemantic):
+            def resolve(self, context):
+                self.calls += 1
+                return v42.SemanticDecision(
+                    product_type="ANGLE GRINDER",
+                    power="CORDED",
+                    confidence=0.88,
+                    margin=0.22,
+                    calibrated_close=False,
+                    candidates=["ANGLE GRINDER", "HAMMER DRILL"],
+                    metadata={"BGE Raw Winner": "ANGLE GRINDER"},
+                )
+
+        class BrokenDecision:
+            name = "BROKEN_PROVIDER"
+            def decide(self, context, semantic):
+                raise RuntimeError("quota")
+
+        out = v42.V42ClassificationEngine(
+            self.rules, DiagnosticSemantic(False), BrokenDecision()
+        ).classify(ctx())
+        self.assertEqual(v42.OPERATIONAL_ERROR, out.state)
+        self.assertEqual("ANGLE GRINDER", out.metadata.get("BGE Raw Winner"))
+        self.assertEqual(0.88, out.metadata.get("Local Confidence"))
+        self.assertIn("ANGLE GRINDER", out.metadata.get("Local Candidates", ""))
+        self.assertIn("quota", out.metadata.get("Operational Error", ""))
     def test_gliner_failure_falls_back_to_semantic_and_decision_provider(self):
         class BrokenExtractor:
             name = "BROKEN_GLINER"
