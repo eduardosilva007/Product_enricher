@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
 
       - name: Compile pipeline
-        run: python -m py_compile pipeline_produtos.py pilot_v41_ab.py classification_engine_v42.py v42_adapters.py classify_v42.py validate_v42_acceptance.py
+        run: python -m py_compile pipeline_produtos.py pilot_v41_ab.py classification_engine_v42.py semantic_bge_v42.py v42_adapters.py classify_v42.py validate_v42_acceptance.py
 
       - name: Install baseline test dependencies
         run: python -m pip install pandas openpyxl numpy requests
