@@ -300,5 +300,22 @@
     "rules_version": "2026-10-13-v3.0.13-manual-taxonomy-gold-2",
     "evidence_cache_schema": "1",
     "identity_profile_version": "2026-10-22-structural-sku-core-v3"
+  },
+  "jev": {
+    "base_url": "https://api.typesafe.ai",
+    "api_key_env": "TYPESAFE_API_KEY",
+    "model": "jev-latest",
+    "timeout_seconds": 90,
+    "retry_attempts": 3,
+    "retry_backoff_seconds": [
+      2,
+      5,
+      10
+    ],
+    "operational_requests_per_minute": 60
+  },
+  "classification_v42": {
+    "default_provider": "jev",
+    "max_type_candidates": 8
   }
 }
