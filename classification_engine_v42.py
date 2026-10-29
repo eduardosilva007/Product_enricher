@@ -421,20 +421,19 @@ class V42ClassificationEngine:
                     "CONCLUIDO",
                 )
 
-        # Entity extraction is deliberately non-decisional. Extracted spans may
-        # enrich the semantic evidence, but cannot close TYPE/ROLE/TAXONOMY.
+        # Entity extraction is deliberately non-decisional and optional.
+        # A GLiNER failure is recorded for audit but must not block BGE/DecisionProvider.
+        # Identity/evidence/provider failures remain blocking in their own layers.
+        entity_metadata: Dict[str, Any] = {}
         if self.entity_extractor is not None and ctx.extracted_entities is None:
             try:
                 ctx.extracted_entities = self.entity_extractor.extract(ctx.evidence_text)
             except Exception as exc:
-                return ClassificationResult(
-                    ctx.brand, ctx.model, OPERATIONAL_ERROR,
-                    identity=ctx.identity, role=ctx.role,
-                    decision_source=getattr(self.entity_extractor, "name", "ENTITY_EXTRACTOR"),
-                    reason_code=f"ENTITY_EXTRACTOR_ERROR:{type(exc).__name__}",
-                    next_action="CORRIGIR_OPERACAO",
-                    metadata={"Operational Error": str(exc)},
-                )
+                entity_metadata = {
+                    "Entity Extractor Status": "ERROR_FALLBACK",
+                    "Entity Extractor": getattr(self.entity_extractor, "name", "ENTITY_EXTRACTOR"),
+                    "Entity Extractor Error": f"{type(exc).__name__}: {exc}",
+                }
 
         semantic: Optional[SemanticDecision] = None
         if self.semantic_provider is not None:
@@ -447,7 +446,7 @@ class V42ClassificationEngine:
                     decision_source=getattr(self.semantic_provider, "name", "LOCAL"),
                     reason_code=f"SEMANTIC_PROVIDER_ERROR:{type(exc).__name__}",
                     next_action="CORRIGIR_OPERACAO",
-                    metadata={"Operational Error": str(exc)},
+                    metadata={**entity_metadata, "Operational Error": str(exc)},
                 )
             if semantic.calibrated_close and semantic.product_type in self.rules.types:
                 cg, fam, reason = self._map(semantic.product_type, semantic.power, ctx)
@@ -459,6 +458,7 @@ class V42ClassificationEngine:
                         getattr(self.semantic_provider, "name", "LOCAL"),
                         reason, "CONCLUIDO",
                         metadata={
+                            **entity_metadata,
                             "Local Confidence": semantic.confidence,
                             "Local Margin": semantic.margin,
                             "Local Candidates": " | ".join(semantic.candidates),
@@ -473,6 +473,7 @@ class V42ClassificationEngine:
                 reason_code="DECISION_PROVIDER_NOT_CONFIGURED",
                 next_action="CONFIGURAR_PROVIDER",
                 metadata={
+                    **entity_metadata,
                     "Local Candidates": " | ".join(semantic.candidates) if semantic else "",
                 },
             )
@@ -486,7 +487,7 @@ class V42ClassificationEngine:
                 decision_source=getattr(self.decision_provider, "name", "LLM"),
                 reason_code=f"DECISION_PROVIDER_ERROR:{type(exc).__name__}",
                 next_action="CORRIGIR_OPERACAO",
-                metadata={"Operational Error": str(exc)},
+                metadata={**entity_metadata, "Operational Error": str(exc)},
             )
 
         if decision.status == "INSUFFICIENT":
@@ -510,7 +511,7 @@ class V42ClassificationEngine:
                 next_action="CORRIGIR_OPERACAO",
             )
 
-        merged_metadata: Dict[str, Any] = {}
+        merged_metadata: Dict[str, Any] = dict(entity_metadata)
         if semantic is not None:
             merged_metadata.update(semantic.metadata or {})
             merged_metadata.setdefault("Local Confidence", semantic.confidence)
