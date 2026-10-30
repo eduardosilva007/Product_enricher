@@ -139,16 +139,21 @@ def audit(args):
     source_counts=collections.Counter((r["brand"],r["model"]) for r in source)
     missing=sum(max(0,n-by_pair[p]) for p,n in source_counts.items())
     suspicious=[]
+    human_legacy=[]
     for r in current:
         auto=r["Revisão"].upper()=="AUTO_APROVADO"
         missing_essentials=(not r["O que é (Tipo)"] or r["O que é (Tipo)"].upper() in {"REVISAR","UNKNOWN"}
                             or not r["Título Real"] or not r["Category General"] or not r["FAMILY"])
         partial=bool(r["Category General"] or r["FAMILY"]) and (not r["O que é (Tipo)"] or r["O que é (Tipo)"].upper()=="REVISAR")
         if (auto and missing_essentials) or partial:
-            suspicious.append({"Marca":r["brand"],"Modelo":r["model"],"Revisao":r["Revisão"],
+            item={"Marca":r["brand"],"Modelo":r["model"],"Revisao":r["Revisão"],
                "Revisao_BI":r["Revisão B.I"],"Tipo":r["O que é (Tipo)"],"Category":r["Category General"],
                "Family":r["FAMILY"],"Titulo":r["Título Real"],
-               "reason":"AUTO_INCOMPLETO" if auto and missing_essentials else "TAXONOMIA_PARCIAL"})
+               "reason":"AUTO_INCOMPLETO" if auto and missing_essentials else "TAXONOMIA_PARCIAL"}
+            if r["Revisão B.I"].upper()=="OK" or r["Status"].upper()=="MANUAL":
+                human_legacy.append(item)
+            else:
+                suspicious.append(item)
     def write_csv(filename, rows):
         if not rows:return
         with (out/filename).open("w",encoding="utf-8-sig",newline="") as fp:
@@ -156,6 +161,7 @@ def audit(args):
             w.writeheader();w.writerows(rows)
     write_csv("entrada_vs_cache.csv",detail)
     write_csv("classificacoes_suspeitas.csv",suspicious)
+    write_csv("legado_humano_protegido.csv",human_legacy)
     states=collections.Counter(r["raw_state"] for r in detail)
     summary={
        "input_rows":len(source),"input_unique_pairs":len(source_counts),
@@ -163,7 +169,10 @@ def audit(args):
        "final_rows":len(current),"missing_exact_input_occurrences":missing,
        "cache_path":str(cache),"cache_table_exists":"tavily_cache" in cache_tables,
        "cache_unique_normalized":len(cache_data),"input_raw_states":dict(states),
-       "suspect_final_rows":len(suspicious),"process_db":db_info,
+       "suspect_auto_rows":len(suspicious),"protected_human_legacy_rows":len(human_legacy),
+       "final_unique_exact_pairs":len(by_pair),
+       "input_exact_pairs_matched":sum(1 for p in source_counts if by_pair[p]>0),
+       "process_db":db_info,
        "read_only":True,"changes_to_database":0,
        "note":"RAW_EMPTY no cache não é RAW_MISSING; '--recollect-empty' é necessário para recolher. Estado PENDENTE_COLETA na planilha não prova ausência do cache."
     }
