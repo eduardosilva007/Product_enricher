@@ -9200,15 +9200,21 @@ def _menu_limit(prompt: str) -> int:
 
 
 def _menu_search_provider() -> str:
-    raw = input("Provider de busca [TAVILY / SERPER / BRIGHTDATA] (ENTER = TAVILY): ").strip().casefold()
-    if not raw:
-        return "tavily"
-    aliases = {"bright data": "brightdata", "bright_data": "brightdata", "bright-data": "brightdata"}
-    raw = aliases.get(raw, raw)
-    if raw not in ALLOWED_SEARCH_PROVIDERS:
-        print("Provider inválido. Será usado TAVILY.")
-        return "tavily"
-    return raw
+    """Seleção numérica explícita; nunca iniciar coleta com provider inválido."""
+    options = {"1": "tavily", "2": "serper", "3": "brightdata"}
+    while True:
+        print("\nAPI DE COLETA / SEARCH")
+        print("1 - TAVILY")
+        print("2 - SERPER")
+        print("3 - BRIGHT DATA")
+        raw = input("Selecione [1/2/3] (ENTER = 1 / TAVILY): ").strip()
+        if not raw:
+            raw = "1"
+        if raw in options:
+            choice = options[raw]
+            print(f"API selecionada: {choice.upper()}")
+            return choice
+        print("Opção inválida. Escolha 1, 2 ou 3.")
 
 
 def interactive_menu(base: Path) -> argparse.Namespace:
