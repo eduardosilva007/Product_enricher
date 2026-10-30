@@ -16,9 +16,12 @@ def rows(path):
     def val(row,key):
         i=index.get(key)
         return str(row[i]).strip() if i is not None and i<len(row) and row[i] is not None else ''
-    return [(val(r,"Marca") or val(r,"Fabricante"),val(r,"Modelo"),
-             val(r,"Revisão B.I"),val(r,"O que é (Tipo)"),val(r,"Revisão"),val(r,"Título Real"),
-             val(r,"Category General"),val(r,"FAMILY")) for r in data]
+    try:
+        return [(val(r,"Marca") or val(r,"Fabricante"),val(r,"Modelo"),
+                 val(r,"Revisão B.I"),val(r,"O que é (Tipo)"),val(r,"Revisão"),val(r,"Título Real"),
+                 val(r,"Category General"),val(r,"FAMILY"),val(r,"Status")) for r in data]
+    finally:
+        wb.close()
 def main():
     for name in FILES:
         if not (ROOT/name).is_file(): raise SystemExit("Arquivo obrigatório ausente: "+name)
@@ -43,6 +46,7 @@ def main():
         count_final=collections.Counter((r[0],r[1]) for r in after)
         missing={key:n-count_final[key] for key,n in count_source.items() if count_final[key]<n}
         false_approvals=[r[:2] for r in after if r[4].upper()=="AUTO_APROVADO" and
+                         r[2].upper()!="OK" and r[8].upper()!="MANUAL" and
                          (not r[3] or r[3].upper() in {"REVISAR","UNKNOWN","N/A"} or not r[5] or not r[6] or not r[7])]
         bi_after={(r[0],r[1]):r for r in after if r[2].upper()=="OK"}
         changed_bi=[key for key,val in bi_before.items() if key not in bi_after or bi_after[key]!=val]
