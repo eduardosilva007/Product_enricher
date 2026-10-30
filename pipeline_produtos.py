@@ -5547,7 +5547,7 @@ class ClefFunnelClassifier:
             "family": fam if valid_pair else "",
             "evidence_source_ids": sem["refs"],
             "reason_short": (
-                f"Clef structured choice; type={type_choice or 'NONE'}; taxonomy={tax_choice or 'NONE'}"
+                f"{self.provider.upper()} structured choice; type={type_choice or 'NONE'}; taxonomy={tax_choice or 'NONE'}"
             ),
         }
 
@@ -5613,7 +5613,7 @@ class ClefFunnelClassifier:
         recebe somente combinações TYPE + Category|FAMILY que já são válidas no
         regras_negocio.json e escolhe uma opção conjunta coerente.
         """
-        repair_cfg = (self.cfg.get("clef", {}) or {}).get("repair", {}) or {}
+        repair_cfg = (self.cfg.get(self.provider, {}) or {}).get("repair", (self.cfg.get("clef", {}) or {}).get("repair", {})) or {}
         if not bool(repair_cfg.get("enabled", True)):
             return {"decision": "INSUFFICIENT_EVIDENCE"}, False, {"clef_repair": False}
 
@@ -5775,7 +5775,7 @@ class ClefFunnelClassifier:
             "family": fam if resolved else "",
             "evidence_source_ids": refs,
             "reason_short": (
-                f"Clef joint repair; previous={initial_type} + {initial_pair}; choice={joint_choice or 'NONE'}"
+                f"{self.provider.upper()} joint repair; previous={initial_type} + {initial_pair}; choice={joint_choice or 'NONE'}"
             ),
         }
         usage_raw = result.get("usage") or {}
