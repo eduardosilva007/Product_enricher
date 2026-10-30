@@ -4792,13 +4792,15 @@ class ClefFunnelClassifier:
         self.rules = rules
         self.cfg = cfg
         self.db = db
-        self.provider = "clef"
+        self.provider = safe(provider).lower() or "clef"
+        if self.provider not in {"clef", "jev"}:
+            raise ValueError(f"Provedor de classificação inválido: {self.provider}")
         self.model = safe(model) or DEFAULT_CLEF_MODEL
-        self.ccfg = cfg.get("clef", {}) or {}
+        self.ccfg = cfg.get(self.provider, {}) or {}
         self.fcfg = cfg.get("semantic_funnel", {}) or {}
 
         self.account_id_env = safe(self.ccfg.get("account_id_env")) or "CLOUDFLARE_ACCOUNT_ID"
-        self.api_key_env = safe(self.ccfg.get("api_token_env")) or "CLOUDFLARE_API_TOKEN"
+        self.api_key_env = (safe(self.ccfg.get("api_key_env")) or "TYPESAFE_API_KEY") if self.provider == "jev" else (safe(self.ccfg.get("api_token_env")) or "CLOUDFLARE_API_TOKEN")
         self.operational_requests_per_minute = float(
             self.ccfg.get("operational_requests_per_minute", 10.0) or 10.0
         )
@@ -4872,15 +4874,14 @@ class ClefFunnelClassifier:
 
         account_id = os.getenv(self.account_id_env, "").strip()
         slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
-        self.base_url = (
+        self.base_url = ((safe(self.ccfg.get("base_url")).rstrip("/") or "https://api.typesafe.ai") + "/v1/systemone") if self.provider == "jev" else (
             f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
-            if account_id else
-            f"https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/{slug}"
+            if account_id else f"https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/{slug}"
         )
 
     def route_identity_fragment(self) -> str:
         return (
-            f"clef:{self.model}+prompt:{PROMPT_VERSION}+embed:{self.embedding_model_name}"
+            f"{self.provider}:{self.model}+prompt:{PROMPT_VERSION}+embed:{self.embedding_model_name}"
             f"+rerank:{self.reranker_model_name}"
             f"+rt:{int(self.rerank_types)}+rx:{self.rerank_max_length}"
             f"+tp:{self.type_pool_k}+xp:{self.taxonomy_pool_k}"
@@ -4898,14 +4899,14 @@ class ClefFunnelClassifier:
                 "CLEF_FUNNEL_DEPENDENCY_MISSING",
                 "Dependências ausentes: " + ", ".join(missing),
             )
-        if not os.getenv(self.account_id_env, "").strip():
+        if self.provider == "clef" and not os.getenv(self.account_id_env, "").strip():
             raise OperationalPause(
                 "CLEF_ACCOUNT_ID_MISSING",
                 f"{self.account_id_env} não configurada no .env.",
             )
         if not os.getenv(self.api_key_env, "").strip():
-            # Compatibilidade com o nome legado já usado nos testes.
-            fallback = os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
+            # Compatibilidade com o nome legado somente para Cloudflare.
+            fallback = os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip() if self.provider == "clef" else ""
             if not fallback:
                 raise OperationalPause(
                     "CLEF_API_TOKEN_MISSING",
@@ -4924,7 +4925,8 @@ class ClefFunnelClassifier:
 
         account_id = os.getenv(self.account_id_env, "").strip()
         slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
-        self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
+        if self.provider == "clef":
+            self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
         return {
             "provider": self.provider,
             "model": self.model,
@@ -5478,10 +5480,14 @@ class ClefFunnelClassifier:
             pass
         import requests
 
-        token = os.getenv(self.api_key_env, "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
-        account_id = os.getenv(self.account_id_env, "").strip()
-        slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
-        url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
+        token = os.getenv(self.api_key_env, "").strip()
+        if self.provider == "jev":
+            url = self.base_url
+        else:
+            token = token or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
+            account_id = os.getenv(self.account_id_env, "").strip()
+            slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
+            url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
         transient = {429, 500, 502, 503, 504}
         body: Dict[str, Any] = {}
         last_detail = ""
@@ -5517,7 +5523,7 @@ class ClefFunnelClassifier:
         else:
             raise OperationalPause("CLEF_TRANSIENT", last_detail or "Falha desconhecida Clef")
 
-        result = body.get("result") or {}
+        result = body if self.provider == "jev" else (body.get("result") or {})
         answers = result.get("answers") or {}
         type_ans = self._parse_choice(answers, "product_type")
         power_ans = self._parse_choice(answers, "power_source")
@@ -5700,10 +5706,14 @@ class ClefFunnelClassifier:
             pass
         import requests
 
-        token = os.getenv(self.api_key_env, "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
-        account_id = os.getenv(self.account_id_env, "").strip()
-        slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
-        url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
+        token = os.getenv(self.api_key_env, "").strip()
+        if self.provider == "jev":
+            url = self.base_url
+        else:
+            token = token or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
+            account_id = os.getenv(self.account_id_env, "").strip()
+            slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
+            url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
         transient = {429, 500, 502, 503, 504}
         body: Dict[str, Any] = {}
         last_detail = ""
@@ -5740,7 +5750,7 @@ class ClefFunnelClassifier:
         else:
             raise OperationalPause("CLEF_TRANSIENT", last_detail or "Falha desconhecida Clef repair")
 
-        result = body.get("result") or {}
+        result = body if self.provider == "jev" else (body.get("result") or {})
         answers = result.get("answers") or {}
         joint_ans = self._parse_choice(answers, "joint_classification")
         joint_choice = safe(joint_ans.get("choice"))
@@ -8486,6 +8496,9 @@ def run_pipeline(
             LOG.info("Arquivo: %s", inventory_path)
             return
 
+        llm_provider = safe(getattr(args, "llm_provider", "")).lower() or safe(cfg.get("classification_v42", {}).get("default_provider")).lower() or "clef"
+        if llm_provider not in {"jev", "clef", "local"}:
+            raise RuntimeError(f"CLASSIFICATION_PROVIDER_INVALID: {llm_provider}")
         clef_model = (
             os.getenv("CLOUDFLARE_CLEF_MODEL", "").strip()
             or safe(cfg.get("clef", {}).get("model"))
@@ -8494,12 +8507,14 @@ def run_pipeline(
         if safe(getattr(args, "clef_model", "")):
             clef_model = safe(args.clef_model)
 
-        clef_identity = f"clef:{clef_model}"
+        if llm_provider == "jev":
+            clef_model = safe(cfg.get("jev", {}).get("model")) or "jev-latest"
+        clef_identity = f"{llm_provider}:{clef_model if llm_provider != 'local' else 'rules-only'}"
         db = ClassificationDB(db_path)
         run_id = db.start_run(args.mode, rules.hash, clef_identity)
         engine = DeterministicEngine(rules, cfg)
 
-        use_clef = not bool(getattr(args, "no_clef", False))
+        use_clef = llm_provider != "local" and not bool(getattr(args, "no_clef", False))
         clef: Optional[ClefFunnelClassifier] = None
 
         rows: List[Dict[str, Any]] = []
@@ -8609,17 +8624,17 @@ def run_pipeline(
         if use_clef and targets:
             try:
                 clef = ClefFunnelClassifier(
-                    rules=rules, cfg=cfg, db=db, provider="clef", model=clef_model
+                    rules=rules, cfg=cfg, db=db, provider=llm_provider, model=clef_model
                 )
                 pf = clef.preflight()
                 clef_identity = clef.route_identity_fragment()
                 db.update_run_model(run_id, clef_identity)
                 LOG.info(
-                    "CLEF PRE-FLIGHT OK | model=%s | endpoint=%s | ritmo=%.1f req/min",
-                    clef.model, pf["base_url"], pf["operational_rpm"],
+                    "LLM PRE-FLIGHT OK | provider=%s | model=%s | endpoint=%s | ritmo=%.1f req/min",
+                    llm_provider, clef.model, pf["base_url"], pf["operational_rpm"],
                 )
                 LOG.info(
-                    "ROTA CLEF ATIVA | regra forte fecha; todo AMBIGUOUS/UNRESOLVED com evidência útil segue BGE/reranker -> Clef; falta de evidência vira NEEDS_RECOLLECTION."
+                    "ROTA LLM ATIVA | provider=%s | regra forte fecha; demais usam BGE/reranker -> provedor selecionado.", llm_provider
                 )
             except OperationalPause as exc:
                 db.event(run_id, "", exc.code, safe(exc))
@@ -9174,6 +9189,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--precollection-output", default="")
     p.add_argument("--evidence-output", default="")
     p.add_argument("--clef-model", dest="clef_model", default="")
+    p.add_argument("--llm-provider", choices=["jev", "clef", "local"], default="")
     p.add_argument("--no-clef", dest="no_clef", action="store_true")
     p.add_argument("--no-checkpoint", action="store_true")
     p.add_argument("--reprocess", action="store_true")
@@ -9217,6 +9233,19 @@ def _menu_search_provider() -> str:
         print("Opção inválida. Escolha 1, 2 ou 3.")
 
 
+def _menu_llm_provider() -> str:
+    options = {"1": "jev", "2": "clef", "3": "local"}
+    while True:
+        print("\nCLASSIFICADOR")
+        print("1 - JEV / TypeSafe AI")
+        print("2 - Cloudflare Clef")
+        print("3 - Somente regras locais (sem LLM)")
+        choice = input("Selecione [1/2/3] (ENTER = 1 / JEV): ").strip() or "1"
+        if choice in options:
+            return options[choice]
+        print("Opção inválida: escolha 1, 2 ou 3.")
+
+
 def interactive_menu(base: Path) -> argparse.Namespace:
     parser = build_parser()
     print("=" * 86)
@@ -9249,7 +9278,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(argv)
     if op == "2":
         limite = _menu_limit("Limite de produtos para piloto (ENTER = todos): ")
-        argv = ["--mode", "classify"]
+        argv = ["--mode", "classify", "--llm-provider", _menu_llm_provider()]
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
@@ -9257,7 +9286,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         provider = _menu_search_provider()
         limite_search = _menu_limit("Limite de produtos na coleta (ENTER = todos): ")
         limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
-        argv = ["--mode", "full", "--search-provider", provider]
+        argv = ["--mode", "full", "--search-provider", provider, "--llm-provider", _menu_llm_provider()]
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
             argv += ["--recollect-low-evidence"]
@@ -9268,7 +9297,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(argv)
     if op == "4":
         limite = _menu_limit("Limite de pendências COM CACHE para reprocessar (ENTER = todas): ")
-        argv = ["--mode", "recover"]
+        argv = ["--mode", "recover", "--llm-provider", _menu_llm_provider()]
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
