@@ -1137,7 +1137,7 @@ def read_input_rows(path: Path) -> List[InputProductRow]:
     for idx, row in df.iterrows():
         brand = safe(row[b])
         model = safe(row[m])
-        valid = bool(brand and model)
+        valid = bool(brand and model and model.strip().upper() not in {"N/A", "NA", "NULL", "NONE", "NAN"})
         key = business_key(brand, model) if valid else ""
         out.append(
             InputProductRow(
