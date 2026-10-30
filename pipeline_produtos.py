@@ -7678,6 +7678,27 @@ def _export_base_final(
         raise RuntimeError(f"BASE_FINAL_INPUT_ROW_COVERAGE_FAILED: {len(missing_lines)} pares sem todas as ocorrencias")
     LOG.info("BASE FINAL INPUT ROW COVERAGE OK | input_rows=%d | extra_rows=%d | missing=0",
              len(input_rows_all), len(supplemental))
+    # Corrige estados falsamente aprovados em linhas não protegidas por revisão humana.
+    # Nunca altera classificações manuais ou Revisão B.I=OK.
+    repaired_approval = 0
+    stripped_partial = 0
+    for idx, row in out.iterrows():
+        if _is_bi_ok_value(row.get("Revisão B.I")) or safe(row.get("Status")).upper() == "MANUAL":
+            continue
+        complete = classified(row)
+        approved = safe(row.get("Revisão")).upper() == "AUTO_APROVADO"
+        if approved and not complete:
+            out.at[idx, "Revisão"] = "REVISAR"
+            out.at[idx, "Próxima Ação"] = "REVISAR_CLASSIFICACAO_INCOMPLETA"
+            repaired_approval += 1
+        has_pair = present(row.get("Category General")) or present(row.get("FAMILY"))
+        has_type = present(row.get("O que é (Tipo)")) and safe(row.get("O que é (Tipo)")).upper() not in {"REVISAR", "UNKNOWN"}
+        if has_pair and not has_type:
+            out.at[idx, "Category General"] = pd.NA
+            out.at[idx, "FAMILY"] = pd.NA
+            stripped_partial += 1
+    LOG.info("BASE FINAL CLASSIFICATION INTEGRITY | false_approvals_repaired=%d | partial_pairs_cleared=%d",
+             repaired_approval, stripped_partial)
     # Executa o hard-lock também sobre a base final reconstruída.
     _assert_bi_lock_snapshot(out, bi_lock_snapshot or {}, "Base Final com variantes")
     exported_pairs = {(safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"])}
