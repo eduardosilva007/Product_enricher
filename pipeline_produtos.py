@@ -1124,7 +1124,7 @@ def read_input_rows(path: Path) -> List[InputProductRow]:
 
     import pandas as pd
     if path.suffix.casefold() in {".xlsx", ".xlsm", ".xls"}:
-        df = pd.read_excel(path, dtype=object)
+        df = pd.read_excel(path, dtype=object, keep_default_na=False)
     elif path.suffix.casefold() == ".csv":
         df = pd.read_csv(path, dtype=object, sep=None, engine="python")
     else:
@@ -7641,14 +7641,49 @@ def _export_base_final(
             rec["Próxima Ação"] = "REVISAR_MANUAL_SEM_CLASSIFICACAO"
 
     out = pd.DataFrame(base.values(), columns=BASELINE_FINAL_COLUMNS)
+    # CONTRATO PROCV: toda ocorrência da entrada deve existir fisicamente na
+    # aba Base Final. Deduplicação aplica-se SOMENTE a Search/classificação.
+    # Reconstrução determinística: extras são recriados da entrada a cada run,
+    # jamais acumulados a partir das duplicatas do Excel anterior.
+    from collections import Counter
+    input_rows_all = read_input_rows(input_path) if input_path and input_path.exists() else []
+    input_counts = Counter((item.brand_original, item.model_original) for item in input_rows_all)
+    output_counts = Counter((safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"]))
+    by_exact_output = {(safe(row["Marca"]), safe(row["Modelo"])): row
+                       for _, row in out.iterrows()}
+    supplemental = []
+    for pair, required_count in input_counts.items():
+        missing_occurrences = max(0, required_count - output_counts.get(pair, 0))
+        if not missing_occurrences:
+            continue
+        exemplar = by_exact_output.get(pair)
+        for _ in range(missing_occurrences):
+            if exemplar is not None:
+                copy = exemplar.copy().to_dict()
+            else:
+                copy = {col: pd.NA for col in BASELINE_FINAL_COLUMNS}
+                copy["Marca"], copy["Modelo"] = pair
+                copy["Status"] = "Script"
+                copy["Revisão"] = "PENDENTE"
+                copy["Próxima Ação"] = "CORRIGIR_CADASTRO_SEM_IDENTIDADE"
+            supplemental.append(copy)
+    if supplemental:
+        out = pd.concat([out, pd.DataFrame(supplemental, columns=BASELINE_FINAL_COLUMNS)], ignore_index=True)
+    physical_counts = Counter((safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"]))
+    missing_lines = {pair: n - physical_counts.get(pair, 0) for pair, n in input_counts.items()
+                     if physical_counts.get(pair, 0) < n}
+    if missing_lines:
+        raise RuntimeError(f"BASE_FINAL_INPUT_ROW_COVERAGE_FAILED: {len(missing_lines)} pares sem todas as ocorrencias")
+    LOG.info("BASE FINAL INPUT ROW COVERAGE OK | input_rows=%d | extra_rows=%d | missing=0",
+             len(input_rows_all), len(supplemental))
     # Executa o hard-lock também sobre a base final reconstruída.
     _assert_bi_lock_snapshot(out, bi_lock_snapshot or {}, "Base Final com variantes")
     exported_pairs = {(safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"])}
     missing = input_pairs - exported_pairs
     if missing:
         raise RuntimeError(f"BASE_FINAL_INPUT_COVERAGE_FAILED: {len(missing)} pares ausentes")
-    if len(out) != len(exported_pairs):
-        raise RuntimeError("BASE_FINAL_DUPLICATE_EXACT_PAIR")
+    # Duplicatas exatas da entrada são intencionais para PROCV; o contrato
+    # de multiplicidade acima substitui a antiga proibição global.
     LOG.info(
         "BASE FINAL PROCV COVERAGE OK | input_pairs=%d | prior_pairs=%d | "
         "aliases_added=%d | variants_enriched=%d | missing=0",
