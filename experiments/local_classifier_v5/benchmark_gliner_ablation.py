@@ -60,21 +60,41 @@ def main():
     labels=np.array([label_pair(df.iloc[i]["__category"],df.iloc[i]["__family"]) for i in idx])
     source_sig=hashlib.sha256(("\n".join(titles)+args.model+str(args.threshold)).encode()).hexdigest()[:18]
     cache=out/f"entities_{source_sig}.jsonl"
+    # Cache is append-only: a failed run may leave a valid partial prefix.
+    ner=[]
     if cache.exists():
-        ner=[json.loads(line) for line in cache.read_text(encoding="utf-8").splitlines()]
-        if len(ner)!=len(idx): raise RuntimeError("Invalid entity cache length")
-        print("[CACHE] loaded extracted entities",flush=True)
-    else:
+        with cache.open("r",encoding="utf-8") as f:
+            for line_number,line in enumerate(f,1):
+                try:
+                    row=json.loads(line)
+                except json.JSONDecodeError:
+                    print(f"[CACHE] truncated line {line_number}; recovering prefix",flush=True)
+                    break
+                i=len(ner)
+                if i>=len(idx) or row.get("source_index")!=int(idx[i]) or row.get("title")!=titles[i] or not isinstance(row.get("entities"),list):
+                    print(f"[CACHE] mismatch at line {line_number}; recovering prefix",flush=True)
+                    break
+                ner.append(row)
+        print(f"[CACHE] valid prefix {len(ner)}/{len(idx)}",flush=True)
+    if len(ner)<len(idx):
         from gliner import GLiNER
         print("[INFO] loading GLiNER",args.model,flush=True)
         model=GLiNER.from_pretrained(args.model)
-        ner=[]
+        # Rewrite only validated rows, then append new rows. Flushing each line
+        # retains work across interruptions; next run validates again.
         with cache.open("w",encoding="utf-8") as f:
-            for i,t in enumerate(titles):
+            for row in ner:
+                f.write(json.dumps(row,ensure_ascii=False)+"\\n")
+            f.flush()
+            for i in range(len(ner),len(idx)):
+                t=titles[i]
                 entities=model.predict_entities(t,LABELS,threshold=args.threshold) if t else []
                 row={"source_index":int(idx[i]),"title":t,"entities":entities}
-                ner.append(row);f.write(json.dumps(row,ensure_ascii=False)+"\n");f.flush()
-                if (i+1)%50==0: print("[INFO] extracted",i+1,"/",len(titles),flush=True)
+                ner.append(row)
+                f.write(json.dumps(row,ensure_ascii=False)+"\\n")
+                f.flush()
+                if (i+1)%50==0 or i+1==len(idx):
+                    print("[INFO] extracted",i+1,"/",len(idx),flush=True)
     enriched=[]
     n_entities=brand_hit=model_hit=0
     for i,row in enumerate(ner):
