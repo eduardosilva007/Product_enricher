@@ -9212,6 +9212,9 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
             argv += ["--recollect-low-evidence"]
+        empty = input("Recoletar RAW_EMPTY já consultado? Consome nova busca por produto (S/N): ").strip().upper()
+        if empty == "S":
+            argv += ["--recollect-empty"]
         if limite:
             argv += ["--max-search-new", str(limite)]
         return parser.parse_args(argv)
