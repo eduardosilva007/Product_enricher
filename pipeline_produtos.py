@@ -9544,6 +9544,27 @@ def main() -> int:
     if args.mode == "validate":
         validate_all(rules, cfg, args.cache)
         return 0
+    if args.mode == "repair":
+        run_baseline_repair(args, cfg, rules)
+        return 0
+    if args.mode == "evidence-export":
+        export_evidence_bundle(args, cfg)
+        return 0
+    if args.mode in {"classify", "full", "recover"}:
+        qg = run_quality_gates(rules, cfg)
+        flow_errors = validate_classification_flow_policy(cfg)
+        if flow_errors:
+            for e in flow_errors:
+                LOG.error(e)
+            return 2
+        LOG.info(
+            "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | classificação liberada",
+            qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"],
+        )
+        LOG.info(
+            "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
+            "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
+        )
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
     if args.mode in {"collect", "classify", "full", "sync-input"}:
@@ -9569,27 +9590,6 @@ def main() -> int:
             LOG.error("INPUT BASELINE SYNC FAILED; interrompendo para preservar os dados: %s", exc)
             return 2
 
-    if args.mode == "repair":
-        run_baseline_repair(args, cfg, rules)
-        return 0
-    if args.mode == "evidence-export":
-        export_evidence_bundle(args, cfg)
-        return 0
-    if args.mode in {"classify", "full", "recover"}:
-        qg = run_quality_gates(rules, cfg)
-        flow_errors = validate_classification_flow_policy(cfg)
-        if flow_errors:
-            for e in flow_errors:
-                LOG.error(e)
-            return 2
-        LOG.info(
-            "QUALITY GATES OK | synthetic=%d | identity=%d | real_explicit=%d/%d | classificação liberada",
-            qg["synthetic_cases"], qg["identity_passed"], qg["real_passed"], qg["real_active"],
-        )
-        LOG.info(
-            "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
-            "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
-        )
     if args.mode == "sync-input":
         return 0
     if args.mode == "inventory":
