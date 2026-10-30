@@ -4304,7 +4304,10 @@ class DeterministicEngine:
             cg, fam, tax_reason = "", "", ""
 
         if (product_type and power is not None and len(power_candidates) <= 1
-                and (cg, fam) in self.rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS")):
+                and (cg, fam) in self.rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS")
+                # Generic WATERPUMP fallback proves a broad type, not the commercial FAMILY.
+                # Route to JEV with evidence rather than silently auto-resolving.
+                and not (product_type == "WATERPUMP" and tax_reason == "TYPE_FALLBACK_PAIR")):
             state = "RESOLVED_RULE"
         elif type_candidates:
             state = "AMBIGUOUS"
