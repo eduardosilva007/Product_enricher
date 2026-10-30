@@ -7538,7 +7538,9 @@ def _export_base_final(
         base[pair] = {col: existing.get(col, pd.NA) for col in BASELINE_FINAL_COLUMNS}
 
     def classified(rec):
-        return all(present(rec.get(col)) for col in required)
+        return (all(present(rec.get(col)) for col in required)
+                and safe(rec.get("O que é (Tipo)")).upper() not in {"REVISAR", "UNKNOWN", "N/A"}
+                and present(rec.get("Título Real")))
 
     # Escolhe evidência completa antes de linhas pendentes; B.I. tem autoridade,
     # mas nunca se converte numa aprovação humana para uma variante.
