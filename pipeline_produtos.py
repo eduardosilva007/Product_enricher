@@ -7455,6 +7455,8 @@ def _derive_final_review(row: Any, df: Any) -> Any:
         return "PROVÁVEL"
     if resolution == "PENDING_EVIDENCE_CHECK":
         return "PENDENTE"
+    if resolution == "PENDING_CLASSIFICATION":
+        return "PENDENTE_CLASSIFICACAO"
     if resolution in {"PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "CACHE_ERROR", "CACHE_COLLISION"}:
         return "PENDENTE_COLETA"
 
@@ -7668,6 +7670,11 @@ def _export_base_final(
     for rec in base.values():
         key = business_key(safe(rec["Marca"]), safe(rec["Modelo"]))
         score = (int(classified(rec)), int(_is_bi_ok_value(rec.get("Revisão B.I"))),
+                 int(safe(rec.get("Collection State")) in {
+                     "TARGET_EVIDENCE", "READY_FOR_CLASSIFICATION",
+                     "PARTIAL_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE",
+                     "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA"
+                 }),
                  sum(bool(present(rec.get(c))) for c in taxonomy))
         if key not in by_key or score > by_key[key][0]:
             by_key[key] = (score, rec)
@@ -7675,6 +7682,11 @@ def _export_base_final(
         key = business_key(*pair)
         rec = {col: prev.get(col, pd.NA) for col in BASELINE_FINAL_COLUMNS}
         score = (int(classified(rec)), int(_is_bi_ok_value(rec.get("Revisão B.I"))),
+                 int(safe(rec.get("Collection State")) in {
+                     "TARGET_EVIDENCE", "READY_FOR_CLASSIFICATION",
+                     "PARTIAL_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE",
+                     "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA"
+                 }),
                  sum(bool(present(rec.get(c))) for c in taxonomy))
         if key not in by_key or score > by_key[key][0]:
             by_key[key] = (score, rec)
@@ -7727,6 +7739,27 @@ def _export_base_final(
                 rec["Próxima Ação"] = "REVISAR_MANUAL_SEM_EVIDENCIA"
             continue
         source = src[1]
+        # Uma variante não protegida não pode continuar PENDENTE_COLETA
+        # quando sua business_key possui RAW confirmado no cache.
+        src_collection = safe(source.get("Collection State"))
+        if src_collection in {
+            "TARGET_EVIDENCE", "READY_FOR_CLASSIFICATION",
+            "PARTIAL_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE",
+            "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA"
+        }:
+            rec["Collection State"] = src_collection
+            rec["Status Coleta"] = source.get("Status Coleta")
+            if safe(source.get("Status Identidade")):
+                rec["Status Identidade"] = source["Status Identidade"]
+            if (safe(rec.get("Revisão")).upper() in {
+                "PENDENTE", "PENDENTE_COLETA", "PENDENTE_CLASSIFICACAO",
+                "PENDENTE_RECOLETA"
+            } and safe(source.get("Revisão")).upper() in {
+                "PENDENTE_CLASSIFICACAO", "PENDENTE_RECOLETA"
+            }):
+                rec["Revisão"] = source["Revisão"]
+                rec["Próxima Ação"] = source.get("Próxima Ação")
+                rec["Resolution State"] = source.get("Resolution State")
         changed = False
         for col in taxonomy:
             if not present(rec.get(col)) and present(source.get(col)):
@@ -7899,6 +7932,106 @@ def _register_input_keys_in_master(master_df: Any, input_path: Optional[Path]) -
     return master_df, added
 
 
+def _hydrate_input_collection_from_cache(
+    master_df: Any,
+    input_path: Optional[Path],
+    cache_path: Optional[Path],
+    cfg: Optional[Dict[str, Any]] = None,
+) -> Dict[str, int]:
+    """Reconcilia evidência do SQLite com os SKUs da entrada, sem classificar.
+
+    Coleta != identidade != taxonomia. Nunca altera Gold, Manual ou itens aceitos.
+    """
+    stats = {"cache_keys": 0, "cache_raw_ok": 0, "cache_raw_empty": 0,
+             "cache_pending_corrected": 0, "cache_reference_titles": 0}
+    if not input_path or not input_path.exists() or not cache_path or not cache_path.exists():
+        return stats
+    bcol = find_col(master_df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    mcol = find_col(master_df, ["Modelo", "Model", "SKU", "Part Number"])
+    key_index = _master_key_index(master_df, bcol, mcol)
+    status_col = find_col(master_df, ["Status"], required=False)
+    rbi_col = find_col(master_df, ["Revisão B.I", "Revisao B.I"], required=False)
+    review_col = find_col(master_df, ["Revisão", "Revisao"], required=False) or "Revisão"
+    needed = ("Raw State", "Collection State", "Título Referência",
+              "Fonte Referência URL", "Título Referência Identity",
+              "Título Referência Decision", "Status Processamento",
+              "Próxima Ação", "Resolution State", review_col)
+    for col in needed:
+        if col not in master_df.columns:
+            master_df[col] = ""
+        # Colunas antigas inteiramente vazias podem ter dtype float64 no pandas.
+        master_df[col] = master_df[col].astype("object")
+
+    store = TavilyReadOnlyStore(cache_path)
+    try:
+        seen = set()
+        for item in read_input_rows(input_path):
+            if not item.valid or item.key in seen:
+                continue
+            seen.add(item.key)
+            idx = key_index.get(item.key)
+            if idx is None:
+                continue
+            old = master_df.loc[idx]
+            if ((rbi_col and _is_bi_ok_value(old.get(rbi_col)))
+                    or (status_col and _is_manual_status(old.get(status_col)))
+                    or _baseline_row_accepted(old, master_df)):
+                continue
+            raw = store.get(item.brand_original, item.model_original)
+            if raw.state not in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
+                continue
+            stats["cache_keys"] += 1
+            master_df.at[idx, "Raw State"] = raw.state
+            if raw.state == "RAW_EMPTY":
+                stats["cache_raw_empty"] += 1
+                master_df.at[idx, "Collection State"] = "RAW_EMPTY"
+                continue
+            stats["cache_raw_ok"] += 1
+            coll = (raw.payload or {}).get("_collection")
+            coll = coll if isinstance(coll, dict) else {}
+            state = safe(coll.get("state")) or "CACHE_RAW_SEM_CURADORIA"
+            master_df.at[idx, "Collection State"] = state
+            old_review = safe(old.get(review_col)).upper()
+            old_process = safe(old.get("Status Processamento")).upper()
+            old_resolution = safe(old.get("Resolution State")).upper()
+            pending = old_review in {"", "PENDENTE", "PENDENTE_COLETA", "PENDENTE_RECOLETA", "PENDENTE_CLASSIFICACAO"}
+            pending = pending or old_process in {"PENDING_COLLECTION", "PENDING_RECOLLECTION", "PENDING_CLASSIFICATION"}
+            pending = pending or old_resolution in {"", "PENDING_EVIDENCE_CHECK", "PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "PENDING_CLASSIFICATION"}
+            if pending and old_resolution not in {"CLASSIFIED_CLEF", "RESOLVED"}:
+                if state in {"NO_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE"}:
+                    master_df.at[idx, review_col] = "PENDENTE_RECOLETA"
+                    master_df.at[idx, "Resolution State"] = "PENDING_RECOLLECTION"
+                    master_df.at[idx, "Status Processamento"] = "PENDING_RECOLLECTION"
+                    master_df.at[idx, "Próxima Ação"] = "RECOLETA_DIRIGIDA"
+                else:
+                    master_df.at[idx, review_col] = "PENDENTE_CLASSIFICACAO"
+                    master_df.at[idx, "Resolution State"] = "PENDING_CLASSIFICATION"
+                    master_df.at[idx, "Status Processamento"] = "PENDING_CLASSIFICATION"
+                    master_df.at[idx, "Próxima Ação"] = "CLASSIFICAR_CACHE"
+                stats["cache_pending_corrected"] += 1
+            if cfg is not None and not safe(old.get("Título Referência")):
+                try:
+                    title, url, identity, decision = choose_reference_title(
+                        raw, item.brand_original, item.model_original, cfg
+                    )
+                except (TypeError, ValueError, KeyError) as exc:
+                    LOG.warning("CACHE TITLE REFERENCE SKIPPED | %s %s | %s",
+                                item.brand_original, item.model_original, exc)
+                    continue
+                if (safe(title) and safe(identity).upper() in {"STRONG", "PROBABLE"}
+                        and safe(decision).upper() not in {
+                            "REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY"
+                        }):
+                    master_df.at[idx, "Título Referência"] = title
+                    master_df.at[idx, "Fonte Referência URL"] = url
+                    master_df.at[idx, "Título Referência Identity"] = identity
+                    master_df.at[idx, "Título Referência Decision"] = decision
+                    stats["cache_reference_titles"] += 1
+    finally:
+        store.close()
+    return stats
+
+
 def persist_baseline_excels(
     rows: List[Dict[str, Any]],
     master_path: Optional[Path],
@@ -7907,6 +8040,8 @@ def persist_baseline_excels(
     rules: Rules,
     reprocess: bool = False,
     force_reprocess_keys: Optional[set] = None,
+    cache_path: Optional[Path] = None,
+    cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, int]:
     """Grava Consolidado -> Base Final sem jamais alterar linhas Revisão B.I=OK."""
     import pandas as pd
@@ -7937,6 +8072,9 @@ def persist_baseline_excels(
     master_df, sync_stats = _sync_final_into_master(master_df, final_path, brand_col, model_col)
     master_df, brand_col, model_col = _ensure_master_columns(master_df)
     master_df, input_registered = _register_input_keys_in_master(master_df, input_path)
+    cache_stats = _hydrate_input_collection_from_cache(master_df, input_path, cache_path, cfg)
+    if cache_path is not None:
+        LOG.info("CACHE -> BASELINE | %s", " | ".join(f"{k}={v}" for k, v in cache_stats.items()))
     master_df, merge_stats = _upsert_run_rows_into_master(
         master_df, rows, brand_col, model_col, rules, reprocess, force_reprocess_keys
     )
@@ -7953,6 +8091,7 @@ def persist_baseline_excels(
     stats = {
         **sync_stats,
         **merge_stats,
+        **cache_stats,
         "input_registered": input_registered,
         "legacy_taxonomy_cleaned": legacy_taxonomy_cleaned,
         "review_bi_snapshot_rows": len(review_bi_snapshot),
@@ -8918,6 +9057,8 @@ def run_pipeline(
                     rules=rules,
                     reprocess=args.reprocess,
                     force_reprocess_keys=force_reprocess_keys,
+                    cache_path=cache_path,
+                    cfg=cfg,
                 )
                 if baseline_stats:
                     post_inv = load_baseline_inventory(master_path, final_path)
@@ -9022,6 +9163,8 @@ def run_pipeline(
                     rules=rules,
                     reprocess=args.reprocess,
                     force_reprocess_keys=force_reprocess_keys,
+                    cache_path=cache_path,
+                    cfg=cfg,
                 )
                 if partial_baseline:
                     LOG.warning(
@@ -9779,6 +9922,8 @@ def main() -> int:
             sync_stats = persist_baseline_excels(
                 rows=[], master_path=master_sync, final_path=final_sync,
                 input_path=input_sync, rules=rules,
+                cache_path=Path(args.cache or files_cfg.get("cache", "cache_tavily.sqlite")),
+                cfg=cfg,
             )
             LOG.info("INPUT BASELINE SYNC OK | inserted=%s | final_rows=%s",
                      sync_stats.get("input_registered", 0), sync_stats.get("final_rows", 0))
@@ -9794,8 +9939,19 @@ def main() -> int:
     if args.mode == "collect":
         provider = _resolve_search_provider(args, cfg)
         _provider_credentials(provider, cfg)
-        collect_products(args, cfg, rules)
-        return 0
+        completed = collect_products(args, cfg, rules)
+        if completed:
+            files_cfg = cfg.get("files", {}) or {}
+            persist_baseline_excels(
+                rows=[],
+                master_path=Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx")),
+                final_path=Path(files_cfg.get("final", "Base Final Produtos Enriquecida.xlsx")),
+                input_path=Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx")),
+                rules=rules,
+                cache_path=Path(args.cache or files_cfg.get("cache", "cache_tavily.sqlite")),
+                cfg=cfg,
+            )
+        return 0 if completed else 3
     if args.mode == "curate":
         curate_cache_without_tavily(args, cfg, rules)
         return 0
