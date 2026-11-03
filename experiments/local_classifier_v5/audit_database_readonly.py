@@ -32,7 +32,9 @@ def load_excel(path):
     if brand_i is None or model_i is None:
         raise ValueError("Colunas de marca/modelo não identificadas: " + str(path))
     ix = {key:col(key) for key in ("O que é (Tipo)","Alimentação","Category General","FAMILY",
-              "Título Real","Revisão","Revisão B.I","Próxima Ação","Status")}
+              "Título Real","Revisão","Revisão B.I","Próxima Ação","Status",
+              "Título Referência Identity","Classification Identity",
+              "Status Coleta","Status Identidade","Status Classificação")}
     rows=[]
     for number, row in enumerate(iterator,2):
         def read(i):
