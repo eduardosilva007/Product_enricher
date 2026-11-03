@@ -7601,10 +7601,6 @@ def _export_base_final(
             out[col] = work[src] if src else pd.NA
 
     out = out[BASELINE_FINAL_COLUMNS].reset_index(drop=True)
-    # Empty optional columns are inferred as float64 in pandas 2.x.
-    # Explicitly allocate text-compatible storage before writing candidates.
-    for suggestion_col in ("Sugestão Category General", "Sugestão FAMILY"):
-        out[suggestion_col] = out[suggestion_col].astype("object")
 
     _assert_bi_lock_snapshot(out, bi_lock_snapshot or {}, "Base Final gerada")
 
@@ -7776,6 +7772,12 @@ def _export_base_final(
             supplemental.append(copy)
     if supplemental:
         out = pd.concat([out, pd.DataFrame(supplemental, columns=BASELINE_FINAL_COLUMNS)], ignore_index=True)
+    # A reconstrução acima (pd.DataFrame(base.values())) e a concatenação podem
+    # reinferir colunas inteiramente vazias como float64. O dtype deve ser
+    # garantido neste DataFrame FINAL, imediatamente antes das atribuições
+    # de hipóteses textuais em CLASSIFICATION INTEGRITY.
+    for suggestion_col in ("Sugestão Category General", "Sugestão FAMILY"):
+        out[suggestion_col] = out[suggestion_col].astype("object")
     physical_counts = Counter((safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"]))
     missing_lines = {pair: n - physical_counts.get(pair, 0) for pair, n in input_counts.items()
                      if physical_counts.get(pair, 0) < n}
