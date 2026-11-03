@@ -6523,6 +6523,21 @@ BASELINE_FINAL_COLUMNS = [
     "Status",
     "Revisão",
     "Revisão B.I",
+    # Campos operacionais aditivos: nunca substituem os campos Gold.
+    "Status Coleta",
+    "Status Identidade",
+    "Status Classificação",
+    "Título Referência",
+    "Fonte URL",
+    "Fonte Referência URL",
+    "Motivo",
+    "Reason Code",
+    "Collection State",
+    "Resolution State",
+    "Classification Identity",
+    "Título Referência Identity",
+    "Sugestão Category General",
+    "Sugestão FAMILY",
 ]
 
 BASELINE_MASTER_FIELDS = [
@@ -6533,6 +6548,8 @@ BASELINE_MASTER_FIELDS = [
     "Título Real",
     "Título Referência",
     "Próxima Ação",
+    "Sugestão Category General",
+    "Sugestão FAMILY",
     "Fonte URL",
     "Fonte Referência URL",
     "Collection State",
@@ -7079,6 +7096,13 @@ def _sanitize_legacy_unresolved_taxonomy(df: Any) -> Tuple[Any, int]:
         if _baseline_row_accepted(row, out):
             continue
         if safe(row.get(cg_col)) or safe(row.get(fam_col)):
+            # Nunca descartar candidatos: retirar apenas dos campos aprováveis.
+            for source_col, suggestion_col in ((cg_col, "Sugestão Category General"),
+                                               (fam_col, "Sugestão FAMILY")):
+                if suggestion_col not in out.columns:
+                    out[suggestion_col] = pd.NA
+                if safe(row.get(source_col)) and not safe(row.get(suggestion_col)):
+                    out.at[idx, suggestion_col] = row.get(source_col)
             out.at[idx, cg_col] = pd.NA
             out.at[idx, fam_col] = pd.NA
             cleaned += 1
@@ -7498,13 +7522,65 @@ def _export_base_final(
     out["Status"] = work.apply(final_status, axis=1)
     out["Revisão"] = work.apply(lambda row: _derive_final_review(row, work), axis=1)
 
+    # Estados ortogonais: metadados auditáveis, jamais aprovam uma taxonomia.
+    def operational_status(row: Any) -> Dict[str, str]:
+        raw_state = safe(row.get("Raw State")).upper()
+        collection_state = safe(row.get("Collection State")).upper()
+        resolution = safe(row.get("Resolution State")).upper()
+        title = safe(row.get("Título Real")) or safe(row.get("Título Referência"))
+        typ = safe(row.get("O que é (Tipo)")).upper()
+        cg = safe(row.get("Category General"))
+        family = safe(row.get("FAMILY"))
+        suggestions = safe(row.get("Sugestão Category General")) or safe(row.get("Sugestão FAMILY"))
+        identity = safe(row.get("Classification Identity")).upper()
+        ref_identity = safe(row.get("Título Referência Identity")).upper()
+        if raw_state in {"RAW_OK", "OK"} or collection_state in {
+            "TARGET_EVIDENCE", "PARTIAL_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"
+        }:
+            collected = "COLETADO_COM_EVIDENCIA" if title else "COLETA_REGISTRADA_VERIFICAR_CACHE"
+        elif raw_state in {"RAW_EMPTY", "EMPTY"}:
+            collected = "COLETA_VAZIA"
+        elif raw_state in {"CACHE_ERROR", "CACHE_COLLISION", "RAW_CORRUPT"}:
+            collected = "ERRO_CACHE"
+        else:
+            collected = "EVIDENCIA_EXISTENTE_SEM_ESTADO" if title else "COLETA_NAO_COMPROVADA"
+        # STRONG da referência só comprova a referência, não a classificação.
+        if ref_identity == "STRONG" or identity == "STRONG":
+            identity_status = "MARCA_MODELO_CONFIRMADOS"
+        elif ref_identity == "PROBABLE" or identity == "PROBABLE":
+            identity_status = "IDENTIDADE_PROVAVEL"
+        elif ref_identity in {"CONFLICT", "WEAK"} or identity in {"CONFLICT", "WEAK"}:
+            identity_status = "IDENTIDADE_NAO_CONFIAVEL"
+        else:
+            identity_status = "IDENTIDADE_NAO_VERIFICADA" if title else "SEM_EVIDENCIA_IDENTIDADE"
+        if typ not in {"", "REVISAR", "UNKNOWN", "N/A"} and cg and family:
+            classification = "COMPLETA_NAO_HOMOLOGADA"
+        elif (typ not in {"", "REVISAR", "UNKNOWN", "N/A"} or cg or family or suggestions):
+            classification = "PARCIAL"
+        elif title:
+            classification = "PENDENTE_CLASSIFICACAO"
+        else:
+            classification = "SEM_CLASSIFICACAO"
+        if resolution == "RESOLVED" and safe(row.get("Review Required")).upper() != "SIM":
+            classification = "RESOLVIDA_PELO_PIPELINE"
+        return {"Status Coleta": collected, "Status Identidade": identity_status,
+                "Status Classificação": classification}
+
+    operational = work.apply(operational_status, axis=1)
+    for name in ("Status Coleta", "Status Identidade", "Status Classificação"):
+        out[name] = operational.map(lambda fields: fields[name])
+
     # HF3.1p2: schema-forward baseline export.
     # Diagnostic columns introduced after older baseline files were created may
     # legitimately be absent from ``work``. Copy them when available and
     # create any remaining final-schema column as NA before the strict slice.
     # This keeps old baselines forward-compatible and prevents KeyError when
     # BASELINE_FINAL_COLUMNS evolves.
-    for col in ["Título Referência", "Próxima Ação"]:
+    for col in ["Título Referência", "Próxima Ação", "Fonte URL",
+                "Fonte Referência URL", "Motivo", "Reason Code",
+                "Collection State", "Resolution State", "Classification Identity",
+                "Título Referência Identity", "Sugestão Category General",
+                "Sugestão FAMILY"]:
         src = find_col(work, [col], required=False)
         out[col] = work[src] if src else pd.NA
 
@@ -7530,7 +7606,11 @@ def _export_base_final(
             pass
         return bool(safe(value))
 
-    taxonomy = ["O que é (Tipo)", "Alimentação", "Category General", "FAMILY", "Título Real"]
+    taxonomy = ["O que é (Tipo)", "Alimentação", "Category General", "FAMILY", "Título Real",
+                "Título Referência", "Fonte URL", "Fonte Referência URL",
+                "Motivo", "Reason Code", "Collection State", "Resolution State",
+                "Classification Identity", "Título Referência Identity",
+                "Sugestão Category General", "Sugestão FAMILY"]
     required = ["O que é (Tipo)", "Category General", "FAMILY"]
     prior_exact = {}
     if final_path.exists():
@@ -7704,8 +7784,13 @@ def _export_base_final(
         has_pair = present(row.get("Category General")) or present(row.get("FAMILY"))
         has_type = present(row.get("O que é (Tipo)")) and safe(row.get("O que é (Tipo)")).upper() not in {"REVISAR", "UNKNOWN"}
         if has_pair and not has_type:
-            out.at[idx, "Category General"] = pd.NA
-            out.at[idx, "FAMILY"] = pd.NA
+            # Preserva a hipótese para revisão, sem a tornar classificação.
+            for original, candidate in (("Category General", "Sugestão Category General"),
+                                        ("FAMILY", "Sugestão FAMILY")):
+                if present(row.get(original)) and not present(row.get(candidate)):
+                    out.at[idx, candidate] = row.get(original)
+                out.at[idx, original] = pd.NA
+            out.at[idx, "Status Classificação"] = "PARCIAL"
             stripped_partial += 1
     LOG.info("BASE FINAL CLASSIFICATION INTEGRITY | false_approvals_repaired=%d | partial_pairs_cleared=%d",
              repaired_approval, stripped_partial)
@@ -7765,12 +7850,12 @@ def _register_input_keys_in_master(master_df: Any, input_path: Optional[Path]) -
         row[brand_col] = item.brand_original
         row[model_col] = item.model_original
         row["Status"] = "Script"
-        row["Status Processamento"] = "PENDING_COLLECTION"
-        row["Revisão"] = "PENDENTE_COLETA"
-        row["Resolution State"] = "PENDING_COLLECTION"
+        row["Status Processamento"] = "PENDING_EVIDENCE_CHECK"
+        row["Revisão"] = "PENDENTE"
+        row["Resolution State"] = "PENDING_EVIDENCE_CHECK"
         row["Review Required"] = "SIM"
-        row["Próxima Ação"] = "REVISAR_MANUAL_OU_CLASSIFICAR"
-        row["Reason Code"] = "INPUT_PENDING_CLASSIFICATION"
+        row["Próxima Ação"] = "VERIFICAR_CACHE_ANTES_DE_COLETAR"
+        row["Reason Code"] = "INPUT_PENDING_EVIDENCE_CHECK"
         row["Motivo"] = "Registro da entrada ainda sem classificação validada."
         master_df.loc[len(master_df)] = row
         present.add(item.key)
