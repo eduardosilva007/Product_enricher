@@ -7457,7 +7457,20 @@ def _derive_final_review(row: Any, df: Any) -> Any:
         return "PENDENTE"
     if resolution == "PENDING_CLASSIFICATION":
         return "PENDENTE_CLASSIFICACAO"
+    # Revisão indica próximo trabalho; não deve mascarar evidência RAW_OK.
+    raw_state = safe(row.get("Raw State")).upper()
+    collection_state = safe(row.get("Collection State")).upper()
+    has_cache_raw = raw_state in {"RAW_OK", "RAW_OK_MERGED", "OK"} or collection_state in {
+        "READY_FOR_CLASSIFICATION", "PARTIAL_TARGET_EVIDENCE", "TARGET_EVIDENCE",
+        "LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA",
+    }
     if resolution in {"PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "CACHE_ERROR", "CACHE_COLLISION"}:
+        if has_cache_raw:
+            return ("PENDENTE_RECOLETA" if collection_state in {
+                "NO_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE"
+            } or resolution == "NEEDS_RECOLLECTION" else "PENDENTE_CLASSIFICACAO")
+        if raw_state == "RAW_EMPTY":
+            return "PENDENTE_RECOLETA"
         return "PENDENTE_COLETA"
 
     # Linha conhecida, mas ainda nunca enriquecida: fica PENDENTE, não REVISAR.
@@ -7507,6 +7520,7 @@ def _export_base_final(
     review_bi_source_exists: bool = False,
     bi_lock_snapshot: Optional[Dict[str, Dict[str, str]]] = None,
     input_path: Optional[Path] = None,
+    cache_path: Optional[Path] = None,
 ) -> int:
     """Reconstrói Base Final preservando BI_OK byte-semanticamente nos campos humanos."""
     import pandas as pd
@@ -7566,10 +7580,16 @@ def _export_base_final(
         suggestions = safe(row.get("Sugestão Category General")) or safe(row.get("Sugestão FAMILY"))
         identity = safe(row.get("Classification Identity")).upper()
         ref_identity = safe(row.get("Título Referência Identity")).upper()
-        if raw_state in {"RAW_OK", "OK"} or collection_state in {
-            "TARGET_EVIDENCE", "PARTIAL_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"
+        if raw_state in {"RAW_OK", "RAW_OK_MERGED", "OK"} or collection_state in {
+            "TARGET_EVIDENCE", "READY_FOR_CLASSIFICATION", "PARTIAL_TARGET_EVIDENCE",
+            "LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA"
         }:
-            collected = "COLETADO_COM_EVIDENCIA" if title else "COLETA_REGISTRADA_VERIFICAR_CACHE"
+            collected = ("COLETADO_EVIDENCIA_PRONTA" if collection_state in {
+                "READY_FOR_CLASSIFICATION", "TARGET_EVIDENCE"
+            } else "COLETADO_EVIDENCIA_PARCIAL" if collection_state == "PARTIAL_TARGET_EVIDENCE"
+            else "COLETADO_SEM_EVIDENCIA_ALVO" if collection_state in {
+                "LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"
+            } else "COLETADO_RAW_DISPONIVEL")
         elif raw_state in {"RAW_EMPTY", "EMPTY"}:
             collected = "COLETA_VAZIA"
         elif raw_state in {"CACHE_ERROR", "CACHE_COLLISION", "RAW_CORRUPT"}:
@@ -7589,7 +7609,7 @@ def _export_base_final(
             classification = "COMPLETA_NAO_HOMOLOGADA"
         elif (typ not in {"", "REVISAR", "UNKNOWN", "N/A"} or cg or family or suggestions):
             classification = "PARCIAL"
-        elif title:
+        elif title or raw_state in {"RAW_OK", "RAW_OK_MERGED"}:
             classification = "PENDENTE_CLASSIFICACAO"
         else:
             classification = "SEM_CLASSIFICACAO"
@@ -7878,6 +7898,98 @@ def _export_base_final(
     )
     LOG.info("BASE FINAL EQUIVALENCIA BI | herdados=%d | conflitos=%d", inherited, len(conflict_keys))
 
+    # Espelha o estado autoritativo do SQLite em TODAS as grafias da entrada,
+    # inclusive aliases que não receberam os campos do Consolidado.
+    if cache_path and cache_path.exists() and input_rows_all:
+        store = TavilyReadOnlyStore(cache_path)
+        try:
+            input_keys = {item.key for item in input_rows_all if item.valid}
+            for idx, rec in out.iterrows():
+                brand, model = safe(rec.get("Marca")), safe(rec.get("Modelo"))
+                if business_key(brand, model) not in input_keys:
+                    continue
+                if _is_bi_ok_value(rec.get("Revisão B.I")) or safe(rec.get("Status")).upper() == "MANUAL":
+                    continue
+                raw = store.get(brand, model)
+                if raw.state == "RAW_EMPTY":
+                    out.at[idx, "Status Coleta"] = "COLETA_VAZIA"
+                    out.at[idx, "Collection State"] = "RAW_EMPTY"
+                    if not classified(rec):
+                        out.at[idx, "Revisão"] = "PENDENTE_RECOLETA"
+                        out.at[idx, "Próxima Ação"] = "RECOLETA_SEM_RESULTADOS"
+                        out.at[idx, "Resolution State"] = "PENDING_RECOLLECTION"
+                elif raw.state in {"RAW_OK", "RAW_OK_MERGED"}:
+                    collection = (raw.payload or {}).get("_collection")
+                    collection = collection if isinstance(collection, dict) else {}
+                    state = safe(collection.get("state")) or "CACHE_RAW_SEM_CURADORIA"
+                    out.at[idx, "Collection State"] = state
+                    if state in {"READY_FOR_CLASSIFICATION", "TARGET_EVIDENCE"}:
+                        out.at[idx, "Status Coleta"] = "COLETADO_EVIDENCIA_PRONTA"
+                    elif state == "PARTIAL_TARGET_EVIDENCE":
+                        out.at[idx, "Status Coleta"] = "COLETADO_EVIDENCIA_PARCIAL"
+                    elif state in {"LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"}:
+                        out.at[idx, "Status Coleta"] = "COLETADO_SEM_EVIDENCIA_ALVO"
+                    else:
+                        out.at[idx, "Status Coleta"] = "COLETADO_RAW_DISPONIVEL"
+                    if not classified(rec) and safe(rec.get("Revisão")).upper() in {
+                        "PENDENTE_COLETA", "PENDENTE", "PENDENTE_CLASSIFICACAO",
+                        "PENDENTE_RECOLETA", "REVISAR"
+                    }:
+                        recollect = state in {"LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"}
+                        out.at[idx, "Revisão"] = "PENDENTE_RECOLETA" if recollect else "PENDENTE_CLASSIFICACAO"
+                        out.at[idx, "Próxima Ação"] = "RECOLETA_DIRIGIDA" if recollect else "CLASSIFICAR_CACHE"
+                        out.at[idx, "Resolution State"] = "PENDING_RECOLLECTION" if recollect else "PENDING_CLASSIFICATION"
+        finally:
+            store.close()
+
+    # GATE pré-gravação: presença no Excel não comprova estado de coleta.
+    # O SQLite é a fonte oficial e RAW_OK nunca pode sair PENDENTE_COLETA.
+    if cache_path and cache_path.exists() and input_rows_all:
+        store = TavilyReadOnlyStore(cache_path)
+        try:
+            status_index = {}
+            for _, rec in out.iterrows():
+                pair = (safe(rec.get("Marca")), safe(rec.get("Modelo")))
+                status_index.setdefault(pair, []).append(rec)
+            expected = {"raw_ok": 0, "raw_empty": 0, "skipped_human": 0}
+            conflicts = []
+            for item in input_rows_all:
+                if not item.valid:
+                    continue
+                records = status_index.get((item.brand_original, item.model_original), [])
+                if not records:
+                    conflicts.append((item.brand_original, item.model_original, "AUSENTE"))
+                    continue
+                raw = store.get(item.brand_original, item.model_original)
+                if raw.state not in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
+                    continue
+                for record in records:
+                    if _is_bi_ok_value(record.get("Revisão B.I")) or safe(record.get("Status")).upper() == "MANUAL":
+                        expected["skipped_human"] += 1
+                        continue
+                    collection_status = safe(record.get("Status Coleta")).upper()
+                    review_status = safe(record.get("Revisão")).upper()
+                    if raw.state in {"RAW_OK", "RAW_OK_MERGED"}:
+                        expected["raw_ok"] += 1
+                        if not collection_status.startswith("COLETADO_") or review_status == "PENDENTE_COLETA":
+                            conflicts.append((item.brand_original, item.model_original,
+                                              f"RAW_OK x {collection_status} / {review_status}"))
+                    else:
+                        expected["raw_empty"] += 1
+                        if collection_status != "COLETA_VAZIA":
+                            conflicts.append((item.brand_original, item.model_original,
+                                              f"RAW_EMPTY x {collection_status}"))
+            LOG.info("BASE FINAL CACHE CONTRACT | raw_ok=%d | raw_empty=%d | human_skipped=%d | conflicts=%d",
+                     expected["raw_ok"], expected["raw_empty"], expected["skipped_human"], len(conflicts))
+            if conflicts:
+                raise RuntimeError(
+                    "BASE_FINAL_CACHE_CONTRACT_FAILED: "
+                    f"{len(conflicts)} divergencias cache/Excel; primeiros={conflicts[:5]}. "
+                    "Exportacao bloqueada para preservar baseline."
+                )
+        finally:
+            store.close()
+
     tmp = final_path.with_name(final_path.stem + f".tmp_{os.getpid()}" + final_path.suffix)
     final_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -7985,6 +8097,12 @@ def _hydrate_input_collection_from_cache(
             if raw.state == "RAW_EMPTY":
                 stats["cache_raw_empty"] += 1
                 master_df.at[idx, "Collection State"] = "RAW_EMPTY"
+                # Uma consulta vazia é diferente de produto nunca consultado.
+                if safe(old.get("Resolution State")).upper() not in {"RESOLVED", "CLASSIFIED_CLEF"}:
+                    master_df.at[idx, "Resolution State"] = "PENDING_RECOLLECTION"
+                    master_df.at[idx, "Status Processamento"] = "PENDING_RECOLLECTION"
+                    master_df.at[idx, "Próxima Ação"] = "RECOLETA_SEM_RESULTADOS"
+                    master_df.at[idx, review_col] = "PENDENTE_RECOLETA"
                 continue
             stats["cache_raw_ok"] += 1
             coll = (raw.payload or {}).get("_collection")
@@ -8101,6 +8219,23 @@ def persist_baseline_excels(
 
     # Antes de tocar nos arquivos, prova que o HARD LOCK continua idêntico.
     _assert_bi_lock_snapshot(master_df, bi_lock_snapshot, "Consolidado em memória")
+    # Os aceitos existentes não podem desaparecer durante uma mera sincronização.
+    if not force_reprocess_keys and master_path and final_path:
+        before_accepted = load_baseline_inventory(master_path, final_path)["processed"]
+        mb = find_col(master_df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        mm = find_col(master_df, ["Modelo", "Model", "SKU", "Part Number"])
+        after_accepted = {
+            business_key(safe(row.get(mb)), safe(row.get(mm)))
+            for _, row in master_df.iterrows()
+            if _baseline_row_accepted(row, master_df)
+        }
+        dropped = before_accepted - after_accepted
+        if dropped:
+            raise RuntimeError(
+                "BASELINE_ACCEPTED_PRESERVATION_FAILED: "
+                f"{len(dropped)} classificacoes aceitas seriam removidas. "
+                "Nenhum Excel foi regravado."
+            )
 
     stats = {
         **sync_stats,
@@ -8121,7 +8256,8 @@ def persist_baseline_excels(
     if final_path:
         stats["final_rows"] = _export_base_final(
             master_df, final_path, review_bi_snapshot, review_bi_source_exists, bi_lock_snapshot,
-            input_path=input_path
+            input_path=input_path,
+            cache_path=cache_path,
         )
 
     inv_after = load_baseline_inventory(master_path, final_path)

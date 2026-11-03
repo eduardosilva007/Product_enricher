@@ -64,6 +64,22 @@ class CacheBaselineSyncTests(unittest.TestCase):
         self.assertTrue(store.closed)
         self.assertEqual(pipeline._derive_final_review(data.loc[0], data), "PENDENTE_CLASSIFICACAO")
 
+    def test_export_review_distinguishes_collection_from_classification(self):
+        df = pd.DataFrame([
+            {"Marca": "A", "Modelo": "1", "Raw State": "RAW_OK",
+             "Collection State": "READY_FOR_CLASSIFICATION",
+             "Resolution State": "NEEDS_RECOLLECTION", "Revisão": "PENDENTE_COLETA"},
+            {"Marca": "B", "Modelo": "2", "Raw State": "RAW_OK",
+             "Collection State": "NO_TARGET_EVIDENCE",
+             "Resolution State": "NEEDS_RECOLLECTION", "Revisão": "PENDENTE_COLETA"},
+            {"Marca": "C", "Modelo": "3", "Raw State": "RAW_EMPTY",
+             "Collection State": "RAW_EMPTY",
+             "Resolution State": "PENDING_RECOLLECTION", "Revisão": "PENDENTE_COLETA"},
+        ], dtype="object")
+        self.assertEqual(pipeline._derive_final_review(df.loc[0], df), "PENDENTE_RECOLETA")
+        self.assertEqual(pipeline._derive_final_review(df.loc[1], df), "PENDENTE_RECOLETA")
+        self.assertEqual(pipeline._derive_final_review(df.loc[2], df), "PENDENTE_RECOLETA")
+
     def test_500_pending_cache_rows_idempotent(self):
         n = 500
         brands = ["STRESS"] * n
