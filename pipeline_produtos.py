@@ -7085,6 +7085,14 @@ def _sanitize_legacy_unresolved_taxonomy(df: Any) -> Tuple[Any, int]:
     fam_col = find_col(out, ["FAMILY", "Family"], required=False)
     if not cg_col or not fam_col:
         return out, 0
+    # Candidate columns carry strings even when an entire column starts empty.
+    # pandas 2.x otherwise infers float64 for an all-NA column and raises
+    # TypeError when a taxonomy label is first written.
+    for suggestion_col in ("Sugestão Category General", "Sugestão FAMILY"):
+        if suggestion_col not in out.columns:
+            out[suggestion_col] = pd.Series(pd.NA, index=out.index, dtype="object")
+        else:
+            out[suggestion_col] = out[suggestion_col].astype("object")
     cleaned = 0
     for idx, row in out.iterrows():
         if rbi_col and _is_bi_ok_value(row.get(rbi_col)):
@@ -7102,8 +7110,6 @@ def _sanitize_legacy_unresolved_taxonomy(df: Any) -> Tuple[Any, int]:
             # Nunca descartar candidatos: retirar apenas dos campos aprováveis.
             for source_col, suggestion_col in ((cg_col, "Sugestão Category General"),
                                                (fam_col, "Sugestão FAMILY")):
-                if suggestion_col not in out.columns:
-                    out[suggestion_col] = pd.NA
                 if safe(row.get(source_col)) and not safe(row.get(suggestion_col)):
                     out.at[idx, suggestion_col] = row.get(source_col)
             out.at[idx, cg_col] = pd.NA
@@ -7595,6 +7601,10 @@ def _export_base_final(
             out[col] = work[src] if src else pd.NA
 
     out = out[BASELINE_FINAL_COLUMNS].reset_index(drop=True)
+    # Empty optional columns are inferred as float64 in pandas 2.x.
+    # Explicitly allocate text-compatible storage before writing candidates.
+    for suggestion_col in ("Sugestão Category General", "Sugestão FAMILY"):
+        out[suggestion_col] = out[suggestion_col].astype("object")
 
     _assert_bi_lock_snapshot(out, bi_lock_snapshot or {}, "Base Final gerada")
 
