@@ -7428,6 +7428,8 @@ def _derive_final_review(row: Any, df: Any) -> Any:
     resolution = safe(row.get(resolution_col)).upper() if resolution_col else ""
     if resolution == "CLASSIFIED_CLEF":
         return "PROVÁVEL"
+    if resolution == "PENDING_EVIDENCE_CHECK":
+        return "PENDENTE"
     if resolution in {"PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "CACHE_ERROR", "CACHE_COLLISION"}:
         return "PENDENTE_COLETA"
 
