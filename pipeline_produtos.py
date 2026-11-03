@@ -8049,6 +8049,20 @@ def persist_baseline_excels(
     if not master_path and not final_path:
         return {}
 
+    # Fail-closed: jamais reconstruir uma Base Final vazia quando o Consolidado
+    # ainda contém Gold/classificações aceitas. O backup deve ser restaurado antes.
+    if master_path and master_path.exists() and final_path:
+        guard_inventory = load_baseline_inventory(master_path, final_path)
+        master_accepted = len(guard_inventory["master_accepted"])
+        final_accepted = len(guard_inventory["final_accepted"])
+        if master_accepted and (not final_path.exists() or not final_accepted):
+            raise RuntimeError(
+                "BASELINE_FINAL_MISSING_OR_EMPTY: Consolidado possui "
+                f"{master_accepted} classificacoes aceitas, mas Base Final possui "
+                f"{final_accepted}. Exportacao BLOQUEADA antes de qualquer escrita. "
+                "Restaure uma Base Final integra de Backups_Baseline."
+            )
+
     review_bi_snapshot, review_bi_source_exists = _load_review_bi_snapshot(final_path)
     bi_lock_snapshot = _load_bi_lock_snapshot(final_path)
 
