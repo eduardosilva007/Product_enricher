@@ -4635,9 +4635,21 @@ class ClassificationDB:
         if not row:
             return None
         try:
-            return json.loads(row[0])
-        except Exception:
+            result = json.loads(row[0])
+        except (TypeError, ValueError):
             return None
+        # Only terminal, complete results may skip classification.
+        # REVIEW and unresolved checkpoints remain stored for audit.
+        if not isinstance(result, dict):
+            return None
+        resolution = safe(result.get("Resolution State")).upper()
+        if resolution not in {"RESOLVED", "CLASSIFIED_CLEF"}:
+            return None
+        if not all(safe(result.get(col)) for col in ("O que é (Tipo)", "Category General", "FAMILY", "Título Real")):
+            return None
+        if safe(result.get("O que é (Tipo)")).upper() in {"REVISAR", "UNKNOWN"}:
+            return None
+        return result
 
 
     def put_checkpoint(self, key: str, brand: str, model: str, raw_hash: str, rules_hash: str, result: Dict[str, Any], llm_model: str) -> None:
@@ -4812,6 +4824,7 @@ class ClefFunnelClassifier:
         ]
         self.max_calls_per_run = max(0, int(self.ccfg.get("max_api_calls_per_run", 0) or 0))
         self.max_total_tokens_per_run = max(0, int(self.ccfg.get("max_total_tokens_per_run", 0) or 0))
+        self.transport_attempts = 0
 
         # Atributos mantidos para compatibilidade com o formato de execução/cache existente.
         self.max_output_tokens = 0
@@ -5493,6 +5506,9 @@ class ClefFunnelClassifier:
         last_detail = ""
         self.api_calls += 1
         for attempt in range(self.retry_attempts):
+            if self.max_calls_per_run and self.transport_attempts >= self.max_calls_per_run:
+                raise OperationalPause("CLEF_HTTP_CAP", "Teto HTTP atingido, inclusive retries/reparos.")
+            self.transport_attempts += 1
             self.limiter.wait()
             try:
                 resp = requests.post(
@@ -5720,6 +5736,9 @@ class ClefFunnelClassifier:
         self.api_calls += 1
         self.repair_calls += 1
         for attempt in range(self.retry_attempts):
+            if self.max_calls_per_run and self.transport_attempts >= self.max_calls_per_run:
+                raise OperationalPause("CLEF_HTTP_CAP", "Teto HTTP atingido, inclusive retries/reparos.")
+            self.transport_attempts += 1
             self.limiter.wait()
             try:
                 resp = requests.post(
@@ -8366,8 +8385,9 @@ def build_cache_recovery_plan(
     rules: Rules,
     cfg: Dict[str, Any],
     max_items: int = 0,
+    include_stale_auto: bool = False,
 ) -> Tuple[List[Tuple[str, str, str]], Dict[str, int]]:
-    """Seleciona pendências + AUTO_APROVADO de regra antiga, sem Tavily."""
+    """Pendencias do cache; aprovados tecnicos antigos somente com opt-in."""
     source = final_path if final_path and final_path.exists() else master_path
     if not source or not source.exists():
         raise FileNotFoundError("Cache Recovery exige Base Final ou Consolidado existente.")
@@ -8409,7 +8429,7 @@ def build_cache_recovery_plan(
         recovery_reason = _cache_recovery_reason(
             row, df, key, master_meta, rules
         )
-        if not recovery_reason:
+        if not recovery_reason or (recovery_reason == "AUTO_APROVADO_REGRA_OBSOLETA" and not include_stale_auto):
             good += 1
             continue
         if recovery_reason == "AUTO_APROVADO_REGRA_OBSOLETA":
@@ -8499,7 +8519,8 @@ def run_cache_recovery(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     store = TavilyReadOnlyStore(cache_path)
     try:
         targets, plan_stats = build_cache_recovery_plan(
-            final_path, master_path, store, with_path, without_path, rules, cfg, args.max_items
+            final_path, master_path, store, with_path, without_path, rules, cfg, args.max_items,
+            include_stale_auto=bool(getattr(args, "include_stale_auto", False)),
         )
     finally:
         store.close()
@@ -8582,7 +8603,8 @@ def run_pipeline(
     # revalidado separadamente e nunca é vencido por esta lista.
     force_reprocess_keys = (
         {x[2] for x in explicit_targets}
-        if explicit_targets is not None
+        if explicit_targets is not None and bool(getattr(args, "reprocess", False))
+        and bool(getattr(args, "include_stale_auto", False))
         else set()
     )
     processed = baseline_inventory["processed"]
@@ -8611,6 +8633,16 @@ def run_pipeline(
 
         if llm_provider == "jev":
             clef_model = safe(cfg.get("jev", {}).get("model")) or "jev-latest"
+        if llm_provider != "local":
+            provider_cfg = dict(cfg.get(llm_provider, {}) or {})
+            max_calls = int(getattr(args, "max_api_calls", 0) or provider_cfg.get("max_api_calls_per_run", 0) or 100)
+            max_tokens = int(getattr(args, "max_tokens", 0) or provider_cfg.get("max_total_tokens_per_run", 0) or 500000)
+            if max_calls <= 0 or max_tokens <= 0:
+                raise ValueError("Limites JEV/Clef devem ser positivos.")
+            provider_cfg["max_api_calls_per_run"] = max_calls
+            provider_cfg["max_total_tokens_per_run"] = max_tokens
+            cfg[llm_provider] = provider_cfg
+            LOG.info("LLM BUDGET | provider=%s | http_cap=%d | tokens_cap=%d", llm_provider, max_calls, max_tokens)
         clef_identity = f"{llm_provider}:{clef_model if llm_provider != 'local' else 'rules-only'}"
         db = ClassificationDB(db_path)
         run_id = db.start_run(args.mode, rules.hash, clef_identity)
@@ -9296,6 +9328,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-checkpoint", action="store_true")
     p.add_argument("--reprocess", action="store_true")
     p.add_argument("--max-items", type=int, default=0)
+    p.add_argument("--max-api-calls", type=int, default=0, help="Limite HTTP LLM incluindo retries e reparos.")
+    p.add_argument("--max-tokens", type=int, default=0, help="Limite de tokens LLM reportados.")
+    p.add_argument("--include-stale-auto", action="store_true", help="Recuperar tambem autoaprovados antigos.")
     p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
     p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata"], default="")
     p.add_argument("--recollect-empty", action="store_true")
@@ -9307,14 +9342,35 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _menu_limit(prompt: str) -> int:
-    """Permite piloto sem expor argumentos de linha de comando ao operador."""
-    raw = input(prompt).strip()
-    if not raw:
-        return 0
-    if not raw.isdigit() or int(raw) <= 0:
-        print("Valor inválido. Será considerado TODOS.")
-        return 0
-    return int(raw)
+    """ENTER=100; TODOS exige confirmacao explicita."""
+    while True:
+        raw = input(prompt).strip().upper()
+        if not raw:
+            return 100
+        if raw == "TODOS":
+            if input("Digite CONFIRMAR para executar sem limite: ").strip().upper() == "CONFIRMAR":
+                return 0
+            print("Confirmacao nao recebida.")
+            continue
+        if raw.isdecimal() and int(raw) > 0:
+            return int(raw)
+        print("Informe inteiro positivo ou TODOS.")
+
+
+def _menu_budget_args(provider: str) -> List[str]:
+    if provider == "local":
+        return []
+    def positive(prompt: str, default: int) -> int:
+        while True:
+            raw = input(f"{prompt} (ENTER={default}): ").strip()
+            if not raw:
+                return default
+            if raw.isdecimal() and int(raw) > 0:
+                return int(raw)
+            print("Informe inteiro positivo.")
+    calls = positive("Teto de tentativas HTTP LLM (inclui retries)", 100)
+    tokens = positive("Teto de tokens LLM", 500000)
+    return ["--max-api-calls", str(calls), "--max-tokens", str(tokens)]
 
 
 def _menu_search_provider() -> str:
@@ -9380,7 +9436,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(argv)
     if op == "2":
         limite = _menu_limit("Limite de produtos para piloto (ENTER = todos): ")
-        argv = ["--mode", "classify", "--llm-provider", _menu_llm_provider()]
+        llm = _menu_llm_provider()
+        argv = ["--mode", "classify", "--llm-provider", llm] + _menu_budget_args(llm)
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
@@ -9388,7 +9445,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         provider = _menu_search_provider()
         limite_search = _menu_limit("Limite de produtos na coleta (ENTER = todos): ")
         limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
-        argv = ["--mode", "full", "--search-provider", provider, "--llm-provider", _menu_llm_provider()]
+        llm = _menu_llm_provider()
+        argv = ["--mode", "full", "--search-provider", provider, "--llm-provider", llm] + _menu_budget_args(llm)
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
             argv += ["--recollect-low-evidence"]
@@ -9399,7 +9457,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(argv)
     if op == "4":
         limite = _menu_limit("Limite de pendências COM CACHE para reprocessar (ENTER = todas): ")
-        argv = ["--mode", "recover", "--llm-provider", _menu_llm_provider()]
+        llm = _menu_llm_provider()
+        argv = ["--mode", "recover", "--llm-provider", llm] + _menu_budget_args(llm)
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
@@ -9704,7 +9763,7 @@ def main() -> int:
         )
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
-    if args.mode in {"collect", "classify", "full", "sync-input"}:
+    if args.mode in {"collect", "full", "sync-input"}:
         files_cfg = cfg.get("files", {}) or {}
         input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
         master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
