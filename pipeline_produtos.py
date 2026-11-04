@@ -8254,11 +8254,24 @@ def persist_baseline_excels(
         master_accepted = len(guard_inventory["master_accepted"])
         final_accepted = len(guard_inventory["final_accepted"])
         if master_accepted and (not final_path.exists() or not final_accepted):
+            # OneDrive pode criar uma cópia com sufixo aleatório e retirar o
+            # nome canônico. Não escolher/restaurar automaticamente um conflito.
+            candidates = (
+                sorted(
+                    p.name for p in final_path.parent.glob(final_path.stem + "-*" + final_path.suffix)
+                    if p.is_file()
+                ) if not final_path.exists() else []
+            )
+            hint = (
+                " Possiveis copias conflitantes: " + ", ".join(candidates[:5])
+                + ". Preserve as copias e restaure o nome canonico apos conferir."
+                if candidates else ""
+            )
             raise RuntimeError(
                 "BASELINE_FINAL_MISSING_OR_EMPTY: Consolidado possui "
                 f"{master_accepted} classificacoes aceitas, mas Base Final possui "
                 f"{final_accepted}. Exportacao BLOQUEADA antes de qualquer escrita. "
-                "Restaure uma Base Final integra de Backups_Baseline."
+                "Verifique caminho/nome da Base Final antes de restaurar backup." + hint
             )
 
     review_bi_snapshot, review_bi_source_exists = _load_review_bi_snapshot(final_path)
