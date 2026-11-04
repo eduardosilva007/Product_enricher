@@ -61,8 +61,8 @@ class InputRegistrationTests(unittest.TestCase):
             self.assertEqual(locked["Revisão B.I"], "OK")
             self.assertEqual(locked["FAMILY"], "GENERATOR")
             pending = output.loc[output["Modelo"].eq("TEX.0131")].iloc[0]
-            self.assertEqual(pending["Revisão"], "PENDENTE_COLETA")
-            self.assertEqual(pending["Próxima Ação"], "REVISAR_MANUAL_OU_CLASSIFICAR")
+            self.assertEqual(pending["Revisão"], "PENDENTE")
+            self.assertEqual(pending["Próxima Ação"], "VERIFICAR_CACHE_ANTES_DE_COLETAR")
             self.assertFalse(bool(p.safe(pending["FAMILY"])))
             twice, second_added = p._register_input_keys_in_master(output, inp)
             self.assertEqual(second_added, 0)
@@ -115,7 +115,7 @@ class InputRegistrationTests(unittest.TestCase):
             self.assertNotEqual(p.safe(alias["Revisão B.I"]), "OK")
             p.persist_baseline_excels([], master, final, inp, rules)
             exported_twice, _ = p._read_business_sheet(final)
-            self.assertEqual(len(exported_twice), 2)
+            self.assertEqual(len(exported_twice), 3)  # duas ocorrencias exatas + uma variante, contrato PROCV
 
     def test_stihl_variants_are_filled_and_preserved_across_syncs(self):
         with tempfile.TemporaryDirectory() as td:
@@ -197,6 +197,8 @@ class InputRegistrationTests(unittest.TestCase):
                 "Status":"Script","Revisão":"PROVÁVEL",
                 "Próxima Ação":"DOUBLE_CHECK",
             }]).to_excel(master,index=False)
+            # Inicializa Final integra; o guard nunca deve ser desabilitado.
+            pd.read_excel(master).to_excel(final, sheet_name="Base Final", index=False)
             rules=p.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
             for _ in range(2):
                 p.persist_baseline_excels([],master,final,inp,rules)
@@ -219,6 +221,8 @@ class InputRegistrationTests(unittest.TestCase):
                 "Category General":"OTHERS","FAMILY":"HEAT GUN",
                 "Status":"Script","Revisão":"AUTO_APROVADO","Próxima Ação":"CONCLUIDO",
             }]).to_excel(master,index=False)
+            # Inicializa Final integra; o guard nunca deve ser desabilitado.
+            pd.read_excel(master).to_excel(final, sheet_name="Base Final", index=False)
             rules=p.Rules(Path(__file__).resolve().parent / "regras_negocio.json")
             p.persist_baseline_excels([],master,final,inp,rules)
             exported,_=p._read_business_sheet(final)
@@ -239,7 +243,7 @@ class InputRegistrationTests(unittest.TestCase):
             self.assertEqual(result["input_registered"], 1)
             exported, _ = p._read_business_sheet(final)
             self.assertEqual(exported["Modelo"].tolist(), ["HL2002"])
-            self.assertEqual(exported["Revisão"].iloc[0], "PENDENTE_COLETA")
+            self.assertEqual(exported["Revisão"].iloc[0], "PENDENTE")
             again = p.persist_baseline_excels([], master, final, inp, rules)
             self.assertEqual(again["input_registered"], 0)
 
