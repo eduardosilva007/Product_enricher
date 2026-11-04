@@ -219,6 +219,7 @@ class InputRegistrationTests(unittest.TestCase):
                 "Marca":"TOTAL","Modelo":"TB20078/4",
                 "O que é (Tipo)":"HEAT GUN","Alimentação":"CORDED",
                 "Category General":"OTHERS","FAMILY":"HEAT GUN",
+                "Título Real":"TOTAL TB20078 heat gun 2000W",
                 "Status":"Script","Revisão":"AUTO_APROVADO","Próxima Ação":"CONCLUIDO",
             }]).to_excel(master,index=False)
             # Inicializa Final integra; o guard nunca deve ser desabilitado.
