@@ -8006,6 +8006,24 @@ def _export_base_final(
         finally:
             store.close()
 
+    # Métricas de cobertura manual: observam somente registros não aceitos.
+    pending_for_review = out.loc[
+        ~out.apply(lambda r: _baseline_row_accepted(r, out), axis=1)
+    ]
+    manual_reference_titles = sum(
+        bool(safe(r.get("Título Real")) or safe(r.get("Título Referência")))
+        for _, r in pending_for_review.iterrows()
+    )
+    manual_sources = sum(
+        bool(safe(r.get("Fontes Pesquisa")))
+        for _, r in pending_for_review.iterrows()
+    )
+    LOG.info(
+        "BASE FINAL MANUAL EVIDENCE | pendentes=%d | com_titulo=%d | com_fontes=%d | sem_titulo=%d",
+        len(pending_for_review), manual_reference_titles, manual_sources,
+        len(pending_for_review) - manual_reference_titles,
+    )
+
     # GATE pré-gravação: presença no Excel não comprova estado de coleta.
     # O SQLite é a fonte oficial e RAW_OK nunca pode sair PENDENTE_COLETA.
     if cache_path and cache_path.exists() and input_rows_all:
