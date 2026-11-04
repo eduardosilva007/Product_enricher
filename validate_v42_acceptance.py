@@ -37,9 +37,20 @@ def validate(result_path: Path, gold_path: Path, sheet: str = "") -> pd.DataFram
     rcg = pp.find_col(result, ["Category General"])
     rf = pp.find_col(result, ["FAMILY", "Family"])
 
+    if gold.empty:
+        raise ValueError("GOLD_EMPTY")
+    if result.empty:
+        raise ValueError("RESULT_EMPTY")
+
     expected = {}
     for _, row in gold.iterrows():
         key = pp.business_key(pp.safe(row.get(gb)), pp.safe(row.get(gm)))
+        if not pp.safe(row.get(gb)).strip() or not pp.safe(row.get(gm)).strip():
+            raise ValueError("GOLD_MISSING_IDENTITY")
+        if key in expected:
+            raise ValueError(f"GOLD_DUPLICATE_KEY:{key}")
+        if not pp.safe(row.get(gcg)).strip() or not pp.safe(row.get(gf)).strip():
+            raise ValueError(f"GOLD_MISSING_TAXONOMY:{key}")
         expected[key] = {
             "Marca": pp.safe(row.get(gb)),
             "Modelo": pp.safe(row.get(gm)),
@@ -50,7 +61,9 @@ def validate(result_path: Path, gold_path: Path, sheet: str = "") -> pd.DataFram
     actual = {}
     for _, row in result.iterrows():
         key = pp.business_key(pp.safe(row.get(rb)), pp.safe(row.get(rm)))
-        if key in expected and key not in actual:
+        if key in expected:
+            if key in actual:
+                raise ValueError(f"RESULT_DUPLICATE_KEY:{key}")
             actual[key] = {
                 "Actual Category General": pp.safe(row.get(rcg)).upper(),
                 "Actual FAMILY": pp.safe(row.get(rf)).upper(),
