@@ -1,30 +1,26 @@
 ---
 name: classification-incident-auditor
-description: Diagnose classification failures by layer before any rule or alias change is attempted.
+description: Diagnose failures by layer, reproduce the exact symptom, and require regression tests before any rules/alias change.
 ---
 
 # Classification Incident Auditor
 
-## Goal
-Diagnose the failing layer before changing rules or aliases.
+Read GLOSSARY.md and invoke diagnosing-bugs procedure before modifying code.
 
-## Command
-```
-python tools/incident_auditor.py --result <xlsx>
-```
+Command:
+    python tools/incident_auditor.py --result <xlsx>
 
-## Incident classes
-- IDENTITY_ERROR
-- EVIDENCE_ERROR
-- ROLE_ERROR
-- RULE_ERROR
-- ENTITY_EXTRACTION_ERROR
-- SEMANTIC_RETRIEVAL_ERROR
-- RERANK_ERROR
-- DECISION_PROVIDER_ERROR
-- TAXONOMY_MAPPING_ERROR
-- OPERATIONAL_ERROR
+Classification classes:
+IDENTITY_ERROR, EVIDENCE_ERROR, ROLE_ERROR, RULE_ERROR,
+ENTITY_EXTRACTION_ERROR, SEMANTIC_RETRIEVAL_ERROR, RERANK_ERROR,
+DECISION_PROVIDER_ERROR, TAXONOMY_MAPPING_ERROR, OPERATIONAL_ERROR,
+OUTPUT_INTEGRITY_ERROR.
 
-## Policy
-Never fix a failing benchmark row with a SKU-specific production condition.
-Fix the class of failure and add a regression test covering the general behavior.
+For every incident:
+1. Capture a minimal input/product plus source data, redacting secrets.
+2. Reproduce the actual failing public boundary; test must fail on the observed symptom.
+3. Rank falsifiable hypotheses and identify the faulty layer.
+4. Fix the class of failure, never a benchmark-specific SKU exception.
+5. Run the new regression and original scenario; attach output comparison.
+
+If no red-capable repro exists, mark diagnosis unverified, not fixed.

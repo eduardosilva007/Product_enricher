@@ -24,6 +24,8 @@ def main() -> int:
     p.add_argument("--mode", choices=["local", "ci"], default="local")
     p.add_argument("--result", default="")
     p.add_argument("--gold", default="acceptance/v42_gladiator_10.csv")
+    p.add_argument("--input", default="")
+    p.add_argument("--final-output", default="")
     p.add_argument("--gliner-model", default="")
     p.add_argument("--provider", choices=["jev", "clef", "none"], default="jev")
     args = p.parse_args()
@@ -59,6 +61,20 @@ def main() -> int:
                     py, "tools/classification_eval.py",
                     "--result", args.result,
                     "--gold", args.gold,
+                ]),
+            ))
+
+    if all(ok for _, ok in results) and args.phase == "postrun":
+        if not args.input or not args.final_output:
+            print("POSTRUN requires --input <xlsx> and --final-output <xlsx>")
+            results.append(("Final Output Integrity", False))
+        else:
+            results.append((
+                "Final Output Integrity",
+                run("Final Output Integrity", [
+                    py, "tools/final_output_gate.py",
+                    "--input", args.input,
+                    "--final-output", args.final_output,
                 ]),
             ))
 
