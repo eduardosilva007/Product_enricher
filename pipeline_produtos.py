@@ -10047,6 +10047,8 @@ def run_baseline_repair(args: argparse.Namespace, cfg: Dict[str, Any], rules: Ru
         input_path=input_path,
         rules=rules,
         reprocess=False,
+        cache_path=Path(args.cache or cfg["files"]["cache"]),
+        cfg=cfg,
     )
     LOG.info(
         "REPARO BASE CONCLUÍDO SEM CLEF | %s",
