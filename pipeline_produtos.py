@@ -6557,6 +6557,10 @@ BASELINE_FINAL_COLUMNS = [
     "Título Referência Identity",
     "Sugestão Category General",
     "Sugestão FAMILY",
+    "Fontes Pesquisa",
+    "Resumo Evidências",
+    "Fontes Encontradas",
+    "Qualidade Referência",
 ]
 
 BASELINE_MASTER_FIELDS = [
@@ -7513,6 +7517,56 @@ def _atomic_write_dataframe(df: Any, path: Path, sheet_name: str) -> None:
         raise
 
 
+
+def _manual_review_bundle(raw: RawEvidence) -> Dict[str, str]:
+    """Exporta fontes do cache para revisão humana, mesmo rejeitadas; não aprova AUTO."""
+    payload = raw.payload or {}
+    coll = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
+    results = [r for r in (payload.get("results") or []) if isinstance(r, dict)]
+    audits = {_url_key(r.get("url", "")): r for r in (coll.get("source_audit") or [])
+              if isinstance(r, dict) and _url_key(r.get("url", ""))}
+    evidence = [r for r in (coll.get("evidence_cache") or []) if isinstance(r, dict)]
+    evidence_by_url = {_url_key(r.get("url", "")): r for r in evidence if _url_key(r.get("url", ""))}
+    rows = []
+    source = results[:10] if results else evidence[:10]
+    for n, item in enumerate(source, 1):
+        url = safe(item.get("url"))
+        ev = evidence_by_url.get(_url_key(url), item if not results else {})
+        au = audits.get(_url_key(url), {})
+        rows.append({
+            "n": n,
+            "title": (safe(item.get("title")) or safe(ev.get("title")))[:500],
+            "url": url[:1200],
+            "identity": safe(ev.get("identity") or au.get("identity_after")) or "NAO_VERIFICADA",
+            "decision": safe(au.get("decision") or ev.get("decision")) or "NAO_AVALIADA",
+            "tier": safe(ev.get("tier")) or "NAO_CURADA",
+            "snippet": (safe(item.get("content")) or safe(ev.get("snippet")) or safe(ev.get("evidence_excerpt")))[:800],
+        })
+    hard_reject = {"REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY"}
+    rank = {"STRONG": 4, "PROBABLE": 3, "CONTEXTUAL": 2, "WEAK": 1}
+    titled = [r for r in rows if r["title"]]
+    titled.sort(key=lambda r: (
+        r["decision"] not in hard_reject,
+        rank.get(r["identity"], 0),
+        r["tier"] == "PRIMARY",
+        -r["n"],
+    ), reverse=True)
+    best = titled[0] if titled else {}
+    summary = [
+        f'[{r["n"]}] {r["title"] or "(sem titulo)"} | {r["identity"]} | {r["decision"]} | {r["url"]} | {r["snippet"]}'
+        for r in rows
+    ]
+    return {
+        "Título Referência": safe(best.get("title")),
+        "Fonte Referência URL": safe(best.get("url")),
+        "Título Referência Identity": safe(best.get("identity")),
+        "Qualidade Referência": safe(best.get("decision")),
+        "Fontes Pesquisa": json.dumps(rows, ensure_ascii=False)[:32000],
+        "Resumo Evidências": "\n".join(summary)[:32000],
+        "Fontes Encontradas": str(len(rows)),
+    }
+
+
 def _export_base_final(
     master_df: Any,
     final_path: Path,
@@ -7931,6 +7985,17 @@ def _export_base_final(
                         out.at[idx, "Status Coleta"] = "COLETADO_SEM_EVIDENCIA_ALVO"
                     else:
                         out.at[idx, "Status Coleta"] = "COLETADO_RAW_DISPONIVEL"
+                    # Evidências para atuação manual, inclusive fontes rejeitadas.
+                    if not _baseline_row_accepted(rec, out):
+                        bundle = _manual_review_bundle(raw)
+                        for field in ("Fontes Pesquisa", "Resumo Evidências",
+                                      "Fontes Encontradas", "Qualidade Referência"):
+                            if bundle.get(field):
+                                out.at[idx, field] = bundle[field]
+                        for field in ("Título Referência", "Fonte Referência URL",
+                                      "Título Referência Identity"):
+                            if not safe(rec.get(field)) and bundle.get(field):
+                                out.at[idx, field] = bundle[field]
                     if not classified(rec) and safe(rec.get("Revisão")).upper() in {
                         "PENDENTE_COLETA", "PENDENTE", "PENDENTE_CLASSIFICACAO",
                         "PENDENTE_RECOLETA", "REVISAR"
@@ -8136,10 +8201,8 @@ def _hydrate_input_collection_from_cache(
                     LOG.warning("CACHE TITLE REFERENCE SKIPPED | %s %s | %s",
                                 item.brand_original, item.model_original, exc)
                     continue
-                if (safe(title) and safe(identity).upper() in {"STRONG", "PROBABLE"}
-                        and safe(decision).upper() not in {
-                            "REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY"
-                        }):
+                # O título de referência auxilia revisão; não determina AUTO.
+                if safe(title):
                     master_df.at[idx, "Título Referência"] = title
                     master_df.at[idx, "Fonte Referência URL"] = url
                     master_df.at[idx, "Título Referência Identity"] = identity
