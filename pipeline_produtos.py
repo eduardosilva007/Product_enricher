@@ -7952,17 +7952,16 @@ def _export_base_final(
     )
     LOG.info("BASE FINAL EQUIVALENCIA BI | herdados=%d | conflitos=%d", inherited, len(conflict_keys))
 
-    # Espelha o estado autoritativo do SQLite em TODAS as grafias da entrada,
+    # Espelha o SQLite em todos os produtos não aceitos da Base Final,
     # inclusive aliases que não receberam os campos do Consolidado.
-    if cache_path and cache_path.exists() and input_rows_all:
+    if cache_path and cache_path.exists():
         store = TavilyReadOnlyStore(cache_path)
         try:
-            input_keys = {item.key for item in input_rows_all if item.valid}
             for idx, rec in out.iterrows():
                 brand, model = safe(rec.get("Marca")), safe(rec.get("Modelo"))
-                if business_key(brand, model) not in input_keys:
-                    continue
-                if _is_bi_ok_value(rec.get("Revisão B.I")) or safe(rec.get("Status")).upper() == "MANUAL":
+                if (_is_bi_ok_value(rec.get("Revisão B.I"))
+                        or safe(rec.get("Status")).upper() == "MANUAL"
+                        or _baseline_row_accepted(rec, out)):
                     continue
                 raw = store.get(brand, model)
                 if raw.state == "RAW_EMPTY":
