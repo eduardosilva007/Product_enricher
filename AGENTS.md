@@ -24,3 +24,7 @@ Treat .agents/skills as the source of operational procedures.
 7. Never merge or run long classification jobs if the release gate is BLOCKED.
 
 See .agents/skills/diagnosing-bugs/SKILL.md and .agents/skills/code-review/SKILL.md.
+
+## Supporting engineering policies
+Read docs/agent_engineering_rules.md for legacy-code, data consistency and release reliability.
+Read docs/benchmark_protocol.md before training or evaluating model changes.
