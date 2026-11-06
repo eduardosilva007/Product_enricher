@@ -148,7 +148,7 @@ class CachedEvidenceReviewTests(unittest.TestCase):
         meta = {key: {"rules_hash": "current", "pipeline_version": p.PIPELINE_VERSION}}
         self.assertEqual(p._cache_recovery_reason(df.iloc[0], df, key, meta, rules), "")
 
-    def test_recovery_skips_reviewed_cache_with_same_rules(self):
+    def test_recovery_keeps_reviewed_cache_eligible_with_same_rules(self):
         from types import SimpleNamespace
         rules = SimpleNamespace(hash="current", version="test")
         key = p.business_key("ACQUA LIFE", "SPRAYER 02")
@@ -158,7 +158,7 @@ class CachedEvidenceReviewTests(unittest.TestCase):
             "Revisão B.I": "", "Status": "Script",
         }])
         meta = {key: {"rules_hash": "current", "pipeline_version": p.PIPELINE_VERSION}}
-        self.assertEqual(p._cache_recovery_reason(df.iloc[0], df, key, meta, rules), "")
+        self.assertEqual(p._cache_recovery_reason(df.iloc[0], df, key, meta, rules), "PENDENCIA_ATUAL")
         meta[key]["rules_hash"] = "previous"
         self.assertEqual(p._cache_recovery_reason(df.iloc[0], df, key, meta, rules), "PENDENCIA_ATUAL")
 
