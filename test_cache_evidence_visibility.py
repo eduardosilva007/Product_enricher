@@ -107,6 +107,34 @@ class CachedEvidenceReviewTests(unittest.TestCase):
             self.assertTrue(result["Título Referência"])
             self.assertEqual(result["Próxima Ação"], "REVISAR_EVIDENCIA_CACHE")
 
+    def test_sync_final_restores_accepted_record_over_stale_master_review(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "Base Final.xlsx"
+            final_row = {
+                "Marca": "MAKITA", "Modelo": "HG6030",
+                "Status": "Script", "Revisão": "AUTO_APROVADO",
+                "Revisão B.I": "", "Resolution State": "RESOLVED",
+                "Status Processamento": "PROCESSADO",
+                "Review Required": "NÃO",
+                "O que é (Tipo)": "HEAT GUN",
+                "Category General": "OTHERS", "FAMILY": "HEAT GUN",
+            }
+            pd.DataFrame([final_row]).to_excel(final, index=False)
+            old = dict(final_row)
+            old.update({
+                "Revisão": "REVISAR",
+                "Resolution State": "REVIEW_CACHE_EVIDENCE",
+                "Status Processamento": "REVIEW_CACHE_EVIDENCE",
+                "Review Required": "SIM",
+            })
+            master = pd.DataFrame([old])
+            merged, _ = p._sync_final_into_master(master, final, "Marca", "Modelo")
+            self.assertTrue(p._baseline_row_accepted(merged.iloc[0], merged))
+            self.assertEqual(merged.iloc[0]["Resolution State"], "RESOLVED")
+            self.assertEqual(merged.iloc[0]["Review Required"], "NÃO")
+
     def test_recovery_skips_cached_clef_proposal_without_final_version_column(self):
         from types import SimpleNamespace
         rules = SimpleNamespace(hash="current", version="test")
