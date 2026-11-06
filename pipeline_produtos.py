@@ -3355,6 +3355,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 # Nunca substituir RAW com fontes por uma recoleta que retornou zero.
                 preserve_previous = prior_state in {"RAW_OK", "RAW_OK_MERGED"} and raw_n == 0
                 if preserve_previous:
+                    state = "RECOLLECTION_EMPTY_PREVIOUS_PRESERVED"
                     db.event(run_id, key, "RECOLLECTION_EMPTY_OLD_CACHE_PRESERVED",
                              f"provider={provider}; new_raw=0; previous={prior_state}")
                     LOG.warning("RECOLETA VAZIA: preservando cache anterior de %s %s", brand, model)
