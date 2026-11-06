@@ -1167,7 +1167,16 @@ def build_precollection_plan(
     cfg: Optional[Dict[str, Any]] = None,
     max_tavily_new: int = 0,
 ) -> PreCollectionPlan:
-    """Normaliza/deduplica/cruza cache. NÃO consulta Tavily."""
+    """Normaliza/deduplica/cruza cache. NÃO consulta Tavily.
+
+    Reconsultar RAW_EMPTY ou evidência fraca é proibido nesta política:
+    uma busca já paga não volta à fila por insuficiência de classificação.
+    """
+    if recollect_empty or recollect_low_evidence:
+        raise ValueError(
+            "RECOLLECTION_DISABLED: RAW_EMPTY e RAW existente devem ser revisados "
+            "a partir do cache, sem uma segunda pesquisa."
+        )
     rows = read_input_rows(input_path)
 
     groups: Dict[str, List[InputProductRow]] = defaultdict(list)
@@ -1217,8 +1226,8 @@ def build_precollection_plan(
                     rep.action = "RAW_EMPTY_PULADO"
                     rep.reason = "RAW vazio preservado; use --recollect-empty para nova consulta"
             elif raw.state == "RAW_CORRUPT":
-                rep.action = "RECOLETAR"
-                rep.reason = "RAW corrompido"
+                rep.action = "REVISAR_PRECOLETA"
+                rep.reason = "RAW corrompido; nao gastar nova request sem auditoria"
             elif raw.state == "RAW_MISSING":
                 rep.action = "NOVA_COLETA"
                 rep.reason = "business_key não encontrada no cache"
@@ -8890,7 +8899,8 @@ def build_cache_recovery_plan(
             }.get(coll_state, 1 if curated_count else 2)
             target_ranked.append((state_priority, brand, model, key))
         else:
-            rec["Ação"] = "PENDENTE_COLETA"
+            rec["Ação"] = ("PENDENTE_COLETA" if raw.state == "RAW_MISSING"
+                           else "REVISAR_CACHE_EXISTENTE")
             without_cache.append(rec)
 
     _export_recovery_report(with_cache, with_cache_path, "Pendentes_Com_Cache")
