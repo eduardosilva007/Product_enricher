@@ -162,18 +162,58 @@ class CachedEvidenceReviewTests(unittest.TestCase):
         meta[key]["rules_hash"] = "previous"
         self.assertEqual(p._cache_recovery_reason(df.iloc[0], df, key, meta, rules), "PENDENCIA_ATUAL")
 
-    def test_recollection_flags_are_rejected_before_any_search(self):
+    def test_recollection_is_opt_in_and_only_targets_unresolved(self):
+        import tempfile
         from pathlib import Path
-        with self.assertRaisesRegex(ValueError, "RECOLLECTION_DISABLED"):
-            p.build_precollection_plan(
-                Path("unused_input.xlsx"), Path("unused_cache.sqlite"),
-                Path("unused_report.xlsx"), recollect_empty=True,
+        from unittest.mock import patch
+
+        brand, model = "ACQUA LIFE", "SPRAYER 02"
+        key = p.business_key(brand, model)
+
+        def input_row():
+            return p.InputProductRow(
+                row_number=2, brand_original=brand, model_original=model,
+                brand_canonical=brand, model_canonical=model, key=key,
+                valid=True,
             )
-        with self.assertRaisesRegex(ValueError, "RECOLLECTION_DISABLED"):
-            p.build_precollection_plan(
-                Path("unused_input.xlsx"), Path("unused_cache.sqlite"),
-                Path("unused_report.xlsx"), recollect_low_evidence=True,
-            )
+
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td) / "cache.sqlite"
+            cache.touch()
+            report = Path(td) / "plan.xlsx"
+            with patch.object(p, "read_input_rows", side_effect=lambda _: [input_row()]), \\
+                 patch.object(p, "TavilyReadOnlyStore") as store_cls, \\
+                 patch.object(p, "export_precollection_report"):
+                store_cls.return_value.get.return_value = p.RawEvidence(
+                    "RAW_EMPTY", brand, model, payload={"results": []},
+                )
+                default = p.build_precollection_plan(
+                    Path("input.xlsx"), cache, report,
+                )
+                self.assertEqual(len(default.candidates), 0)
+                requested = p.build_precollection_plan(
+                    Path("input.xlsx"), cache, report, recollect_empty=True,
+                )
+                self.assertEqual([r.key for r in requested.candidates], [key])
+                protected = p.build_precollection_plan(
+                    Path("input.xlsx"), cache, report, recollect_empty=True,
+                    preserve_keys={key},
+                )
+                self.assertEqual(len(protected.candidates), 0)
+                self.assertEqual(protected.representatives[0].action, "CLASSIFICADO_PRESERVADO")
+
+                store_cls.return_value.get.return_value = p.RawEvidence(
+                    "RAW_OK", brand, model, payload={"results": [{"title": "unverified"}]},
+                )
+                with patch.object(p, "_payload_target_evidence_level", return_value="WEAK"):
+                    low = p.build_precollection_plan(
+                        Path("input.xlsx"), cache, report, recollect_low_evidence=True, cfg={},
+                    )
+                    self.assertEqual([r.key for r in low.candidates], [key])
+                    default_low = p.build_precollection_plan(
+                        Path("input.xlsx"), cache, report, cfg={},
+                    )
+                    self.assertEqual(len(default_low.candidates), 0)
 
     def test_raw_empty_no_longer_marks_recollection(self):
         rec = p.record_for_raw_state(p.RawEvidence("RAW_EMPTY", "ACQUA LIFE", "SPRAYER 02"))
