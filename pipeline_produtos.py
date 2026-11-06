@@ -7312,6 +7312,14 @@ def _sync_final_into_master(
                     master_df.at[idx, "Status"] = "Manual"
                     stats["final_manual_promoted"] += 1
                 else:
+                    # A Base Final e autoridade para uma classificacao tecnicamente
+                    # aceita. Um estado antigo de REVIEW/PENDING no Consolidado
+                    # nao pode rebaixar um registro aceito durante a reconciliacao.
+                    # src_accepted ja passou pelo gate de taxonomia completa,
+                    # excluindo os casos sem classificacao/hard locks humanos.
+                    master_df.at[idx, "Resolution State"] = "RESOLVED"
+                    master_df.at[idx, "Status Processamento"] = "PROCESSADO"
+                    master_df.at[idx, "Review Required"] = "NÃO"
                     stats["final_baseline_preserved"] += 1
             continue
 
@@ -7328,6 +7336,10 @@ def _sync_final_into_master(
             _copy_business_values(src, final_df, master_df, idx)
             if frbi:
                 master_df.at[idx, "Revisão B.I"] = src.get(frbi)
+            if src_accepted and not src_manual:
+                master_df.at[idx, "Resolution State"] = "RESOLVED"
+                master_df.at[idx, "Status Processamento"] = "PROCESSADO"
+                master_df.at[idx, "Review Required"] = "NÃO"
         stats["final_rows_imported"] += 1
 
     return master_df, stats
