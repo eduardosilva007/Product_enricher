@@ -3338,16 +3338,23 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                     )
                 total_requests += req_count
                 state = safe(coll.get("state")) or "NO_TARGET_EVIDENCE"
-                writer.put(
-                    brand, model, payload,
-                    archive_reason=(
-                        f"RECOLLECT_{provider.upper()}_{COLLECTION_LABEL}"
-                        if prior_state in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}
-                        else f"COLLECT_{provider.upper()}_{COLLECTION_LABEL}"
-                    ),
-                )
                 curated = coll.get("curated_results", []) or []
                 raw_n = len(payload.get("results", []) or [])
+                # Nunca substituir RAW com fontes por uma recoleta que retornou zero.
+                preserve_previous = prior_state in {"RAW_OK", "RAW_OK_MERGED"} and raw_n == 0
+                if preserve_previous:
+                    db.event(run_id, key, "RECOLLECTION_EMPTY_OLD_CACHE_PRESERVED",
+                             f"provider={provider}; new_raw=0; previous={prior_state}")
+                    LOG.warning("RECOLETA VAZIA: preservando cache anterior de %s %s", brand, model)
+                else:
+                    writer.put(
+                        brand, model, payload,
+                        archive_reason=(
+                            f"RECOLLECT_{provider.upper()}_{COLLECTION_LABEL}"
+                            if prior_state in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}
+                            else f"COLLECT_{provider.upper()}_{COLLECTION_LABEL}"
+                        ),
+                    )
                 reported_credits = usage.get("reported_credits")
                 product_rows.append({
                     "Marca": brand, "Modelo": model, "Search Model": safe(coll.get("search_model")),
@@ -3492,6 +3499,12 @@ def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], r
                 continue
             rebuilt = _curate_existing_payload(brand, model, raw.payload, cfg)
             coll = rebuilt.get("_collection", {}) or {}
+            old_curated = len((existing or {}).get("curated_results", []) or []) if isinstance(existing, dict) else 0
+            new_curated = len(coll.get("curated_results", []) or [])
+            if new_curated < old_curated:
+                LOG.warning("CURADORIA SEM GRAVAR | %s %s | fontes antigas=%d novas=%d",
+                            brand, model, old_curated, new_curated)
+                continue
             writer.put(brand, model, rebuilt, archive_reason="CACHE_CURATED_R9_6P7_2_NO_SEARCH")
             products.append({
                 "Marca": brand, "Modelo": model, "Search Model": coll.get("search_model"),
