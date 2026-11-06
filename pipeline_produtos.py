@@ -7916,8 +7916,8 @@ def _export_base_final(
     # reinferir colunas inteiramente vazias como float64. O dtype deve ser
     # garantido neste DataFrame FINAL, imediatamente antes das atribuições
     # de hipóteses textuais em CLASSIFICATION INTEGRITY.
-    for suggestion_col in ("Sugestão Category General", "Sugestão FAMILY"):
-        out[suggestion_col] = out[suggestion_col].astype("object")
+    # Preservar strings apos concat de linhas adicionais da entrada.
+    out = out.astype("object")
     physical_counts = Counter((safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"]))
     missing_lines = {pair: n - physical_counts.get(pair, 0) for pair, n in input_counts.items()
                      if physical_counts.get(pair, 0) < n}
