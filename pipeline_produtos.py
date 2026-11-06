@@ -9162,14 +9162,16 @@ def run_pipeline(
             clef_model = safe(cfg.get("jev", {}).get("model")) or "jev-latest"
         if llm_provider != "local":
             provider_cfg = dict(cfg.get(llm_provider, {}) or {})
-            max_calls = int(getattr(args, "max_api_calls", 0) or provider_cfg.get("max_api_calls_per_run", 0) or 100)
-            max_tokens = int(getattr(args, "max_tokens", 0) or provider_cfg.get("max_total_tokens_per_run", 0) or 500000)
-            if max_calls <= 0 or max_tokens <= 0:
-                raise ValueError("Limites JEV/Clef devem ser positivos.")
+            # Zero means unrestricted; explicit CLI/config limits are still respected.
+            max_calls = int(getattr(args, "max_api_calls", 0) or provider_cfg.get("max_api_calls_per_run", 0) or 0)
+            max_tokens = int(getattr(args, "max_tokens", 0) or provider_cfg.get("max_total_tokens_per_run", 0) or 0)
+            if max_calls < 0 or max_tokens < 0:
+                raise ValueError("Limites HTTP/tokens nao podem ser negativos.")
             provider_cfg["max_api_calls_per_run"] = max_calls
             provider_cfg["max_total_tokens_per_run"] = max_tokens
             cfg[llm_provider] = provider_cfg
-            LOG.info("LLM BUDGET | provider=%s | http_cap=%d | tokens_cap=%d", llm_provider, max_calls, max_tokens)
+            LOG.info("LLM BUDGET | provider=%s | http_cap=%s | tokens_cap=%s",
+                     llm_provider, max_calls or "SEM_LIMITE", max_tokens or "SEM_LIMITE")
         clef_identity = f"{llm_provider}:{clef_model if llm_provider != 'local' else 'rules-only'}"
         db = ClassificationDB(db_path)
         run_id = db.start_run(args.mode, rules.hash, clef_identity)
@@ -9887,7 +9889,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _menu_limit(prompt: str) -> int:
-    """ENTER/TODOS=sem limite de produtos; orçamento de API continua independente."""
+    """ENTER/TODOS=sem limite de produtos."""
     while True:
         raw = input(prompt).strip().upper()
         if not raw or raw == "TODOS":
@@ -9895,22 +9897,6 @@ def _menu_limit(prompt: str) -> int:
         if raw.isdecimal() and int(raw) > 0:
             return int(raw)
         print("Informe inteiro positivo ou pressione ENTER para todos.")
-
-
-def _menu_budget_args(provider: str) -> List[str]:
-    if provider == "local":
-        return []
-    def positive(prompt: str, default: int) -> int:
-        while True:
-            raw = input(f"{prompt} (ENTER={default}): ").strip()
-            if not raw:
-                return default
-            if raw.isdecimal() and int(raw) > 0:
-                return int(raw)
-            print("Informe inteiro positivo.")
-    calls = positive("Teto de tentativas HTTP LLM (inclui retries)", 100)
-    tokens = positive("Teto de tokens LLM", 500000)
-    return ["--max-api-calls", str(calls), "--max-tokens", str(tokens)]
 
 
 def _menu_search_provider() -> str:
@@ -9977,7 +9963,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     if op == "2":
         limite = _menu_limit("Limite de produtos para piloto (ENTER = todos): ")
         llm = _menu_llm_provider()
-        argv = ["--mode", "classify", "--llm-provider", llm] + _menu_budget_args(llm)
+        argv = ["--mode", "classify", "--llm-provider", llm]
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
@@ -9986,7 +9972,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         limite_search = _menu_limit("Limite de produtos na coleta (ENTER = todos): ")
         limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
         llm = _menu_llm_provider()
-        argv = ["--mode", "full", "--search-provider", provider, "--llm-provider", llm] + _menu_budget_args(llm)
+        argv = ["--mode", "full", "--search-provider", provider, "--llm-provider", llm]
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
             argv += ["--recollect-low-evidence"]
@@ -9998,7 +9984,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     if op == "4":
         limite = _menu_limit("Limite de pendências COM CACHE para reprocessar (ENTER = todas): ")
         llm = _menu_llm_provider()
-        argv = ["--mode", "recover", "--llm-provider", llm] + _menu_budget_args(llm)
+        argv = ["--mode", "recover", "--llm-provider", llm]
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
