@@ -68,6 +68,19 @@ class CachedEvidenceReviewTests(unittest.TestCase):
         result = p._expected_cohort_accepted_after_run({key}, set(), [accepted])
         self.assertEqual(result, {key})
 
+    def test_recollection_flags_are_rejected_before_any_search(self):
+        from pathlib import Path
+        with self.assertRaisesRegex(ValueError, "RECOLLECTION_DISABLED"):
+            p.build_precollection_plan(
+                Path("unused_input.xlsx"), Path("unused_cache.sqlite"),
+                Path("unused_report.xlsx"), recollect_empty=True,
+            )
+        with self.assertRaisesRegex(ValueError, "RECOLLECTION_DISABLED"):
+            p.build_precollection_plan(
+                Path("unused_input.xlsx"), Path("unused_cache.sqlite"),
+                Path("unused_report.xlsx"), recollect_low_evidence=True,
+            )
+
     def test_raw_empty_no_longer_marks_recollection(self):
         rec = p.record_for_raw_state(p.RawEvidence("RAW_EMPTY", "ACQUA LIFE", "SPRAYER 02"))
         self.assertEqual(rec["Resolution State"], "REVIEW_NO_RESULTS")
