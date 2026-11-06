@@ -1166,6 +1166,7 @@ def build_precollection_plan(
     recollect_low_evidence: bool = False,
     cfg: Optional[Dict[str, Any]] = None,
     max_tavily_new: int = 0,
+    preserve_keys: Optional[set] = None,
 ) -> PreCollectionPlan:
     """Normaliza/deduplica/cruza cache sem rede.
 
@@ -1179,6 +1180,7 @@ def build_precollection_plan(
         if row.valid:
             groups[row.key].append(row)
 
+    protected = set(preserve_keys or ())
     representatives: List[InputProductRow] = []
     for _, grp in groups.items():
         total = len(grp)
@@ -1230,6 +1232,10 @@ def build_precollection_plan(
                 rep.action = "REVISAR_PRECOLETA"
                 rep.reason = f"Estado RAW inesperado: {raw.state}"
 
+            if rep.key in protected and rep.action in {"RECOLETAR", "RECOLETAR_LOW_EVIDENCE"}:
+                rep.action = "CLASSIFICADO_PRESERVADO"
+                rep.reason = "SKU classificado ou revisado; não sobrescrever a coleta existente"
+
         rep_by_key = {r.key: r for r in representatives}
         for row in rows:
             if not row.valid:
@@ -1269,6 +1275,7 @@ def build_precollection_plan(
         "RAW_CORRUPT": raw_counts["RAW_CORRUPT"],
         "RAW_MISSING": raw_counts["RAW_MISSING"],
         "Já no cache": action_counts["JA_NO_CACHE"],
+        "Classificados preservados na recoleta": action_counts["CLASSIFICADO_PRESERVADO"],
         "Recoleta LOW_TARGET_EVIDENCE": action_counts["RECOLETAR_LOW_EVIDENCE"],
         "RAW vazio pulado": action_counts["RAW_EMPTY_PULADO"],
         "Fila real Tavily antes do limite": len(candidates_all),
@@ -3271,10 +3278,15 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     pre_report = Path(args.precollection_output or cfg.get("files", {}).get("precollection_report", "Pre_Coleta_R9_6.xlsx"))
     report_path = Path(cfg.get("files", {}).get("collection_report", "Coleta_Search_R9_6.xlsx"))
 
+    files_cfg = cfg.get("files", {}) or {}
+    master = Path(args.master or files_cfg.get("master", "")) if (args.master or files_cfg.get("master")) else None
+    final = Path(args.final or files_cfg.get("final", "")) if (args.final or files_cfg.get("final")) else None
+    protected_keys = load_baseline_inventory(master, final)["processed"]
     plan = build_precollection_plan(
         input_path=input_path, cache_path=cache_path, report_path=pre_report,
         recollect_empty=bool(args.recollect_empty), recollect_low_evidence=bool(args.recollect_low_evidence),
         cfg=cfg, max_tavily_new=int(args.max_tavily_new or 0),
+        preserve_keys=protected_keys,
     )
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
 
