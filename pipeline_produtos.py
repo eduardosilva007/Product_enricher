@@ -9833,14 +9833,14 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
-        limite = _menu_limit("Limite de produtos para coleta (ENTER = todos): ")
+        # Diferente do piloto de classificacao (ENTER=100), coleta em branco
+        # significa SEM LIMITE. A lista exata de requests e confirmada antes
+        # de qualquer chamada; RAW ja consultado nunca entra automaticamente.
+        raw_limit = input("Limite de produtos para coleta (ENTER = todos; 0 buscas para itens ja consultados): ").strip().upper()
+        if raw_limit and raw_limit != "TODOS" and (not raw_limit.isdecimal() or int(raw_limit) <= 0):
+            raise ValueError("Limite de coleta deve ser inteiro positivo ou TODOS/ENTER")
+        limite = int(raw_limit) if raw_limit and raw_limit != "TODOS" else 0
         argv = ["--mode", "collect", "--search-provider", provider]
-        low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
-        if low == "S":
-            argv += ["--recollect-low-evidence"]
-        empty = input("Recoletar RAW_EMPTY já consultado? Consome nova busca por produto (S/N): ").strip().upper()
-        if empty == "S":
-            argv += ["--recollect-empty"]
         if limite:
             argv += ["--max-search-new", str(limite)]
         return parser.parse_args(argv)
