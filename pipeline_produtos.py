@@ -9851,19 +9851,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _menu_limit(prompt: str) -> int:
-    """ENTER=100; TODOS exige confirmacao explicita."""
+    """ENTER/TODOS=sem limite de produtos; orçamento de API continua independente."""
     while True:
         raw = input(prompt).strip().upper()
-        if not raw:
-            return 100
-        if raw == "TODOS":
-            if input("Digite CONFIRMAR para executar sem limite: ").strip().upper() == "CONFIRMAR":
-                return 0
-            print("Confirmacao nao recebida.")
-            continue
+        if not raw or raw == "TODOS":
+            return 0
         if raw.isdecimal() and int(raw) > 0:
             return int(raw)
-        print("Informe inteiro positivo ou TODOS.")
+        print("Informe inteiro positivo ou pressione ENTER para todos.")
 
 
 def _menu_budget_args(provider: str) -> List[str]:
