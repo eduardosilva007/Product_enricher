@@ -3525,9 +3525,13 @@ def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], r
             coll = rebuilt.get("_collection", {}) or {}
             old_curated = len((existing or {}).get("curated_results", []) or []) if isinstance(existing, dict) else 0
             new_curated = len(coll.get("curated_results", []) or [])
-            if new_curated < old_curated:
-                LOG.warning("CURADORIA SEM GRAVAR | %s %s | fontes antigas=%d novas=%d",
-                            brand, model, old_curated, new_curated)
+            old_quality = (existing or {}).get("evidence_cache_quality", {}) if isinstance(existing, dict) else {}
+            new_quality = coll.get("evidence_cache_quality", {}) or {}
+            old_chars = int((old_quality or {}).get("evidence_chars_total", 0) or 0)
+            new_chars = int((new_quality or {}).get("evidence_chars_total", 0) or 0)
+            if new_curated < old_curated or (new_curated == old_curated and new_chars < old_chars):
+                LOG.warning("CURADORIA SEM GRAVAR | %s %s | fonte(s) %d->%d | evidencia %d->%d caracteres",
+                            brand, model, old_curated, new_curated, old_chars, new_chars)
                 continue
             writer.put(brand, model, rebuilt, archive_reason="CACHE_CURATED_R9_6P7_2_NO_SEARCH")
             products.append({
