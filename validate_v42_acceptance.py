@@ -15,12 +15,12 @@ import pipeline_produtos as pp
 def _find_output_sheet(path: Path, requested: str = "") -> pd.DataFrame:
     if requested:
         return pd.read_excel(path, sheet_name=requested, dtype=object)
-    book = pd.ExcelFile(path)
+    # Abertura sem 'with' deixava handles abertos no Windows e impedia
+    # TemporaryDirectory.cleanup() apos testes de contrato.
     preferred = ["Resultados", "Resultado", "Sem GLiNER", "Com GLiNER", "Classificação", "Classificacao"]
-    for name in preferred:
-        if name in book.sheet_names:
-            return pd.read_excel(path, sheet_name=name, dtype=object)
-    return pd.read_excel(path, sheet_name=book.sheet_names[0], dtype=object)
+    with pd.ExcelFile(path) as book:
+        selected = next((name for name in preferred if name in book.sheet_names), book.sheet_names[0])
+        return pd.read_excel(book, sheet_name=selected, dtype=object)
 
 
 def validate(result_path: Path, gold_path: Path, sheet: str = "") -> pd.DataFrame:
