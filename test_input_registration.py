@@ -18,7 +18,7 @@ class InputRegistrationTests(unittest.TestCase):
         gaps = [b - a for a, b in zip(instants, instants[1:])]
         self.assertTrue(all(g >= 0.035 for g in gaps), gaps)
 
-    def test_cohort_counts_complete_clef_candidates_without_bi_approval(self):
+    def test_cohort_does_not_count_unapproved_clef_candidates_as_accepted(self):
         key = p.business_key("MAKITA", "HG6030")
         rec = {
             "Marca": "MAKITA", "Modelo": "HG6030",
@@ -28,7 +28,7 @@ class InputRegistrationTests(unittest.TestCase):
             "Review Required": "SIM",
         }
         got = p._expected_cohort_accepted_after_run({key}, set(), [rec])
-        self.assertEqual(got, {key})
+        self.assertEqual(got, set())  # CLASSIFIED_CLEF -> proposta, não aceito
         rec["FAMILY"] = ""
         self.assertEqual(p._expected_cohort_accepted_after_run({key}, set(), [rec]), set())
 
