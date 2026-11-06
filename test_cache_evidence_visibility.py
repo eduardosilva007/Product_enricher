@@ -42,6 +42,32 @@ class CachedEvidenceReviewTests(unittest.TestCase):
         self.assertIn("Fonte 9 sprayer 02", bundle["Resumo Evidências"])
         self.assertIn("Descrição visível 0", bundle["Resumo Evidências"])
 
+    def test_cohort_gate_does_not_count_clef_proposal_as_accepted(self):
+        key = p.business_key("STIHL", "FS120")
+        clef_proposal = {
+            "Marca": "STIHL", "Modelo": "FS120",
+            "Resolution State": "CLASSIFIED_CLEF",
+            "O que é (Tipo)": "BRUSHCUTTER",
+            "Category General": "PETROL HANDHELD", "FAMILY": "BRUSHCUTTER",
+            "Título Real": "STIHL FS 120",
+            "Review Required": "SIM",
+        }
+        result = p._expected_cohort_accepted_after_run({key}, set(), [clef_proposal])
+        self.assertEqual(result, set())
+
+    def test_cohort_gate_counts_resolved_accepted_record(self):
+        key = p.business_key("STIHL", "FS120")
+        accepted = {
+            "Marca": "STIHL", "Modelo": "FS120",
+            "Resolution State": "RESOLVED", "Review Required": "NAO",
+            "Classification Identity": "STRONG",
+            "O que é (Tipo)": "BRUSHCUTTER",
+            "Category General": "PETROL HANDHELD", "FAMILY": "BRUSHCUTTER",
+            "Título Real": "STIHL FS 120",
+        }
+        result = p._expected_cohort_accepted_after_run({key}, set(), [accepted])
+        self.assertEqual(result, {key})
+
     def test_raw_empty_no_longer_marks_recollection(self):
         rec = p.record_for_raw_state(p.RawEvidence("RAW_EMPTY", "ACQUA LIFE", "SPRAYER 02"))
         self.assertEqual(rec["Resolution State"], "REVIEW_NO_RESULTS")
