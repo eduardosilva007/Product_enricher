@@ -9513,6 +9513,10 @@ def run_pipeline(
             # execução NÃO pode retornar exit code 0 se o baseline divergiu.
             if baseline_warning:
                 raise RuntimeError("BASELINE_PERSISTENCE_FAILED: " + baseline_warning)
+            # Um cap de API ou pausa operacional pode deixar o lote incompleto.
+            # Nao gravar todas as chaves no ledger de retomada nessa situacao.
+            if paused_reason:
+                raise RuntimeError("RECOVERY_BATCH_PAUSED: " + paused_reason)
 
         except KeyboardInterrupt:
             try:
