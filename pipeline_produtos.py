@@ -8853,6 +8853,7 @@ def build_cache_recovery_plan(
     cfg: Dict[str, Any],
     max_items: int = 0,
     include_stale_auto: bool = False,
+    exclude_keys: Optional[set] = None,
 ) -> Tuple[List[Tuple[str, str, str]], Dict[str, int]]:
     """Pendencias do cache; aprovados tecnicos antigos somente com opt-in."""
     source = final_path if final_path and final_path.exists() else master_path
@@ -8960,8 +8961,14 @@ def build_cache_recovery_plan(
 
     target_ranked.sort(key=lambda x: (x[0], business_key(x[1], x[2])))
     target_all = [(brand, model, key) for _, brand, model, key in target_ranked]
-    targets = target_all[:max_items] if max_items else target_all
+    # Retomada: uma chave tentada neste plano de execucao nao deve
+    # consumir novamente tokens nem ocupar as mesmas primeiras posicoes.
+    excluded = set(exclude_keys or set())
+    available = [item for item in target_all if item[2] not in excluded]
+    targets = available[:max_items] if max_items else available
     stats = {
+        "recovery_ledger_excluded": len(target_all) - len(available),
+        "recovery_remaining": len(available),
         "linhas_unicas_analisadas": len(seen),
         "bi_ok_hard_lock": locked,
         "baseline_atual_ignorado": good,
@@ -8984,11 +8991,20 @@ def run_cache_recovery(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     with_path = Path(cfg.get("files", {}).get("pending_with_cache", "Pendentes_Com_Cache.xlsx"))
     without_path = Path(cfg.get("files", {}).get("pending_without_cache", "Pendentes_Sem_Cache.xlsx"))
 
+    ledger_path = Path(args.recovery_ledger) if safe(getattr(args, "recovery_ledger", "")) else None
+    attempted_keys = set()
+    if ledger_path and ledger_path.exists():
+        attempted_keys = {
+            line.strip() for line in ledger_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        }
+
     store = TavilyReadOnlyStore(cache_path)
     try:
         targets, plan_stats = build_cache_recovery_plan(
             final_path, master_path, store, with_path, without_path, rules, cfg, args.max_items,
             include_stale_auto=bool(getattr(args, "include_stale_auto", False)),
+            exclude_keys=attempted_keys,
         )
     finally:
         store.close()
@@ -9002,6 +9018,13 @@ def run_cache_recovery(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     # O conjunto contém pendências e AUTO_APROVADO técnico obsoleto.
     # O pipeline revalida HARD LOCK antes do primeiro item.
     run_pipeline(args, cfg, rules, explicit_targets=targets)
+    # Grava ledger SOMENTE depois de salvar baseline e passar pelos gates.
+    # Falhas/interruptoes nao avancam a fila e podem ser retomadas.
+    if ledger_path:
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        with ledger_path.open("a", encoding="utf-8") as ledger:
+            for _, _, key in targets:
+                ledger.write(key + "\n")
 
 
 def run_pipeline(
@@ -9812,6 +9835,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-api-calls", type=int, default=0, help="Limite HTTP LLM incluindo retries e reparos.")
     p.add_argument("--max-tokens", type=int, default=0, help="Limite de tokens LLM reportados.")
     p.add_argument("--include-stale-auto", action="store_true", help="Recuperar tambem autoaprovados antigos.")
+    p.add_argument("--recovery-ledger", default="", help="Arquivo de chaves ja tentadas pela recuperacao, para execucao sequencial em lotes.")
     p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
     p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata"], default="")
     p.add_argument("--recollect-empty", action="store_true")
