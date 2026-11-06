@@ -34,6 +34,25 @@ class JevRoutingAuditTests(unittest.TestCase):
         with patch("builtins.input", return_value="3"):
             self.assertEqual(p._menu_llm_provider(), "local")
 
+    def test_classification_menu_has_no_forced_http_budget(self):
+        from pathlib import Path
+        with patch("builtins.input", side_effect=["2", "", "1"]):
+            args = p.interactive_menu(Path("."))
+        self.assertEqual(args.mode, "classify")
+        self.assertEqual(args.llm_provider, "jev")
+        self.assertEqual(args.max_api_calls, 0)
+        self.assertEqual(args.max_tokens, 0)
+
+    def test_recovery_menu_has_no_forced_http_budget(self):
+        from pathlib import Path
+        with patch("builtins.input", side_effect=["4", "", "1"]):
+            args = p.interactive_menu(Path("."))
+        self.assertEqual(args.mode, "recover")
+        self.assertEqual(args.llm_provider, "jev")
+        self.assertEqual(args.max_api_calls, 0)
+        self.assertEqual(args.max_tokens, 0)
+
+
 
 if __name__ == "__main__":
     unittest.main()
