@@ -9412,6 +9412,11 @@ def run_pipeline(
                 LOG.warning(
                     "Rode novamente depois; checkpoints e cache Clef evitam repetir itens concluídos."
                 )
+            elif baseline_warning:
+                LOG.error(
+                    "EXECUÇÃO BLOQUEADA: baseline divergente. Resultado parcial: %s | motivo=%s",
+                    output_path, baseline_warning,
+                )
             else:
                 LOG.info("CONCLUÍDO. Resultado: %s", output_path)
 
@@ -9419,6 +9424,10 @@ def run_pipeline(
                 "Resumo: %s",
                 " | ".join(f"{k}={v}" for k, v in stats.items()),
             )
+            # Logs, planilhas e checkpoints podem ter sido gravados, mas a
+            # execução NÃO pode retornar exit code 0 se o baseline divergiu.
+            if baseline_warning:
+                raise RuntimeError("BASELINE_PERSISTENCE_FAILED: " + baseline_warning)
 
         except KeyboardInterrupt:
             try:
