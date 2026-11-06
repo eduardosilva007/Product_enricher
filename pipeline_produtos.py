@@ -1216,12 +1216,22 @@ def build_precollection_plan(
                     rep.action = "JA_NO_CACHE"
                     rep.reason = raw.reason or "RAW Tavily já disponível"
             elif raw.state == "RAW_EMPTY":
+                collection = (raw.payload or {}).get("_collection") if isinstance(raw.payload, dict) else {}
+                collection = collection if isinstance(collection, dict) else {}
+                prior_status = safe(collection.get("state")).upper()
+                prior_error = safe(collection.get("error"))
+                search_meta = (raw.payload or {}).get("_search_meta") if isinstance(raw.payload, dict) else {}
+                search_meta = search_meta if isinstance(search_meta, dict) else {}
+                is_error = (prior_status in {"REQUEST_ATTEMPTED_NO_AUTO_RETRY", "REQUEST_ERROR"}
+                            or bool(prior_error) or bool(safe(search_meta.get("error"))))
                 if recollect_empty:
                     rep.action = "RECOLETAR"
-                    rep.reason = "RAW vazio e --recollect-empty habilitado"
+                    rep.reason = ("Erro de provider registrado no RAW anterior"
+                                  if is_error else "RAW verdadeiramente sem resultados")
                 else:
-                    rep.action = "RAW_EMPTY_PULADO"
-                    rep.reason = "RAW vazio preservado; use --recollect-empty para nova consulta"
+                    rep.action = "RAW_ERROR_PULADO" if is_error else "RAW_EMPTY_PULADO"
+                    rep.reason = ("Erro operacional de Search; recoleta exige --recollect-empty"
+                                  if is_error else "RAW vazio preservado; use --recollect-empty para nova consulta")
             elif raw.state == "RAW_CORRUPT":
                 rep.action = "REVISAR_PRECOLETA"
                 rep.reason = "RAW corrompido; nao gastar nova request sem auditoria"
@@ -1278,6 +1288,7 @@ def build_precollection_plan(
         "Classificados preservados na recoleta": action_counts["CLASSIFICADO_PRESERVADO"],
         "Recoleta LOW_TARGET_EVIDENCE": action_counts["RECOLETAR_LOW_EVIDENCE"],
         "RAW vazio pulado": action_counts["RAW_EMPTY_PULADO"],
+        "Erros Search pulados": action_counts["RAW_ERROR_PULADO"],
         "Fila real Tavily antes do limite": len(candidates_all),
         "Fila Tavily desta execução": len(candidates),
         "Business key": "AGRESSIVA_ESTRUTURAL_SEM_FUZZY",
