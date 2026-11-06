@@ -8170,7 +8170,10 @@ def _hydrate_input_collection_from_cache(
     needed = ("Raw State", "Collection State", "Título Referência",
               "Fonte Referência URL", "Título Referência Identity",
               "Título Referência Decision", "Status Processamento",
-              "Próxima Ação", "Resolution State", review_col)
+              "Próxima Ação", "Resolution State", review_col,
+              "Fontes Pesquisa", "Resumo Evidências",
+              "Fontes Encontradas", "Qualidade Referência",
+              "Título Real", "Fonte URL")
     for col in needed:
         if col not in master_df.columns:
             master_df[col] = ""
@@ -8369,6 +8372,21 @@ def persist_baseline_excels(
                 f"{len(dropped)} classificacoes aceitas seriam removidas. "
                 "Nenhum Excel foi regravado."
             )
+
+    # Verificar acesso a AMBOS os arquivos antes de gravar o primeiro.
+    # Em Windows, Excel costuma negar abertura para escrita de um workbook aberto.
+    # Falhar antes evita Consolidado atualizado e Base Final desatualizada.
+    for target in (master_path, final_path):
+        if target is None or not target.exists():
+            continue
+        try:
+            with target.open("r+b"):
+                pass
+        except PermissionError as exc:
+            raise PermissionError(
+                f"BASELINE_FILE_LOCKED: feche '{target.name}' no Excel antes da sincronizacao; "
+                "nenhuma exportacao foi iniciada."
+            ) from exc
 
     stats = {
         **sync_stats,
