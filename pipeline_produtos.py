@@ -6148,9 +6148,9 @@ def finalize_product(
     elif not s1.type_candidates and ref_identity in {"STRONG", "PROBABLE"}:
         next_action = "JSON_GAP_OU_CLEF_GAP"
     elif not s1.type_candidates and raw_result_count:
-        next_action = "RECOLETAR_EVIDENCIA_TARGET"
+        next_action = "REVISAR_EVIDENCIA_CACHE"
     elif not s1.type_candidates:
-        next_action = "NOVA_COLETA"
+        next_action = "REVISAR_EVIDENCIA_CACHE"
     elif consensus_cg and consensus_fam:
         next_action = "TYPE_REVIEW_FAMILY_JA_DEFINIDA"
     else:
@@ -6268,13 +6268,13 @@ def finalize_product(
                 "MULTI_PRODUCT_TARGET":
                     "Clef não chamado: evidência target descreve múltiplos produtos físicos sem combo explicitamente modelado.",
                 "NO_TARGET_EVIDENCE":
-                    "Clef/BGE não chamados: cache curado sem evidência target e sem title-rescue seguro; item direcionado à nova coleta.",
+                    "Clef/BGE não chamados: cache curado sem evidência target e sem title-rescue seguro; item direcionado à revisão das fontes existentes.",
             }.get(clef_preflight, "Clef bloqueado pelo gate de identidade.")
             return {
                 **common,
-                "Próxima Ação": "RECOLETA_DIRIGIDA",
-                "Resolution State": "NEEDS_RECOLLECTION",
-                "Classification Outcome": "NEEDS_RECOLLECTION",
+                "Próxima Ação": "REVISAR_EVIDENCIA_CACHE",
+                "Resolution State": "REVIEW_CACHE_EVIDENCE",
+                "Classification Outcome": "REVIEW_CACHE_EVIDENCE",
                 "Stage": "COLLECTION_GATE",
                 "O que é (Tipo)": s1.product_type or "REVISAR",
                 "Alimentação": s1.power or "UNKNOWN",
@@ -6282,9 +6282,9 @@ def finalize_product(
                 "FAMILY": consensus_fam,
                 "Título Real": title,
                 "Fonte URL": url,
-                "Review Required": "NÃO",
+                "Review Required": "SIM",
                 "Auto Eligible": "NÃO",
-                "Double Check Priority": "AGUARDAR_RECOLETA",
+                "Double Check Priority": "ALTA",
                 "Reason Code": clef_preflight,
                 "Motivo": reason_text + " Nenhuma segunda consulta automática foi executada.",
                 "Clef Provider": "",
@@ -6302,9 +6302,9 @@ def finalize_product(
                 title, url = _output_title(*choose_title(s1.sources, []))
                 return {
                     **common,
-                    "Próxima Ação": "RECOLETA_DIRIGIDA",
-                    "Resolution State": "NEEDS_RECOLLECTION",
-                    "Classification Outcome": "NEEDS_RECOLLECTION",
+                    "Próxima Ação": "REVISAR_EVIDENCIA_CACHE",
+                    "Resolution State": "REVIEW_CACHE_EVIDENCE",
+                    "Classification Outcome": "REVIEW_CACHE_EVIDENCE",
                     "Stage": "SEMANTIC_FUNNEL_EMPTY",
                     "O que é (Tipo)": s1.product_type or "REVISAR",
                     "Alimentação": s1.power or "UNKNOWN",
@@ -6312,9 +6312,9 @@ def finalize_product(
                     "FAMILY": consensus_fam,
                     "Título Real": title,
                     "Fonte URL": url,
-                    "Review Required": "NÃO",
+                    "Review Required": "SIM",
                     "Auto Eligible": "NÃO",
-                    "Double Check Priority": "AGUARDAR_RECOLETA",
+                    "Double Check Priority": "ALTA",
                     "Reason Code": exc.code,
                     "Motivo": f"{safe(exc)} Nenhuma segunda consulta automática foi executada.",
                     "Clef Provider": "",
@@ -6421,9 +6421,9 @@ def finalize_product(
                 return {
                     **base_clef,
                     "Raw State": "RAW_OK",
-                    "Próxima Ação": "RECOLETA_DIRIGIDA",
-                    "Resolution State": "NEEDS_RECOLLECTION",
-                    "Classification Outcome": "NEEDS_RECOLLECTION",
+                    "Próxima Ação": "REVISAR_EVIDENCIA_CACHE",
+                    "Resolution State": "REVIEW_CACHE_EVIDENCE",
+                    "Classification Outcome": "REVIEW_CACHE_EVIDENCE",
                     "Stage": "CLEF_REPAIR_INSUFFICIENT",
                     "O que é (Tipo)": "REVISAR",
                     "Alimentação": power if power in rules.allowed_powers else "UNKNOWN",
@@ -6431,9 +6431,9 @@ def finalize_product(
                     "FAMILY": "",
                     "Título Real": title,
                     "Fonte URL": url,
-                    "Review Required": "NÃO",
+                    "Review Required": "SIM",
                     "Auto Eligible": "NÃO",
-                    "Double Check Priority": "AGUARDAR_RECOLETA",
+                    "Double Check Priority": "ALTA",
                     "Reason Code": "CLEF_REPAIR_INSUFFICIENT",
                     "Motivo": (
                         f"Primeira resposta teve TYPE x TAXONOMIA incompatíveis ({typ} + {cg} | {fam}); "
@@ -6478,13 +6478,13 @@ def finalize_product(
 
         # Clef foi consultado, mas não conseguiu produzir TYPE + par taxonômico
         # válidos. Isso é falta de evidência/aderência para esta consulta, não uma
-        # tarefa manual imediata: vai para fila de nova coleta/segunda consulta futura.
+        # solicitação de recoleta: encaminhar as fontes existentes para revisão.
         return {
             **base_clef,
             "Raw State": "RAW_OK",
-            "Próxima Ação": "RECOLETA_DIRIGIDA",
-            "Resolution State": "NEEDS_RECOLLECTION",
-            "Classification Outcome": "NEEDS_RECOLLECTION",
+            "Próxima Ação": "REVISAR_EVIDENCIA_CACHE",
+            "Resolution State": "REVIEW_CACHE_EVIDENCE",
+            "Classification Outcome": "REVIEW_CACHE_EVIDENCE",
             "Stage": "CLEF_INSUFFICIENT",
             "O que é (Tipo)": typ if typ in rules.types else "REVISAR",
             "Alimentação": power if power in rules.allowed_powers else "UNKNOWN",
@@ -6494,7 +6494,7 @@ def finalize_product(
             "Fonte URL": url,
             "Review Required": "NÃO",
             "Auto Eligible": "NÃO",
-            "Double Check Priority": "AGUARDAR_RECOLETA",
+            "Double Check Priority": "ALTA",
             "Reason Code": f"CLEF_{safe(data.get('decision')) or 'INSUFFICIENT'}",
             "Motivo": (
                 f"{safe(data.get('reason_short'))} | Clef não fechou TYPE + taxonomia válidos. "
