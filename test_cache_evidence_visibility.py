@@ -68,6 +68,45 @@ class CachedEvidenceReviewTests(unittest.TestCase):
         result = p._expected_cohort_accepted_after_run({key}, set(), [accepted])
         self.assertEqual(result, {key})
 
+    def test_final_export_materializes_cached_titles_and_sources(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            cache = folder / "cache.sqlite"
+            final = folder / "final.xlsx"
+            entry = folder / "entrada.xlsx"
+            brand, model = "ACQUA LIFE", "SPRAYER 02"
+            pd.DataFrame([{"Marca": brand, "Modelo": model}]).to_excel(entry, index=False)
+            payload = {
+                "results": [
+                    {"title": f"ACQUA LIFE SPRAYER 02 produto fonte {i}",
+                     "url": f"https://example.org/catalog/{i}",
+                     "content": f"Descricao da fonte {i}"} for i in range(10)
+                ],
+                "_collection": {"state": "NO_TARGET_EVIDENCE"},
+            }
+            store = p.TavilyWritableStore(cache)
+            try:
+                store.put(brand, model, payload)
+            finally:
+                store.close()
+            master = pd.DataFrame([{
+                "Marca": brand, "Modelo": model, "Status": "Script",
+                "Revisão": "PENDENTE_RECOLETA", "Revisão B.I": "",
+                "Resolution State": "NEEDS_RECOLLECTION",
+            }])
+            p._export_base_final(master, final, input_path=entry, cache_path=cache)
+            result = pd.read_excel(final).iloc[0]
+            self.assertEqual(result["Revisão"], "REVISAR")
+            self.assertEqual(result["Fontes Encontradas"], 10)
+            sources = json.loads(result["Fontes Pesquisa"])
+            self.assertEqual(len(sources), 10)
+            self.assertIn("produto fonte 9", result["Resumo Evidências"])
+            self.assertTrue(result["Título Referência"])
+            self.assertEqual(result["Próxima Ação"], "REVISAR_EVIDENCIA_CACHE")
+
     def test_recovery_skips_cached_clef_proposal_without_final_version_column(self):
         from types import SimpleNamespace
         rules = SimpleNamespace(hash="current", version="test")
