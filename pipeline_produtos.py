@@ -5962,7 +5962,7 @@ def taxonomy_consensus_for_review(
 def record_for_raw_state(raw: RawEvidence) -> Dict[str, Any]:
     status_map = {
         "RAW_MISSING": ("PENDING_COLLECTION", "Produto ausente do cache Search"),
-        "RAW_EMPTY": ("PENDING_RECOLLECTION", "Consulta Search existe, mas não retornou resultados"),
+        "RAW_EMPTY": ("REVIEW_NO_RESULTS", "Consulta Search realizada sem resultados; revisão sem recoleta automática"),
         "RAW_CORRUPT": ("CACHE_ERROR", "RAW Search corrompido"),
         "RAW_COLLISION": ("CACHE_COLLISION", "Colisão de chave de negócio"),
     }
@@ -7349,14 +7349,12 @@ def _record_process_state(rec: Dict[str, Any]) -> Tuple[str, str]:
     if resolution == "CLASSIFIED_CLEF":
         # Classificação completa produzida pelo Clef; falta apenas double-check humano.
         return "PROCESSADO", "PROVÁVEL"
-    if resolution in {
-        "PENDING_COLLECTION",
-        "PENDING_RECOLLECTION",
-        "NEEDS_RECOLLECTION",
-        "CACHE_ERROR",
-        "CACHE_COLLISION",
-    }:
+    if resolution == "PENDING_COLLECTION":
         return resolution, "PENDENTE_COLETA"
+    if resolution in {"PENDING_RECOLLECTION", "NEEDS_RECOLLECTION",
+                      "CACHE_ERROR", "CACHE_COLLISION", "REVIEW_NO_RESULTS",
+                      "REVIEW_CACHE_EVIDENCE"}:
+        return "REVISAR", "REVISAR"
 
     return "REVISAR", "REVISAR"
 
@@ -7468,14 +7466,15 @@ def _derive_final_review(row: Any, df: Any) -> Any:
         "READY_FOR_CLASSIFICATION", "PARTIAL_TARGET_EVIDENCE", "TARGET_EVIDENCE",
         "LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA",
     }
-    if resolution in {"PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "CACHE_ERROR", "CACHE_COLLISION"}:
-        if has_cache_raw:
-            return ("PENDENTE_RECOLETA" if collection_state in {
-                "NO_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE"
-            } or resolution == "NEEDS_RECOLLECTION" else "PENDENTE_CLASSIFICACAO")
-        if raw_state == "RAW_EMPTY":
-            return "PENDENTE_RECOLETA"
-        return "PENDENTE_COLETA"
+    if has_cache_raw:
+        # RAW existente nunca solicita uma nova busca por falha de taxonomia.
+        return ("REVISAR" if collection_state in {"NO_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE"}
+                else "PENDENTE_CLASSIFICACAO")
+    if raw_state == "RAW_EMPTY" or resolution == "REVIEW_NO_RESULTS":
+        return "REVISAR"
+    if resolution in {"PENDING_COLLECTION", "PENDING_RECOLLECTION",
+                      "NEEDS_RECOLLECTION", "CACHE_ERROR", "CACHE_COLLISION"}:
+        return "PENDENTE_COLETA" if raw_state == "RAW_MISSING" else "REVISAR"
 
     # Linha conhecida, mas ainda nunca enriquecida: fica PENDENTE, não REVISAR.
     type_col = find_col(df, ["O que é (Tipo)", "Tipo", "Product Type"], required=False)
@@ -7968,9 +7967,9 @@ def _export_base_final(
                     out.at[idx, "Status Coleta"] = "COLETA_VAZIA"
                     out.at[idx, "Collection State"] = "RAW_EMPTY"
                     if not classified(rec):
-                        out.at[idx, "Revisão"] = "PENDENTE_RECOLETA"
-                        out.at[idx, "Próxima Ação"] = "RECOLETA_SEM_RESULTADOS"
-                        out.at[idx, "Resolution State"] = "PENDING_RECOLLECTION"
+                        out.at[idx, "Revisão"] = "REVISAR"
+                        out.at[idx, "Próxima Ação"] = "REVISAR_SEM_RESULTADOS"
+                        out.at[idx, "Resolution State"] = "REVIEW_NO_RESULTS"
                 elif raw.state in {"RAW_OK", "RAW_OK_MERGED"}:
                     collection = (raw.payload or {}).get("_collection")
                     collection = collection if isinstance(collection, dict) else {}
@@ -7984,25 +7983,32 @@ def _export_base_final(
                         out.at[idx, "Status Coleta"] = "COLETADO_SEM_EVIDENCIA_ALVO"
                     else:
                         out.at[idx, "Status Coleta"] = "COLETADO_RAW_DISPONIVEL"
-                    # Evidências para atuação manual, inclusive fontes rejeitadas.
-                    if not _baseline_row_accepted(rec, out):
-                        bundle = _manual_review_bundle(raw)
-                        for field in ("Fontes Pesquisa", "Resumo Evidências",
-                                      "Fontes Encontradas", "Qualidade Referência"):
-                            if bundle.get(field):
-                                out.at[idx, field] = bundle[field]
-                        for field in ("Título Referência", "Fonte Referência URL",
-                                      "Título Referência Identity"):
-                            if not safe(rec.get(field)) and bundle.get(field):
-                                out.at[idx, field] = bundle[field]
-                    if not classified(rec) and safe(rec.get("Revisão")).upper() in {
-                        "PENDENTE_COLETA", "PENDENTE", "PENDENTE_CLASSIFICACAO",
-                        "PENDENTE_RECOLETA", "REVISAR"
-                    }:
-                        recollect = state in {"LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"}
-                        out.at[idx, "Revisão"] = "PENDENTE_RECOLETA" if recollect else "PENDENTE_CLASSIFICACAO"
-                        out.at[idx, "Próxima Ação"] = "RECOLETA_DIRIGIDA" if recollect else "CLASSIFICAR_CACHE"
-                        out.at[idx, "Resolution State"] = "PENDING_RECOLLECTION" if recollect else "PENDING_CLASSIFICATION"
+                    # Materializa todas as fontes consultadas, inclusive rejeitadas:
+                    # exibição de evidência não equivale a aprovação taxonômica.
+                    bundle = _manual_review_bundle(raw)
+                    for field in ("Fontes Pesquisa", "Resumo Evidências",
+                                  "Fontes Encontradas", "Qualidade Referência"):
+                        if bundle.get(field):
+                            out.at[idx, field] = bundle[field]
+                    for field in ("Título Referência", "Fonte Referência URL",
+                                  "Título Referência Identity"):
+                        if not safe(rec.get(field)) and bundle.get(field):
+                            out.at[idx, field] = bundle[field]
+                    # Título Real só recebe referência com identidade comprovada.
+                    # Outros títulos permanecem visíveis em Título Referência/Fontes.
+                    identity = safe(bundle.get("Título Referência Identity")).upper()
+                    decision = safe(bundle.get("Qualidade Referência")).upper()
+                    if (not safe(rec.get("Título Real")) and identity == "STRONG"
+                            and not decision.startswith("REJECT")
+                            and safe(bundle.get("Título Referência"))):
+                        out.at[idx, "Título Real"] = bundle["Título Referência"]
+                        if not safe(rec.get("Fonte URL")):
+                            out.at[idx, "Fonte URL"] = bundle["Fonte Referência URL"]
+                    if not classified(rec):
+                        requires_review = state in {"LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"}
+                        out.at[idx, "Revisão"] = "REVISAR" if requires_review else "PENDENTE_CLASSIFICACAO"
+                        out.at[idx, "Próxima Ação"] = "REVISAR_EVIDENCIA_CACHE" if requires_review else "CLASSIFICAR_CACHE"
+                        out.at[idx, "Resolution State"] = "REVIEW_CACHE_EVIDENCE" if requires_review else "PENDING_CLASSIFICATION"
         finally:
             store.close()
 
@@ -8181,10 +8187,10 @@ def _hydrate_input_collection_from_cache(
                 master_df.at[idx, "Collection State"] = "RAW_EMPTY"
                 # Uma consulta vazia é diferente de produto nunca consultado.
                 if safe(old.get("Resolution State")).upper() not in {"RESOLVED", "CLASSIFIED_CLEF"}:
-                    master_df.at[idx, "Resolution State"] = "PENDING_RECOLLECTION"
-                    master_df.at[idx, "Status Processamento"] = "PENDING_RECOLLECTION"
-                    master_df.at[idx, "Próxima Ação"] = "RECOLETA_SEM_RESULTADOS"
-                    master_df.at[idx, review_col] = "PENDENTE_RECOLETA"
+                    master_df.at[idx, "Resolution State"] = "REVIEW_NO_RESULTS"
+                    master_df.at[idx, "Status Processamento"] = "REVIEW_NO_RESULTS"
+                    master_df.at[idx, "Próxima Ação"] = "REVISAR_SEM_RESULTADOS"
+                    master_df.at[idx, review_col] = "REVISAR"
                 continue
             stats["cache_raw_ok"] += 1
             coll = (raw.payload or {}).get("_collection")
@@ -8199,17 +8205,31 @@ def _hydrate_input_collection_from_cache(
             pending = pending or old_resolution in {"", "PENDING_EVIDENCE_CHECK", "PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "PENDING_CLASSIFICATION"}
             if pending and old_resolution not in {"CLASSIFIED_CLEF", "RESOLVED"}:
                 if state in {"NO_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE"}:
-                    master_df.at[idx, review_col] = "PENDENTE_RECOLETA"
-                    master_df.at[idx, "Resolution State"] = "PENDING_RECOLLECTION"
-                    master_df.at[idx, "Status Processamento"] = "PENDING_RECOLLECTION"
-                    master_df.at[idx, "Próxima Ação"] = "RECOLETA_DIRIGIDA"
+                    master_df.at[idx, review_col] = "REVISAR"
+                    master_df.at[idx, "Resolution State"] = "REVIEW_CACHE_EVIDENCE"
+                    master_df.at[idx, "Status Processamento"] = "REVIEW_CACHE_EVIDENCE"
+                    master_df.at[idx, "Próxima Ação"] = "REVISAR_EVIDENCIA_CACHE"
                 else:
                     master_df.at[idx, review_col] = "PENDENTE_CLASSIFICACAO"
                     master_df.at[idx, "Resolution State"] = "PENDING_CLASSIFICATION"
                     master_df.at[idx, "Status Processamento"] = "PENDING_CLASSIFICATION"
                     master_df.at[idx, "Próxima Ação"] = "CLASSIFICAR_CACHE"
                 stats["cache_pending_corrected"] += 1
-            if cfg is not None and not safe(old.get("Título Referência")):
+            # Independente da classificação, todos os títulos e fontes
+            # existentes no SQLite precisam ficar visíveis no Consolidado.
+            bundle = _manual_review_bundle(raw)
+            for field in ("Fontes Pesquisa", "Resumo Evidências",
+                          "Fontes Encontradas", "Qualidade Referência"):
+                if bundle.get(field):
+                    master_df.at[idx, field] = bundle[field]
+            for field in ("Título Referência", "Fonte Referência URL",
+                          "Título Referência Identity"):
+                if not safe(old.get(field)) and bundle.get(field):
+                    master_df.at[idx, field] = bundle[field]
+            title = safe(bundle.get("Título Referência"))
+            identity = safe(bundle.get("Título Referência Identity")).upper()
+            decision = safe(bundle.get("Qualidade Referência")).upper()
+            if cfg is not None and not title:
                 try:
                     title, url, identity, decision = choose_reference_title(
                         raw, item.brand_original, item.model_original, cfg
@@ -8217,14 +8237,19 @@ def _hydrate_input_collection_from_cache(
                 except (TypeError, ValueError, KeyError) as exc:
                     LOG.warning("CACHE TITLE REFERENCE SKIPPED | %s %s | %s",
                                 item.brand_original, item.model_original, exc)
-                    continue
-                # O título de referência auxilia revisão; não determina AUTO.
-                if safe(title):
+                    title = ""
+                if title and not safe(old.get("Título Referência")):
                     master_df.at[idx, "Título Referência"] = title
                     master_df.at[idx, "Fonte Referência URL"] = url
                     master_df.at[idx, "Título Referência Identity"] = identity
-                    master_df.at[idx, "Título Referência Decision"] = decision
-                    stats["cache_reference_titles"] += 1
+            if title:
+                stats["cache_reference_titles"] += 1
+                if (identity == "STRONG" and not decision.startswith("REJECT")
+                        and not safe(old.get("Título Real"))):
+                    master_df.at[idx, "Título Real"] = title
+                    if not safe(old.get("Fonte URL")):
+                        master_df.at[idx, "Fonte URL"] = safe(
+                            master_df.at[idx, "Fonte Referência URL"])
     finally:
         store.close()
     return stats
