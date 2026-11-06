@@ -1167,16 +1167,11 @@ def build_precollection_plan(
     cfg: Optional[Dict[str, Any]] = None,
     max_tavily_new: int = 0,
 ) -> PreCollectionPlan:
-    """Normaliza/deduplica/cruza cache. NÃO consulta Tavily.
+    """Normaliza/deduplica/cruza cache sem rede.
 
-    Reconsultar RAW_EMPTY ou evidência fraca é proibido nesta política:
-    uma busca já paga não volta à fila por insuficiência de classificação.
+    Recoleta somente quando solicitada explicitamente; cada execução mantém
+    o contrato preexistente de uma request por produto e arquivo de entrada.
     """
-    if recollect_empty or recollect_low_evidence:
-        raise ValueError(
-            "RECOLLECTION_DISABLED: RAW_EMPTY e RAW existente devem ser revisados "
-            "a partir do cache, sem uma segunda pesquisa."
-        )
     rows = read_input_rows(input_path)
 
     groups: Dict[str, List[InputProductRow]] = defaultdict(list)
@@ -3347,7 +3342,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                     brand, model, payload,
                     archive_reason=(
                         f"RECOLLECT_{provider.upper()}_{COLLECTION_LABEL}"
-                        if prior_state in {"RAW_OK", "RAW_OK_MERGED"}
+                        if prior_state in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}
                         else f"COLLECT_{provider.upper()}_{COLLECTION_LABEL}"
                     ),
                 )
@@ -3414,7 +3409,11 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 failure = _failed_collection_payload(
                     brand, model, provider, cfg, "REQUEST_ATTEMPTED_NO_AUTO_RETRY", safe(exc)
                 )
-                writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_REQUEST_ERROR_{COLLECTION_LABEL}")
+                if prior_state in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
+                    # Uma falha de recoleta não pode substituir material já existente.
+                    db.event(run_id, key, "RECOLLECTION_ERROR_OLD_CACHE_PRESERVED", safe(exc))
+                else:
+                    writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_REQUEST_ERROR_{COLLECTION_LABEL}")
                 total_requests += 1
                 db.event(run_id, key, f"SEARCH_{COLLECTION_LABEL}_ERROR_NO_RETRY", safe(exc))
                 product_rows.append({
@@ -3488,7 +3487,8 @@ def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], r
             if raw.state not in {"RAW_OK", "RAW_OK_MERGED"} or not raw.payload:
                 continue
             existing = raw.payload.get("_collection") if isinstance(raw.payload, dict) else None
-            if isinstance(existing, dict) and safe(existing.get("version")) == safe((_collection_policy(cfg)).get("VERSION")):
+            if (not bool(getattr(args, "force_curate", False)) and isinstance(existing, dict)
+                    and safe(existing.get("version")) == safe((_collection_policy(cfg)).get("VERSION"))):
                 continue
             rebuilt = _curate_existing_payload(brand, model, raw.payload, cfg)
             coll = rebuilt.get("_collection", {}) or {}
@@ -9883,6 +9883,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--recollect-empty", action="store_true")
     p.add_argument("--recollect-low-evidence", action="store_true")
     p.add_argument("--curate-all-cache", action="store_true", help="No modo curate, ignora o arquivo de entrada e percorre todo o cache")
+    p.add_argument("--force-curate", action="store_true", help="Reavaliar a curadoria atual sem repetir Search; preserva historico do SQLite.")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p
