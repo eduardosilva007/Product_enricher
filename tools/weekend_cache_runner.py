@@ -76,12 +76,14 @@ def main() -> int:
     p.add_argument("--max-http", type=int, default=300,
                    help="Teto conservador de requisicoes LLM reservadas em todo o ciclo")
     p.add_argument("--http-per-batch", type=int, default=40)
+    p.add_argument("--max-tokens-total", type=int, default=1000000)
     p.add_argument("--tokens-per-batch", type=int, default=100000)
     p.add_argument("--max-batches", type=int, default=20)
     p.add_argument("--max-hours", type=float, default=60)
     args = p.parse_args()
     if min(args.batch_size, args.max_http, args.http_per_batch,
-           args.tokens_per_batch, args.max_batches) <= 0 or args.max_hours <= 0:
+           args.tokens_per_batch, args.max_tokens_total,
+           args.max_batches) <= 0 or args.max_hours <= 0:
         p.error("Todos os limites devem ser positivos")
     if args.batch_size > args.http_per_batch:
         p.error("http-per-batch precisa ser >= batch-size")
@@ -96,9 +98,13 @@ def main() -> int:
         baseline = preflight(min_input=1)
         deadline = datetime.now() + timedelta(hours=args.max_hours)
         remaining = args.max_http
+        tokens_remaining = args.max_tokens_total
         completed = 0
-        while completed < args.max_batches and remaining > 0 and datetime.now() < deadline:
+        unproductive_batches = 0
+        while (completed < args.max_batches and remaining > 0 and
+               tokens_remaining > 0 and datetime.now() < deadline):
             used = min(remaining, args.http_per_batch)
+            tokens_reserved = min(tokens_remaining, args.tokens_per_batch)
             # Cada lote reserva todo o orçamento configurado, mesmo que use menos.
             # Assim o teto global nunca pode ser ultrapassado.
             before = len(set(LEDGER.read_text(encoding="utf-8").splitlines())) if LEDGER.exists() else 0
@@ -107,7 +113,7 @@ def main() -> int:
             execute([
                 str(PIPELINE), "--mode", "recover", "--max-items", str(min(args.batch_size, used)),
                 "--llm-provider", "jev", "--max-api-calls", str(used),
-                "--max-tokens", str(args.tokens_per_batch),
+                "--max-tokens", str(tokens_reserved),
                 "--recovery-ledger", str(LEDGER),
             ], log=True)
             after = len(set(LEDGER.read_text(encoding="utf-8").splitlines())) if LEDGER.exists() else 0
@@ -115,11 +121,26 @@ def main() -> int:
                 print("FILA ESGOTADA ou nenhum item novo; encerrando.")
                 break
             preflight(min_input=int(baseline["input_unique_keys"]), reference=baseline)
+            # Monitorar a qualidade real: propostas completas tambem contam como
+            # progresso, mesmo que aguardem Double Check. REVIEW puro nao conta.
+            import pandas as pd
+            results = pd.read_excel(ROOT / "Classificacao_v3.xlsx", sheet_name="Resultados")
+            resolutions = (results["Resolution State"].fillna("").astype(str).str.upper()
+                           if "Resolution State" in results else pd.Series(dtype=str))
+            useful = int(resolutions.isin({"RESOLVED", "CLASSIFIED_CLEF"}).sum())
+            unproductive_batches = unproductive_batches + 1 if useful == 0 else 0
             completed += 1
             remaining -= used
-            print(f"LOTE_OK={completed} | novos_skus={after-before} | http_reservado_total={args.max_http-remaining}")
+            tokens_remaining -= tokens_reserved
+            print(f"LOTE_OK={completed} | novos_skus={after-before} | classificados_ou_propostos={useful} "
+                  f"| http_reservado_total={args.max_http-remaining} "
+                  f"| tokens_reservados_total={args.max_tokens_total-tokens_remaining}")
+            if unproductive_batches >= 2:
+                print("QUALITY_STOP: dois lotes sem propostas validas; interrompendo para revisao.")
+                break
             time.sleep(1)
         print(f"FIM_SEGURO | lotes={completed} | http_reservado={args.max_http-remaining} "
+              f"| tokens_reservados={args.max_tokens_total-tokens_remaining} "
               f"| arquivo_log={LOG.name} | ledger={LEDGER.name}")
         return 0
     finally:
