@@ -68,6 +68,33 @@ class CachedEvidenceReviewTests(unittest.TestCase):
         result = p._expected_cohort_accepted_after_run({key}, set(), [accepted])
         self.assertEqual(result, {key})
 
+    def test_recovery_skips_cached_clef_proposal_without_final_version_column(self):
+        from types import SimpleNamespace
+        rules = SimpleNamespace(hash="current", version="test")
+        key = p.business_key("ACQUA LIFE", "SPRAYER 02")
+        df = pd.DataFrame([{
+            "Marca": "ACQUA LIFE", "Modelo": "SPRAYER 02",
+            "Resolution State": "CLASSIFIED_CLEF", "Revisão": "PROVÁVEL",
+            "Revisão B.I": "", "Status": "Script",
+            "Review Required": "SIM",
+        }])
+        meta = {key: {"rules_hash": "current", "pipeline_version": p.PIPELINE_VERSION}}
+        self.assertEqual(p._cache_recovery_reason(df.iloc[0], df, key, meta, rules), "")
+
+    def test_recovery_skips_reviewed_cache_with_same_rules(self):
+        from types import SimpleNamespace
+        rules = SimpleNamespace(hash="current", version="test")
+        key = p.business_key("ACQUA LIFE", "SPRAYER 02")
+        df = pd.DataFrame([{
+            "Marca": "ACQUA LIFE", "Modelo": "SPRAYER 02",
+            "Resolution State": "REVIEW_CACHE_EVIDENCE", "Revisão": "REVISAR",
+            "Revisão B.I": "", "Status": "Script",
+        }])
+        meta = {key: {"rules_hash": "current", "pipeline_version": p.PIPELINE_VERSION}}
+        self.assertEqual(p._cache_recovery_reason(df.iloc[0], df, key, meta, rules), "")
+        meta[key]["rules_hash"] = "previous"
+        self.assertEqual(p._cache_recovery_reason(df.iloc[0], df, key, meta, rules), "PENDENCIA_ATUAL")
+
     def test_recollection_flags_are_rejected_before_any_search(self):
         from pathlib import Path
         with self.assertRaisesRegex(ValueError, "RECOLLECTION_DISABLED"):
