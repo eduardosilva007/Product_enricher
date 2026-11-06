@@ -4788,6 +4788,14 @@ def _clef_preflight_rejection_reason(rules: Rules, s1: Stage1Result) -> str:
     return ""
 
 
+def _jev_endpoint(base_url: str) -> str:
+    """Normalize the native TypeSafe endpoint without duplicating its path."""
+    base = safe(base_url).strip().rstrip("/") or "https://api.typesafe.ai"
+    if not base.startswith("https://"):
+        raise ValueError("JEV_BASE_URL_INVALID: HTTPS required")
+    return base if base.endswith("/v1/systemone") else base + "/v1/systemone"
+
+
 class ClefFunnelClassifier:
     """Funil semântico local + decisão estruturada Cloudflare Clef.
 
@@ -4896,7 +4904,7 @@ class ClefFunnelClassifier:
 
         account_id = os.getenv(self.account_id_env, "").strip()
         slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
-        self.base_url = ((safe(self.ccfg.get("base_url")).rstrip("/") or "https://api.typesafe.ai") + "/v1/systemone") if self.provider == "jev" else (
+        self.base_url = _jev_endpoint(safe(self.ccfg.get("base_url"))) if self.provider == "jev" else (
             f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
             if account_id else f"https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/{slug}"
         )
