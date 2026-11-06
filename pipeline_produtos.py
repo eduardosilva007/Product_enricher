@@ -7704,6 +7704,12 @@ def _export_base_final(
             out[col] = work[src] if src else pd.NA
 
     out = out[BASELINE_FINAL_COLUMNS].reset_index(drop=True)
+    # Quando colunas textuais estao completamente vazias, pandas pode
+    # inferir float64. A reconciliacao cache->Excel precisa escrever strings
+    # (status, titulos, URLs, fontes) sem coercao invalida em pandas recentes.
+    # Estes campos do schema Final sao textuais, inclusive 'Fontes Encontradas'
+    # que armazena a contagem como representacao de texto.
+    out = out.astype("object")
 
     _assert_bi_lock_snapshot(out, bi_lock_snapshot or {}, "Base Final gerada")
 
