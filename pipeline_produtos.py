@@ -8755,11 +8755,27 @@ def _cache_recovery_reason(
     resolution = safe(row.get(resolution_col)).upper() if resolution_col else ""
     pipeline_version = safe(row.get(pipeline_col)) if pipeline_col else ""
     meta = master_meta.get(key, {})
+    # A Base Final nao expoe Pipeline Version: consultar a proveniencia do
+    # Consolidado evita enfileirar novamente propostas ja aguardando double-check.
+    metadata_pipeline_version = safe(meta.get("pipeline_version"))
+    version_current = (
+        pipeline_version == PIPELINE_VERSION
+        or metadata_pipeline_version == PIPELINE_VERSION
+    )
     if (
         resolution == "CLASSIFIED_CLEF"
         and review in {"PROVÁVEL", "PROVAVEL"}
         and _rule_metadata_is_current(meta, rules)
-        and pipeline_version == PIPELINE_VERSION
+        and version_current
+    ):
+        return ""
+    # Mesma evidencia + mesmas regras ja tentadas sem classificacao:
+    # nao repetir LLM/CPU indefinidamente. Uma nova versao das regras
+    # ou alteracao explicita de politica pode desbloquear futura avaliacao.
+    if (
+        resolution in {"REVIEW_CACHE_EVIDENCE", "REVIEW_NO_RESULTS"}
+        and _rule_metadata_is_current(meta, rules)
+        and version_current
     ):
         return ""
 
