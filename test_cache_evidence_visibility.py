@@ -193,6 +193,21 @@ class CachedEvidenceReviewTests(unittest.TestCase):
                     Path("input.xlsx"), cache, report,
                 )
                 self.assertEqual(len(default.candidates), 0)
+                self.assertEqual(default.representatives[0].action, "RAW_EMPTY_PULADO")
+                store_cls.return_value.get.return_value = p.RawEvidence(
+                    "RAW_EMPTY", brand, model,
+                    payload={"results": [], "_collection": {
+                        "state": "REQUEST_ATTEMPTED_NO_AUTO_RETRY", "error": "provider timeout"
+                    }},
+                )
+                failed_search = p.build_precollection_plan(
+                    Path("input.xlsx"), cache, report,
+                )
+                self.assertEqual(failed_search.representatives[0].action, "RAW_ERROR_PULADO")
+                self.assertEqual(len(failed_search.candidates), 0)
+                store_cls.return_value.get.return_value = p.RawEvidence(
+                    "RAW_EMPTY", brand, model, payload={"results": []},
+                )
                 requested = p.build_precollection_plan(
                     Path("input.xlsx"), cache, report, recollect_empty=True,
                 )
