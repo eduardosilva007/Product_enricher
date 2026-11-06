@@ -8805,15 +8805,11 @@ def _cache_recovery_reason(
         and version_current
     ):
         return ""
-    # Mesma evidencia + mesmas regras ja tentadas sem classificacao:
-    # nao repetir LLM/CPU indefinidamente. Uma nova versao das regras
-    # ou alteracao explicita de politica pode desbloquear futura avaliacao.
-    if (
-        resolution in {"REVIEW_CACHE_EVIDENCE", "REVIEW_NO_RESULTS"}
-        and _rule_metadata_is_current(meta, rules)
-        and version_current
-    ):
-        return ""
+    # REVIEW_CACHE_EVIDENCE precisa permanecer visivel na recuperacao.
+    # Uma revisao nao e uma classificacao concluida. A fila usa elegibilidade
+    # de evidencia + ledger para evitar repeticao paga do mesmo SKU.
+    if resolution == "REVIEW_NO_RESULTS":
+        return "REVISAO_SEM_RESULTADOS"
 
     if accepted:
         if review == "AUTO_APROVADO":
@@ -8880,6 +8876,8 @@ def build_cache_recovery_plan(
     target_ranked: List[Tuple[int, str, str, str]] = []
     seen = set()
     locked = good = stale_auto = stale_unknown_meta = 0
+    review_total = review_with_cache = review_without_cache = 0
+    evidence_not_classifiable = 0
     collection_counts: Dict[str, int] = defaultdict(int)
 
     for _, row in df.iterrows():
@@ -8890,6 +8888,10 @@ def build_cache_recovery_plan(
         if key in seen:
             continue
         seen.add(key)
+        review_value = safe(row.get(fields["Revisão"])).upper() if fields["Revisão"] else ""
+        is_review = review_value in {"REVISAR", "PENDENTE_RECOLETA", "PENDENTE_CLASSIFICACAO"}
+        if is_review:
+            review_total += 1
         if _row_bi_locked(row, df):
             locked += 1
             continue
@@ -8933,6 +8935,8 @@ def build_cache_recovery_plan(
             "Rules Hash Atual": rules.hash,
         }
         if raw.state in {"RAW_OK", "RAW_OK_MERGED"}:
+            if is_review:
+                review_with_cache += 1
             if recovery_reason == "AUTO_APROVADO_REGRA_OBSOLETA":
                 rec["Ação"] = "REPROCESSAR_REGRA_OBSOLETA"
             elif curated_count:
@@ -8942,16 +8946,36 @@ def build_cache_recovery_plan(
             else:
                 rec["Ação"] = "RECOLETA_NECESSARIA"
             with_cache.append(rec)
-            # Pilotos/recovery priorizam o que pode ser classificado agora. Itens sem
-            # evidência permanecem na mesma fila, mas vêm depois e viram NEEDS_RECOLLECTION
-            # sem BGE/Clef. Nenhuma segunda consulta é disparada automaticamente.
-            state_priority = {
-                "READY_FOR_CLASSIFICATION": 0,
-                "PARTIAL_TARGET_EVIDENCE": 1,
-                "NO_TARGET_EVIDENCE": 2,
-            }.get(coll_state, 1 if curated_count else 2)
-            target_ranked.append((state_priority, brand, model, key))
+            # Títulos e fontes aparecem no relatório para TODOS. A chamada LLM
+            # só é permitida com evidência classficável (curada/auxiliar segura).
+            aux = [x for x in (coll.get("evidence_cache", []) or []) if isinstance(x, dict)]
+            aux_safe = any(
+                safe(x.get("tier")) == "AUXILIARY_REVIEW_ONLY"
+                and safe(x.get("identity")) in {"STRONG", "PROBABLE"}
+                and bool(x.get("eligible_for_llm_rescue", True))
+                and safe(x.get("decision")) not in {
+                    "REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY"
+                }
+                for x in aux
+            )
+            if coll_state == "READY_FOR_CLASSIFICATION":
+                priority = 0
+            elif coll_state == "PARTIAL_TARGET_EVIDENCE":
+                priority = 1
+            elif curated_count > 0:
+                priority = 2
+            elif aux_safe:
+                priority = 3
+            else:
+                priority = None
+            if priority is not None:
+                target_ranked.append((priority, brand, model, key))
+            else:
+                evidence_not_classifiable += 1
+                rec["Ação"] = "REVISAR_EVIDENCIA_CACHE_SEM_CHAMADA_LLM"
         else:
+            if is_review:
+                review_without_cache += 1
             rec["Ação"] = ("PENDENTE_COLETA" if raw.state == "RAW_MISSING"
                            else "REVISAR_CACHE_EXISTENTE")
             without_cache.append(rec)
@@ -8969,6 +8993,10 @@ def build_cache_recovery_plan(
     stats = {
         "recovery_ledger_excluded": len(target_all) - len(available),
         "recovery_remaining": len(available),
+        "review_total_base": review_total,
+        "review_com_cache": review_with_cache,
+        "review_sem_cache": review_without_cache,
+        "cache_sem_evidencia_classificavel": evidence_not_classifiable,
         "linhas_unicas_analisadas": len(seen),
         "bi_ok_hard_lock": locked,
         "baseline_atual_ignorado": good,
