@@ -181,9 +181,11 @@ class CachedEvidenceReviewTests(unittest.TestCase):
             cache = Path(td) / "cache.sqlite"
             cache.touch()
             report = Path(td) / "plan.xlsx"
-            with patch.object(p, "read_input_rows", side_effect=lambda _: [input_row()]), \\
-                 patch.object(p, "TavilyReadOnlyStore") as store_cls, \\
-                 patch.object(p, "export_precollection_report"):
+            with (
+                patch.object(p, "read_input_rows", side_effect=lambda _: [input_row()]),
+                patch.object(p, "TavilyReadOnlyStore") as store_cls,
+                patch.object(p, "export_precollection_report"),
+            ):
                 store_cls.return_value.get.return_value = p.RawEvidence(
                     "RAW_EMPTY", brand, model, payload={"results": []},
                 )
