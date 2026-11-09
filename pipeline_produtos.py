@@ -55,6 +55,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
+from nightly_provider_router import DurableRouter, configured_slots
 
 PIPELINE_VERSION = "4.0.7.3.1-input-scoped-recuration"
 PROMPT_VERSION = "2026-10-13-v19-clef-joint-repair-identity-guard"
@@ -1882,6 +1883,9 @@ def validate_collection_cost_policy(cfg: Dict[str, Any]) -> List[str]:
 
 def _provider_credentials(provider: str, cfg: Dict[str, Any]) -> Dict[str, str]:
     pcfg = _provider_cfg(cfg, provider)
+    active = cfg.get("_active_search_slot") or {}
+    if active and active.get("provider") == provider:
+        pcfg = {**pcfg, "api_key_env": active["key_env"], "zone_env": active.get("zone_env", "")}
     if provider == "tavily":
         key_env = safe(pcfg.get("api_key_env")) or "TAVILY_API_KEY"
         api_key = os.getenv(key_env, "").strip()
@@ -3250,7 +3254,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     policy_errors = validate_collection_cost_policy(cfg)
     if policy_errors:
         raise CollectionCostPolicyError(" | ".join(policy_errors))
-    _provider_credentials(provider, cfg)  # preflight antes da primeira request
+    auto_route = bool(getattr(args, "auto_providers", False))
+    if not auto_route:
+        _provider_credentials(provider, cfg)  # preflight antes da primeira request
 
     input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
     cache_path = Path(args.cache or cfg["files"]["cache"])
@@ -3264,6 +3270,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         cfg=cfg, max_tavily_new=int(args.max_tavily_new or 0),
     )
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
+    router = None
+    if auto_route and candidates:
+        router = DurableRouter(db_path, configured_slots())
 
     print()
     print("=" * 86)
@@ -3314,6 +3323,21 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     try:
         for idx, (brand, model, prior_state) in enumerate(candidates, 1):
             key = business_key(brand, model)
+            active_slot = None
+            if router:
+                # Reservation committed before any HTTP call. No automatic retry on failures.
+                active_slot = router.reserve(key)
+                if active_slot is None:
+                    if router.choose(key) is None:
+                        LOG.warning("ROUTER | indisponível/bloqueado para %s | nenhuma nova request", key)
+                    continue
+                provider = active_slot.provider
+                cfg["_active_search_slot"] = {
+                    "provider": provider, "key_env": active_slot.key_env,
+                    "zone_env": active_slot.zone_env,
+                }
+                limiter = RateLimiter(float(_provider_cfg(cfg, provider).get("requests_per_minute", 30) or 30))
+                LOG.info("ROUTER | produto=%d/%d provider=%s conta=%s", idx, len(candidates), provider, active_slot.account)
             try:
                 payload = search_product_once(brand, model, cfg, limiter, provider)
                 coll = payload.get("_collection", {}) or {}
@@ -3382,11 +3406,18 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 break
             except OperationalPause as exc:
                 db.event(run_id, key, exc.code, safe(exc))
+                failure = _failed_collection_payload(brand, model, provider, cfg, exc.code, safe(exc))
+                writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_HTTP_PAUSE")
+                total_requests += 1
                 product_rows.append({
                     "Marca": brand, "Modelo": model, "Provider": provider,
                     "Estado Anterior": prior_state, "Collection State": exc.code,
                     "Provider Requests": 1, "Data": now_iso(),
                 })
+                if router and active_slot and (exc.code.endswith("_LIMIT") or exc.code.endswith("_AUTH")):
+                    router.disable(active_slot.account, exc.code)
+                    LOG.warning("ROUTER | conta=%s desabilitada; próximo produto usará outra conta", active_slot.account)
+                    continue
                 LOG.error("%s. Coleta pausada; tudo salvo até aqui permanece persistido.", exc)
                 completed = False
                 break
@@ -3429,6 +3460,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     finally:
         writer.close()
         db.close()
+        cfg.pop("_active_search_slot", None)
+        if router:
+            router.close()
 
 
 def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
@@ -8879,6 +8913,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
     p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata"], default="")
     p.add_argument("--recollect-empty", action="store_true")
+    p.add_argument("--auto-providers", action="store_true", help="Rotate between configured accounts for distinct products only")
     p.add_argument("--recollect-low-evidence", action="store_true")
     p.add_argument("--curate-all-cache", action="store_true", help="No modo curate, ignora o arquivo de entrada e percorre todo o cache")
     p.add_argument("--yes", action="store_true")
@@ -9265,7 +9300,8 @@ def main() -> int:
         return 0
     if args.mode == "collect":
         provider = _resolve_search_provider(args, cfg)
-        _provider_credentials(provider, cfg)
+        if not args.auto_providers:
+            _provider_credentials(provider, cfg)
         collect_products(args, cfg, rules)
         return 0
     if args.mode == "curate":
@@ -9279,7 +9315,8 @@ def main() -> int:
         return 0
     if args.mode == "full":
         provider = _resolve_search_provider(args, cfg)
-        _provider_credentials(provider, cfg)
+        if not args.auto_providers:
+            _provider_credentials(provider, cfg)
         completed = collect_products(args, cfg, rules)
         if not completed:
             LOG.warning("PROCESSO COMPLETO interrompido após a coleta. Classificação não iniciada.")
