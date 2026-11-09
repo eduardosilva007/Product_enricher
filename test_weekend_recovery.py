@@ -1,6 +1,8 @@
 """Recovery ledger prevents repeated paid work and advances only after successful persistence."""
 import tempfile
 import unittest
+
+import pandas as pd
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -47,6 +49,42 @@ class WeekendRecoveryTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "BASELINE_PERSISTENCE_FAILED"):
                     p.run_cache_recovery(args, self.cfg(folder), SimpleNamespace())
                 self.assertFalse((folder / "attempted.txt").exists())
+
+
+    def test_equivalence_acceptance_is_counted_only_with_audited_provenance(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "final.xlsx"
+            df = pd.DataFrame([
+                {
+                    "Marca": "BOSCH",
+                    "Modelo": "GWS 900-100",
+                    "O que é (Tipo)": "ANGLE GRINDER",
+                    "Category General": "OTHERS",
+                    "FAMILY": "ANGLE GRINDER",
+                    "Resolution State": "RESOLVED",
+                    "Status Processamento": "PROCESSADO",
+                    "Review Required": "NÃO",
+                    "Revisão": "AUTO_APROVADO",
+                    "Próxima Ação": "CONCLUIDO_POR_EQUIVALENCIA_TECNICA",
+                },
+                {
+                    "Marca": "MAKITA",
+                    "Modelo": "HG6030",
+                    "O que é (Tipo)": "HEAT GUN",
+                    "Category General": "OTHERS",
+                    "FAMILY": "HEAT GUN",
+                    "Resolution State": "RESOLVED",
+                    "Status Processamento": "PROCESSADO",
+                    "Review Required": "NÃO",
+                    "Revisão": "AUTO_APROVADO",
+                    "Próxima Ação": "OUTRA_ORIGEM_NAO_AUDITADA",
+                },
+            ])
+            df.to_excel(path, index=False)
+            bosch = p.business_key("BOSCH", "GWS 900-100")
+            makita = p.business_key("MAKITA", "HG6030")
+            got = p._cohort_equivalence_accepted_keys(path, {bosch, makita})
+            self.assertEqual(got, {bosch})
 
     def test_preflight_parser_understands_json(self):
         value = '24H_PREFLIGHT_OK: {"final_accepted": 9295, "missing_gold": 0, "sqlite": "ok"}'
