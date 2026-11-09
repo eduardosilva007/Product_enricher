@@ -4395,32 +4395,53 @@ class DeterministicEngine:
         )
 
 
-def _combo_kit_components(rules: Rules, s1: Stage1Result) -> List[str]:
-    """Retorna componentes de um POWER TOOL COMBO KIT explicitamente comprovado.
+def _collapse_related_primary_types(rules: Rules, types: Sequence[str]) -> List[str]:
+    """Colapsa aliases/específico-genérico para não confundir um produto multifunção com combo."""
+    current = {safe(t) for t in types if safe(t)}
+    if len(current) < 2:
+        return sorted(current)
+    for group in (rules.specificity_groups or []):
+        present = [safe(t) for t in group if safe(t) in current]
+        if len(present) < 2:
+            continue
+        winner = max(present, key=lambda t: rules.specificity_rank.get(t, 0))
+        for t in present:
+            if t != winner:
+                current.discard(t)
+    generic = {"CUTTER", "MULTI-TOOL", "DRILL", "DRILLER", "SCREWDRIVER"}
+    specific = current - generic
+    if specific:
+        current -= {t for t in generic if t in current}
+    return sorted(current)
 
-    Não usa apenas a palavra 'kit': exige sinal de combo no texto target e pelo
-    menos DOIS tipos físicos elegíveis explicitamente sustentados no mesmo alvo.
-    Assim drill+bateria+carregador continua sendo DRILL, não combo kit.
+
+def _combo_kit_components(rules: Rules, s1: Stage1Result) -> List[str]:
+    """Retorna produtos físicos distintos do mesmo SKU que devem virar COMBO KIT.
+
+    Bateria/carregador/acessório/peça não contam como produto principal. Relações
+    específico-genérico e aliases são colapsadas antes da decisão. Se uma fonte
+    STRONG do próprio SKU sustenta dois ou mais produtos principais distintos no
+    TITLE/BODY, o SKU é tratado como combo mesmo sem a palavra literal "kit".
     """
     policy = rules.raw.get("COMBO_KIT_POLICY", {}) or {}
     if not bool(policy.get("enabled", True)):
         return []
     eligible = {safe(x) for x in (policy.get("eligible_primary_types", []) or []) if safe(x)}
-    combo_terms = [safe(x) for x in (policy.get("combo_terms", []) or []) if safe(x)]
+    min_types = int(policy.get("min_distinct_primary_types", 2) or 2)
     rank = DeterministicEngine.IDENTITY_RANK
-    target_sources = [s for s in s1.sources if rank.get(s.relevance, 0) >= rank.get("STRONG", 4)]
+    target_sources = [src for src in s1.sources if rank.get(src.relevance, 0) >= rank.get("STRONG", 4)]
     for src in target_sources:
-        folded = norm_text(f"{src.title}\n{src.content[:1200]}")
-        if not any(contains_alias_prepared(folded, term) for term in combo_terms):
-            continue
         explicit = {
             t for t in s1.type_candidates
             if t in eligible
+            and t not in rules.component_types
             and float(src.type_scores.get(t, 0.0) or 0.0) > 0.0
-            and ("TITLE" in (src.type_evidence_fields.get(t, []) or []) or "BODY" in (src.type_evidence_fields.get(t, []) or []))
+            and ("TITLE" in (src.type_evidence_fields.get(t, []) or [])
+                 or "BODY" in (src.type_evidence_fields.get(t, []) or []))
         }
-        if len(explicit) >= int(policy.get("min_distinct_primary_types", 2) or 2):
-            return sorted(explicit)
+        distinct = _collapse_related_primary_types(rules, explicit)
+        if len(distinct) >= min_types:
+            return distinct
     return []
 
 
@@ -4457,7 +4478,7 @@ def choose_combo_title(rules: Rules, s1: Stage1Result) -> Tuple[str, str]:
 
 
 def multi_product_target_detected(rules: Rules, s1: Stage1Result) -> bool:
-    """Detecta múltiplos produtos, exceto combo kit explicitamente modelado."""
+    """Mantido como gate de segurança; combos reais são resolvidos antes deste ponto."""
     if _combo_kit_components(rules, s1):
         return False
     rank = DeterministicEngine.IDENTITY_RANK
