@@ -297,7 +297,7 @@
     "pipeline_version": "4.0.7.3.1-input-scoped-recuration",
     "collection_engine_version": "2026-10-22-r9.6p7.2.3-structural-sku-core",
     "collection_policy_version": "2026-10-22-r9.6p7.2.3-structural-sku-core",
-    "rules_version": "2026-11-09-v3.0.20-audited-stage1-reviewed-family",
+    "rules_version": "2026-11-09-v3.0.21-final-reviewed-taxonomy",
     "evidence_cache_schema": "1",
     "identity_profile_version": "2026-10-22-structural-sku-core-v3"
   },
