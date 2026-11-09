@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-11-09-v3.0.16.1-reviewed-family-aliases",
+  "VERSION": "2026-11-09-v3.0.16.2-reviewed-family-aliases",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -2625,7 +2625,6 @@
     "DIE GRINDER": {
       "aliases": [
         "die grinder",
-        "straight grinder",
         "corded die grinder",
         "retifica",
         "retifica reta",
@@ -3070,7 +3069,6 @@
     "MARBLE SAW": {
       "aliases": [
         "marble saw",
-        "masonry saw",
         "serra marmore"
       ]
     },
@@ -3187,7 +3185,6 @@
     "CONCRETE CUTTER": {
       "aliases": [
         "concrete cutter",
-        "concrete saw",
         "cortadora de concreto",
         "cortador de asfalto",
         "concrete cutters"
@@ -3347,7 +3344,8 @@
         "accessories kit",
         "kit de acessorios",
         "kit de accesorios",
-        "accessorys"
+        "accessorys",
+        "accessory"
       ]
     },
     "PART": {
@@ -3362,7 +3360,6 @@
     },
     "ENGINE": {
       "aliases": [
-        "stationary engine",
         "replacement engine",
         "industrial engine",
         "motor estacionario",
@@ -3416,7 +3413,6 @@
         "mist blower",
         "mist sprayer",
         "backpack mist blower",
-        "atomizer",
         "atomiser",
         "atomizador",
         "pulverizador atomizador",
@@ -3475,7 +3471,6 @@
         "motobomba",
         "bomba d'água",
         "bomba de agua",
-        "garden pump",
         "submersible pump",
         "sewage pump",
         "peripheral pump",
@@ -3663,7 +3658,6 @@
     "GRINDING MACHINE": {
       "aliases": [
         "grinding machine",
-        "retífica",
         "grinding machines"
       ]
     },
@@ -3951,7 +3945,6 @@
       "aliases": [
         "straight grinder",
         "straight grinding machine",
-        "retifica reta",
         "rectificadora recta",
         "esmeril recto",
         "straight grinders"
@@ -4064,13 +4057,9 @@
     "ELECTRIC MIXER": {
       "aliases": [
         "electric mixer",
-        "paint mixer",
         "paddle mixer",
         "power mixer",
-        "mezclador de pintura",
-        "mezclador pintura",
         "mezclador electrico",
-        "misturador de tinta",
         "misturador eletrico",
         "cordless mixer",
         "battery mixer",
@@ -4087,14 +4076,12 @@
       "aliases": [
         "lift pump",
         "booster pump",
-        "water booster pump",
         "bomba elevadora",
         "bomba de elevacion",
         "bomba pressurizadora",
         "bomba presurizadora",
         "bomba pressurizadora de água",
         "bomba presurizadora de agua",
-        "pressurizer pump",
         "pressure booster pump"
       ],
       "negative_aliases": [
@@ -4257,14 +4244,11 @@
         "disc mower",
         "disk mower",
         "front disc mower",
-        "rear disc mower",
         "front mower",
         "rear mower",
         "front mounted mower",
         "rear mounted mower",
         "mounted mower",
-        "mower-conditioner",
-        "disc mower conditioner",
         "mounted mower conditioner",
         "hay mower",
         "forage mower",
@@ -4329,7 +4313,6 @@
     "FAN": {
       "aliases": [
         "fan",
-        "electric fan",
         "ventilator",
         "ventilador",
         "fans"
@@ -4720,7 +4703,6 @@
         "explosion proof blower",
         "explosion proof axial blower",
         "axial blower",
-        "centrifugal blower",
         "ventilation blower",
         "confined space blower",
         "industrial ventilator blower",
@@ -4766,7 +4748,6 @@
         "axial fan",
         "ac axial fan",
         "dc axial fan",
-        "axial-flow fan",
         "axial cooling fan"
       ],
       "negative_aliases": [
@@ -4781,16 +4762,12 @@
     "COOLING FAN": {
       "aliases": [
         "cooling fan",
-        "radiator fan",
         "cabinet fan",
-        "case fan",
         "computer fan",
         "cpu fan",
         "server fan",
         "chassis fan",
-        "electronics cooling fan",
-        "charge fan",
-        "cooler fan"
+        "electronics cooling fan"
       ],
       "negative_aliases": [
         "blower fan",
@@ -4860,7 +4837,6 @@
     "SUCTION FAN": {
       "aliases": [
         "suction fan",
-        "exhaust fan",
         "extractor fan",
         "extraction fan",
         "induced draft fan",
@@ -4882,7 +4858,6 @@
         "cpu air cooler",
         "computer cooler",
         "processor cooling unit",
-        "air cooled heat sink",
         "cpu heatsink",
         "cpu heat sink",
         "cooler",
