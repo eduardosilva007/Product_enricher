@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-11-09-v3.0.18-stable-stage1-reviewed-family",
+  "VERSION": "2026-11-09-v3.0.19-audited-stage1-reviewed-family",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -36,7 +36,8 @@
     "Canonical FAMILY labels may expose conservative orthographic aliases (hyphen/space, punctuation and terminal singular/plural) only when the alias is collision-free; aliases never override another canonical FAMILY.",
     "OTHERS|OTHERS is forbidden as an executable taxonomy dead-end; reviewed legacy OTHERS labels remain manual/review-only and are not promoted to PRODUCT_TYPE.",
     "Reviewed FAMILY expansion does not imply PRODUCT_TYPE expansion: FAMILY refinements remain taxonomy evidence under stable primary types unless the product class is independently meaningful.",
-    "Existing Stage-1 PRODUCT_TYPE aliases are frozen to the audited pre-expansion baseline; reviewed FAMILY growth must not broaden legacy type aliases implicitly."
+    "Existing Stage-1 PRODUCT_TYPE aliases are frozen to the audited pre-expansion baseline; reviewed FAMILY growth must not broaden legacy type aliases implicitly.",
+    "Audited TAXONOMY_EVIDENCE_RULES are baseline-frozen; reviewed FAMILY expansion adds only explicit narrow refinements and never rewrites existing evidence aliases."
   ],
   "TAXONOMY_PAIRS": [
     {
@@ -6934,7 +6935,9 @@
       "dual action polisher": "POLISHER",
       "pulidora dual action": "POLISHER",
       "rotavator": "TILLER",
-      "rotovator": "TILLER"
+      "rotovator": "TILLER",
+      "atomizer": "ATOMIZER",
+      "concrete saw": "CONCRETE SAW"
     }
   },
   "CLASSIFICATION_POLICY": {
@@ -9044,9 +9047,7 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "LOWARA",
       "model_regex": "^1016L[CD]\\d+",
-      "aliases": [
-        "centrifugal pump"
-      ],
+      "aliases": [],
       "priority": 390
     },
     {
@@ -9055,9 +9056,7 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "WILO",
       "model_regex": "^MEDANA\\s+CH1",
-      "aliases": [
-        "centrifugal pump"
-      ],
+      "aliases": [],
       "priority": 390
     },
     {
@@ -9082,6 +9081,7 @@
         "waste water pump",
         "wastewater pump",
         "grinder pump",
+        "bomba submersível",
         "bomba submersivel",
         "bomba sumergible",
         "bomba fecal"
@@ -9102,7 +9102,9 @@
         "circulator pump",
         "recirculation pump",
         "bomba circuladora",
+        "bomba de circulação",
         "bomba de circulacao",
+        "bomba de circulación",
         "bomba de circulacion"
       ],
       "priority": 315
@@ -9114,6 +9116,7 @@
       "aliases": [
         "peripheral water pump",
         "peripheral pump",
+        "bomba periférica",
         "bomba periferica"
       ],
       "priority": 310
@@ -9140,10 +9143,11 @@
       "family": "PRIMING PUMP",
       "aliases": [
         "jet self priming pump",
+        "self priming pump",
         "self-priming pump",
+        "self priming water pump",
         "self-priming water pump",
-        "bomba autocebante",
-        "priming pump"
+        "bomba autocebante"
       ],
       "priority": 300
     },
@@ -9167,11 +9171,14 @@
       "category_general": "OTHERS",
       "family": "CENTRIFUGAL PUMP",
       "aliases": [
+        "single stage inline centrifugal pump",
         "single-stage inline centrifugal pump",
         "end suction centrifugal pump",
+        "single impeller centrifugal pump",
         "single-impeller centrifugal pump",
         "centrifugal water pump",
         "centrifugal pump",
+        "bomba centrífuga",
         "bomba centrifuga"
       ],
       "priority": 304
@@ -9183,11 +9190,10 @@
       "brand": "GRUNDFOS",
       "aliases": [
         "grundfos ups",
-        "grundfos up",
+        "grundfos up ",
         "grundfos magna",
         "alpha2",
-        "magna3",
-        "circulation pump"
+        "magna3"
       ],
       "priority": 360
     },
@@ -9197,8 +9203,7 @@
       "family": "PRESSURIZATION PUMP",
       "brand": "GRUNDFOS",
       "aliases": [
-        "scala1",
-        "pressurization pump"
+        "scala1"
       ],
       "priority": 365
     },
@@ -9208,9 +9213,8 @@
       "family": "SUBMERSIBLE PUMP",
       "brand": "GRUNDFOS",
       "aliases": [
-        "grundfos sp",
-        "sp submersible groundwater",
-        "submersible pump"
+        "grundfos sp ",
+        "sp submersible groundwater"
       ],
       "priority": 355
     },
@@ -9221,10 +9225,10 @@
       "brand": "GRUNDFOS",
       "aliases": [
         "grundfos cm",
-        "grundfos cr",
+        "grundfos cr ",
         "grundfos crn",
         "grundfos crne",
-        "grundfos tp",
+        "grundfos tp ",
         "grundfos tpd",
         "grundfos nbg",
         "cm 1-",
@@ -9236,8 +9240,7 @@
         "tp 80-",
         "tp 100-",
         "tp 125-",
-        "nbg",
-        "centrifugal pump"
+        "nbg "
       ],
       "priority": 340
     },
@@ -9253,8 +9256,7 @@
         "domo15",
         "domo 15",
         "domo20",
-        "domo 20",
-        "submersible pump"
+        "domo 20"
       ],
       "priority": 350
     },
@@ -9266,9 +9268,8 @@
       "aliases": [
         "lowara 15hm",
         "lowara 22hm",
-        "15hm",
-        "22hm",
-        "multistage pump"
+        "15hm ",
+        "22hm "
       ],
       "priority": 345
     },
@@ -9280,9 +9281,9 @@
       "aliases": [
         "lowara cea",
         "lowara ceam",
+        "single-impeller pump",
         "single impeller pump",
-        "end suction pump",
-        "centrifugal pump"
+        "end suction pump"
       ],
       "priority": 335
     },
@@ -9295,8 +9296,7 @@
         "cpm170",
         "cpm190",
         "cpm200",
-        "centrifugal water pump",
-        "centrifugal pump"
+        "centrifugal water pump"
       ],
       "priority": 350
     },
@@ -9324,8 +9324,7 @@
         "wvsd",
         "wqd",
         "submersible sewage pump",
-        "sewage pump",
-        "submersible pump"
+        "sewage pump"
       ],
       "priority": 350
     },
@@ -9336,8 +9335,7 @@
       "brand": "SHIMGE",
       "aliases": [
         "zp15",
-        "zp 15",
-        "priming pump"
+        "zp 15"
       ],
       "priority": 340
     },
@@ -9347,10 +9345,12 @@
       "family": "PERIPHERAL PUMP",
       "brand": "PLUVIUS",
       "aliases": [
+        "qb-60",
         "qb 60",
+        "qb-70",
         "qb 70",
-        "qb 80",
-        "peripheral pump"
+        "qb-80",
+        "qb 80"
       ],
       "priority": 345
     },
@@ -9360,8 +9360,8 @@
       "family": "PERIPHERAL PUMP",
       "brand": "VASSER",
       "aliases": [
-        "qb-60",
-        "peripheral pump"
+        "qb 60",
+        "qb-60"
       ],
       "priority": 345
     },
@@ -9396,8 +9396,7 @@
       "aliases": [
         "intelligent permanent magnet booster pump",
         "smart booster pump",
-        "smart water pump",
-        "pressurization pump"
+        "smart water pump"
       ],
       "priority": 330
     },
@@ -9407,8 +9406,7 @@
       "family": "PRESSURIZATION PUMP",
       "brand": "GRUNDFOS",
       "aliases": [
-        "scala1",
-        "pressurization pump"
+        "scala1"
       ],
       "priority": 365
     },
@@ -9421,8 +9419,7 @@
         "ca1000",
         "ca600",
         "ca200",
-        "pa500",
-        "pressurization pump"
+        "pa500"
       ],
       "priority": 360
     },
@@ -9435,8 +9432,7 @@
         "pre 1",
         "pre 2",
         "qc pres",
-        "qc te",
-        "pressure booster pump"
+        "qc te"
       ],
       "priority": 355
     },
@@ -9448,8 +9444,7 @@
       "aliases": [
         "pres 260",
         "pres 500",
-        "pres vvi",
-        "pressure booster pump"
+        "pres vvi"
       ],
       "priority": 355
     },
@@ -9495,8 +9490,7 @@
       "model_regex": "^MHIKE[ _/-]*803A$",
       "aliases": [
         "booster pump",
-        "water pressure",
-        "pressure booster pump"
+        "water pressure"
       ],
       "priority": 370
     },
@@ -9518,10 +9512,7 @@
       "family": "SHEARS",
       "brand": "INFACO",
       "model_regex": "^F3020$",
-      "aliases": [
-        "shears",
-        "shear"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9539,10 +9530,7 @@
       "family": "CYLINDER MOWERS",
       "brand": "DENNIS",
       "model_regex": "^G860$",
-      "aliases": [
-        "cylinder mowers",
-        "cylinder mower"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9551,9 +9539,7 @@
       "family": "ENGINE",
       "brand": "KOOP",
       "model_regex": "^192F$",
-      "aliases": [
-        "engine"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9562,10 +9548,7 @@
       "family": "SOIL COMPACTOR",
       "brand": "MASALTA",
       "model_regex": "^EMR70H$",
-      "aliases": [
-        "soil compactor",
-        "soil compactors"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9574,10 +9557,7 @@
       "family": "FLAIL MOWER",
       "brand": "TAVOL",
       "model_regex": "^FLAIL\\ MOWER$",
-      "aliases": [
-        "flail mower",
-        "flail mowers"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9595,10 +9575,7 @@
       "family": "GENERATOR",
       "brand": "BRANIK",
       "model_regex": "^BK20RSE\\.3$",
-      "aliases": [
-        "generator",
-        "generators"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9625,10 +9602,7 @@
       "family": "GENERATOR",
       "brand": "PRAMAC",
       "model_regex": "^GA13000$",
-      "aliases": [
-        "generator",
-        "generators"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9637,9 +9611,7 @@
       "family": "DRAIN PUMP",
       "brand": "RATIONAL",
       "model_regex": "^87\\.01\\.954S$",
-      "aliases": [
-        "drain pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9648,10 +9620,7 @@
       "family": "GENERATOR",
       "brand": "TOMAHAWK",
       "model_regex": "^TG3500E$",
-      "aliases": [
-        "generator",
-        "generators"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9660,10 +9629,7 @@
       "family": "GENERATOR",
       "brand": "WEICHAI",
       "model_regex": "^WPG22L1$",
-      "aliases": [
-        "generator",
-        "generators"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9708,10 +9674,7 @@
       "family": "WASHER",
       "brand": "ADV3",
       "model_regex": "^HL1400$",
-      "aliases": [
-        "washer",
-        "washers"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9720,20 +9683,16 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "AMT",
       "model_regex": "^2763\\ 95$",
-      "aliases": [
-        "centrifugal pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
       "primary_type": "WATERPUMP",
       "category_general": "WATERPUMPS",
-      "family": "WATER PUMP",
+      "family": "WATERPUMP",
       "brand": "CET",
       "model_regex": "^PFP\\ 9HP\\ DSL$",
-      "aliases": [
-        "water pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9751,9 +9710,7 @@
       "family": "PARTS",
       "brand": "GESIPA",
       "model_regex": "^1679664$",
-      "aliases": [
-        "parts"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9762,9 +9719,7 @@
       "family": "ELETRIC PUMP",
       "brand": "GRIFO",
       "model_regex": "^G20I95$",
-      "aliases": [
-        "eletric pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9782,10 +9737,7 @@
       "family": "MULTIFUNCTIONAL",
       "brand": "HEAR",
       "model_regex": "^HSM300$",
-      "aliases": [
-        "multifunctional",
-        "multifunctionals"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9803,9 +9755,7 @@
       "family": "BATTERY BLOWER",
       "brand": "MIYAWA",
       "model_regex": "^DSTI_155B$",
-      "aliases": [
-        "battery blowers"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9814,9 +9764,7 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "PEDROLLO",
       "model_regex": "^CP\\ 160C$",
-      "aliases": [
-        "centrifugal pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9825,9 +9773,7 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "PEDROLLO",
       "model_regex": "^CP\\ 220C$",
-      "aliases": [
-        "centrifugal pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9836,9 +9782,7 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "PEDROLLO",
       "model_regex": "^CP\\ 230A$",
-      "aliases": [
-        "centrifugal pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9847,9 +9791,7 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "PEDROLLO",
       "model_regex": "^CP\\ 230B$",
-      "aliases": [
-        "centrifugal pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9858,9 +9800,7 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "PEDROLLO",
       "model_regex": "^CPM160B$",
-      "aliases": [
-        "centrifugal pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9869,9 +9809,7 @@
       "family": "PERIPHERAL PUMP",
       "brand": "PEDROLLO",
       "model_regex": "^PKM80$",
-      "aliases": [
-        "peripheral pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9880,9 +9818,7 @@
       "family": "ROUTER GLASS",
       "brand": "ROUTECK",
       "model_regex": "^JATECK$",
-      "aliases": [
-        "router glass"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9891,9 +9827,7 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "SPERONI",
       "model_regex": "^CAM\\ 100$",
-      "aliases": [
-        "centrifugal pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9938,9 +9872,7 @@
       "family": "DRAINAGE PUMP",
       "brand": "ASKOLL",
       "model_regex": "^EAU61383505$",
-      "aliases": [
-        "drainage pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -9985,9 +9917,7 @@
       "family": "REBAR TYING TOOL",
       "brand": "MAX",
       "model_regex": "^RB611T$",
-      "aliases": [
-        "rebar tying tool"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -10023,9 +9953,7 @@
       "family": "DRAINAGE PUMP",
       "brand": "SAMSUNG",
       "model_regex": "^DC31\\ 00187A$",
-      "aliases": [
-        "drainage pump"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -10088,10 +10016,7 @@
       "family": "TILLERS",
       "brand": "AMAZONE",
       "model_regex": "^CEUS\\ 5000\\ 2TX$",
-      "aliases": [
-        "tillers",
-        "tiller"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -10100,10 +10025,7 @@
       "family": "PORTABLE WASHER",
       "brand": "FANTTIK",
       "model_regex": "^K100\\ FLIP$",
-      "aliases": [
-        "portable washer",
-        "portable washers"
-      ],
+      "aliases": [],
       "priority": 900
     },
     {
@@ -10112,10 +10034,7 @@
       "family": "WASHER",
       "brand": "BESTOOL",
       "model_regex": "^HL2500$",
-      "aliases": [
-        "washer",
-        "washers"
-      ],
+      "aliases": [],
       "priority": 925
     },
     {
@@ -10124,9 +10043,7 @@
       "family": "PARTS",
       "brand": "ALLLEN BRADLEY",
       "model_regex": "^41391/801/01$",
-      "aliases": [
-        "parts"
-      ],
+      "aliases": [],
       "priority": 925
     },
     {
@@ -10135,9 +10052,7 @@
       "family": "SPRAYERS",
       "brand": "ANNOVI REVERBERI",
       "model_regex": "^52180\\.$",
-      "aliases": [
-        "sprayers"
-      ],
+      "aliases": [],
       "priority": 925
     },
     {
@@ -10146,9 +10061,7 @@
       "family": "HYDRAULIC PUMP",
       "brand": "AZCUE",
       "model_regex": "^MO\\ 19/20$",
-      "aliases": [
-        "hydraulic pump"
-      ],
+      "aliases": [],
       "priority": 925
     },
     {
@@ -10157,10 +10070,7 @@
       "family": "WASHER",
       "brand": "BELARRA",
       "model_regex": "^H\\ 6501/1$",
-      "aliases": [
-        "washer",
-        "washers"
-      ],
+      "aliases": [],
       "priority": 925
     },
     {
@@ -10169,10 +10079,7 @@
       "family": "WASHER",
       "brand": "BLITZ",
       "model_regex": "^FCHPW20LX$",
-      "aliases": [
-        "washer",
-        "washers"
-      ],
+      "aliases": [],
       "priority": 925
     },
     {
@@ -10181,9 +10088,7 @@
       "family": "SUCTION SUBMERSIBLE PUMP",
       "brand": "BRINKMANN PUMPS",
       "model_regex": "^SGL502/450\\+001$",
-      "aliases": [
-        "suction submersible pump"
-      ],
+      "aliases": [],
       "priority": 925
     },
     {
@@ -10192,10 +10097,7 @@
       "family": "BRUSH SANDER",
       "brand": "BRISTLE BLASTER",
       "model_regex": "^SE\\ 1399$",
-      "aliases": [
-        "brush sander",
-        "brush sanders"
-      ],
+      "aliases": [],
       "priority": 925
     },
     {
@@ -10204,9 +10106,7 @@
       "family": "WATER PUMP",
       "brand": "BRUMBY",
       "model_regex": "^490B\\ 42004$",
-      "aliases": [
-        "water pump"
-      ],
+      "aliases": [],
       "priority": 925
     },
     {
@@ -10215,9 +10115,7 @@
       "family": "PARTS",
       "brand": "ALLEN BRADLEY",
       "model_regex": "^41391/801/01$",
-      "aliases": [
-        "parts"
-      ],
+      "aliases": [],
       "priority": 925
     },
     {
@@ -10226,99 +10124,8 @@
       "family": "PARTS",
       "brand": "ALLE N BRADLEY",
       "model_regex": "^41391/801/01$",
-      "aliases": [
-        "parts"
-      ],
+      "aliases": [],
       "priority": 925
-    },
-    {
-      "primary_type": "WALK BEHIND MOWER",
-      "category_general": "ENGINE",
-      "family": "PETROL WALK BEHIND MOWER",
-      "aliases": [
-        "petrol walk behind mower",
-        "petrol walk behind mowers"
-      ],
-      "priority": 180
-    },
-    {
-      "primary_type": "CHAINSAW",
-      "category_general": "OTHERS",
-      "family": "CORDED CHAINSAW",
-      "aliases": [
-        "corded chainsaw",
-        "corded chainsaws"
-      ],
-      "priority": 180
-    },
-    {
-      "primary_type": "DRILLER",
-      "category_general": "OTHERS",
-      "family": "DRILLERS",
-      "aliases": [
-        "drillers",
-        "driller"
-      ],
-      "priority": 180
-    },
-    {
-      "primary_type": "DUSTER",
-      "category_general": "OTHERS",
-      "family": "DUSTER",
-      "aliases": [
-        "duster",
-        "dusters"
-      ],
-      "priority": 180
-    },
-    {
-      "primary_type": "ROBOTIC LAWN MOWER",
-      "category_general": "OTHERS",
-      "family": "ROBOTIC LAWN MOWER",
-      "aliases": [
-        "robotic lawn mower",
-        "robotic lawn mowers"
-      ],
-      "priority": 180
-    },
-    {
-      "primary_type": "TILE VIBRATION MACHINE",
-      "category_general": "OTHERS",
-      "family": "TILE VIBRATION MACHINE",
-      "aliases": [
-        "tile vibration machine",
-        "tile vibration machines"
-      ],
-      "priority": 180
-    },
-    {
-      "primary_type": "PRESSURE WASHER",
-      "category_general": "OTHERS",
-      "family": "WASHER",
-      "aliases": [
-        "washer",
-        "washers"
-      ],
-      "priority": 180
-    },
-    {
-      "primary_type": "WALK BEHIND MOWER",
-      "category_general": "PETROL TRACTOR",
-      "family": "PETROL WALK BEHIND MOWER",
-      "aliases": [
-        "petrol walk behind mower",
-        "petrol walk behind mowers"
-      ],
-      "priority": 180
-    },
-    {
-      "primary_type": "ZERO TURN",
-      "category_general": "PETROL WHEELD",
-      "family": "PETROL ZERO TURN",
-      "aliases": [
-        "petrol zero turn"
-      ],
-      "priority": 180
     },
     {
       "primary_type": "WATERPUMP",
