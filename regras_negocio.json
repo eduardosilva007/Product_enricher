@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-11-09-v3.0.16.2-reviewed-family-aliases",
+  "VERSION": "2026-11-09-v3.0.16.3-reviewed-family-aliases",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -3330,8 +3330,7 @@
         "cargador rapido",
         "charger",
         "chargers",
-        "accessories",
-        "accessory"
+        "accessories"
       ],
       "fallback_pair": [
         "PARTS & ACCESSORIES",
