@@ -8746,6 +8746,36 @@ def _expected_cohort_accepted_after_run(
 
     return expected
 
+_EQUIVALENCE_ACCEPT_ACTIONS = {
+    "CONCLUIDO_POR_EQUIVALENCIA_BI",
+    "CONCLUIDO_POR_EQUIVALENCIA_TECNICA",
+}
+
+
+def _cohort_equivalence_accepted_keys(final_path: Optional[Path], cohort_keys: set) -> set:
+    """Aceitos extras permitidos somente quando a Base Final registra equivalência auditável."""
+    if not final_path or not final_path.exists() or not cohort_keys:
+        return set()
+
+    final_df, _ = _read_business_sheet(final_path)
+    brand_col = find_col(final_df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    model_col = find_col(final_df, ["Modelo", "Model", "SKU", "Part Number"])
+    action_col = find_col(final_df, ["Próxima Ação", "Proxima Acao"], required=False)
+    if not action_col:
+        return set()
+
+    accepted: set = set()
+    for _, row in final_df.iterrows():
+        key = business_key(safe(row.get(brand_col)), safe(row.get(model_col)))
+        if key not in cohort_keys:
+            continue
+        action = safe(row.get(action_col)).upper()
+        if action not in _EQUIVALENCE_ACCEPT_ACTIONS:
+            continue
+        if _baseline_row_accepted(row, final_df):
+            accepted.add(key)
+    return accepted
+
 
 def inventory(
     store: TavilyReadOnlyStore,
@@ -9523,9 +9553,15 @@ def run_pipeline(
                         rows=rows,
                         force_reprocess_keys=force_reprocess_keys,
                     )
+                    equivalence_accepted_keys = _cohort_equivalence_accepted_keys(
+                        final_path=final_path,
+                        cohort_keys=cohort_keys,
+                    )
+                    expected_cohort_keys |= equivalence_accepted_keys
                     expected_cohort_accepted = len(expected_cohort_keys)
                     stats["cohort_final_accepted_at_end"] = final_cohort_accepted
                     stats["cohort_expected_accepted_at_end"] = expected_cohort_accepted
+                    stats["cohort_equivalence_accepted_at_end"] = len(equivalence_accepted_keys)
 
                     LOG.info(
                         "BASELINE EXCEL ATUALIZADA | %s",
@@ -9534,10 +9570,11 @@ def run_pipeline(
                         ),
                     )
                     LOG.info(
-                        "COHORT BASE FINAL | aceitos=%d/%d | esperado=%d | review=%d",
+                        "COHORT BASE FINAL | aceitos=%d/%d | esperado=%d | equivalencia=%d | review=%d",
                         final_cohort_accepted,
                         len(cohort),
                         expected_cohort_accepted,
+                        len(equivalence_accepted_keys),
                         int(stats.get("final_review", 0) or 0),
                     )
 
