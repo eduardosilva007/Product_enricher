@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-11-09-v3.0.16.3-reviewed-family-aliases",
+  "VERSION": "2026-11-09-v3.0.16.4-reviewed-family-aliases",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -33,7 +33,8 @@
     "WATERPUMP não pode nascer de usos não-hídricos de pump (windscreen/windshield washer, ink, fuel, oil, vacuum, condensate); quando explícitos, esses produtos usam TYPE/FAMILY próprios em OTHERS.",
     "Próxima Ação deve ser CONCLUIDO em todo registro realmente RESOLVED; AUTO_APROVADO nunca pode coexistir com ação de LLM/revisão.",
     "Reviewed FAMILY catalog from Base Final is authoritative for accepted Category General|FAMILY labels; WATERPUMPS|WATER PUMP is the canonical generic water-pump pair.",
-    "Canonical FAMILY labels may expose conservative orthographic aliases (hyphen/space, punctuation and terminal singular/plural) only when the alias is collision-free; aliases never override another canonical FAMILY."
+    "Canonical FAMILY labels may expose conservative orthographic aliases (hyphen/space, punctuation and terminal singular/plural) only when the alias is collision-free; aliases never override another canonical FAMILY.",
+    "OTHERS|OTHERS is forbidden as an executable taxonomy dead-end; reviewed legacy OTHERS labels remain manual/review-only and are not promoted to PRODUCT_TYPE."
   ],
   "TAXONOMY_PAIRS": [
     {
@@ -1991,10 +1992,6 @@
     {
       "category_general": "OTHERS",
       "family": "OSCILLATING FAN"
-    },
-    {
-      "category_general": "OTHERS",
-      "family": "OTHERS"
     },
     {
       "category_general": "OTHERS",
@@ -7694,16 +7691,6 @@
       "fallback_pair": [
         "OTHERS",
         "OSCILLATING FAN"
-      ]
-    },
-    "OTHERS": {
-      "aliases": [
-        "others",
-        "other"
-      ],
-      "fallback_pair": [
-        "OTHERS",
-        "OTHERS"
       ]
     },
     "PEDESTAL FAN": {
