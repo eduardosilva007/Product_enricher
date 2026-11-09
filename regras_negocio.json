@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-11-09-v3.0.16-reviewed-family-catalog",
+  "VERSION": "2026-11-09-v3.0.16.1-reviewed-family-aliases",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -32,7 +32,8 @@
     "Ruído de importação de FAN/COOLER/BLOWER industrial é classificado como OTHERS na FAMILY física específica, evitando inflar PETROL/CORDED/BATTERY garden equipment.",
     "WATERPUMP não pode nascer de usos não-hídricos de pump (windscreen/windshield washer, ink, fuel, oil, vacuum, condensate); quando explícitos, esses produtos usam TYPE/FAMILY próprios em OTHERS.",
     "Próxima Ação deve ser CONCLUIDO em todo registro realmente RESOLVED; AUTO_APROVADO nunca pode coexistir com ação de LLM/revisão.",
-    "Reviewed FAMILY catalog from Base Final is authoritative for accepted Category General|FAMILY labels; WATERPUMPS|WATER PUMP is the canonical generic water-pump pair."
+    "Reviewed FAMILY catalog from Base Final is authoritative for accepted Category General|FAMILY labels; WATERPUMPS|WATER PUMP is the canonical generic water-pump pair.",
+    "Canonical FAMILY labels may expose conservative orthographic aliases (hyphen/space, punctuation and terminal singular/plural) only when the alias is collision-free; aliases never override another canonical FAMILY."
   ],
   "TAXONOMY_PAIRS": [
     {
@@ -2609,7 +2610,8 @@
         "esmeril angular",
         "esmeriladora",
         "esmeriladora angular",
-        "amoladora"
+        "amoladora",
+        "angle grinders"
       ],
       "negative_aliases": [
         "die grinder",
@@ -2625,10 +2627,9 @@
         "die grinder",
         "straight grinder",
         "corded die grinder",
-        "retífica",
         "retifica",
-        "retífica reta",
-        "retifica reta"
+        "retifica reta",
+        "die grinders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -2643,37 +2644,32 @@
         "aparador de cerca viva",
         "cortasetos",
         "corta setos",
-        "кусторез",
-        "аккумуляторный кусторез",
-        "ножницы для живой изгороди"
+        "ножницы для живой изгороди",
+        "hedge trimmers"
       ]
     },
     "TRIMMER": {
       "aliases": [
         "brushcutter",
         "trimmer",
-        "roçadeira",
         "rocadeira",
         "desbrozadora",
         "brush cutter",
         "backpack brush cutter",
         "backpack brushcutter",
-        "motoguadaña",
         "motoguadana",
         "desmalezadora",
         "orilladora",
-        "orilladora eléctrica",
         "orilladora electrica",
         "bordeadora",
-        "bordeadora eléctrica",
         "bordeadora electrica",
         "grass trimmer",
         "string trimmer",
         "line trimmer",
         "aparador de grama",
         "aparador de bordas",
-        "aparador elétrico",
-        "aparador eletrico"
+        "aparador eletrico",
+        "trimmers"
       ],
       "negative_aliases": [
         "hedge trimmer",
@@ -2694,9 +2690,8 @@
         "battery chain saw",
         "brushless chainsaw",
         "brushless chain saw",
-        "цепная пила",
-        "аккумуляторная цепная пила",
-        "пила аккумуляторная цепная"
+        "пила аккумуляторная цепная",
+        "chainsaws"
       ],
       "negative_aliases": [
         "mini chainsaw",
@@ -2714,18 +2709,18 @@
         "cordless pruning chainsaw",
         "battery pruning chainsaw",
         "compact pruning saw",
-        "mini pruning saw"
+        "mini pruning saw",
+        "mini chainsaws"
       ]
     },
     "JIGSAW": {
       "aliases": [
         "jigsaw",
-        "jig saw",
         "jig-saw",
         "cordless jig saw",
-        "serra tico-tico",
         "serra tico tico",
-        "sierra caladora"
+        "sierra caladora",
+        "jigsaws"
       ]
     },
     "RECIPROCATING SAW": {
@@ -2740,7 +2735,6 @@
         "sabre saws",
         "saber saw",
         "saber saws",
-        "all-purpose saw",
         "all purpose saw",
         "universal saw",
         "multi-purpose saw",
@@ -2756,7 +2750,8 @@
         "high torque impact wrench",
         "hog ring impact wrench",
         "chave de impacto",
-        "llave de impacto"
+        "llave de impacto",
+        "impact wrenchs"
       ]
     },
     "CORDLESS IMPACT": {
@@ -2765,7 +2760,9 @@
         "impact driver",
         "impact screwdriver",
         "parafusadeira de impacto",
-        "atornillador de impacto"
+        "atornillador de impacto",
+        "cordless impact",
+        "cordless impacts"
       ],
       "negative_aliases": [
         "impact wrench"
@@ -2775,18 +2772,16 @@
       "aliases": [
         "rotary hammer",
         "sds rotary hammer",
-        "sds-plus rotary hammer",
         "sds plus rotary hammer",
         "sds max rotary hammer",
         "martelete",
         "rotomartillo",
-        "перфоратор",
-        "аккумуляторный перфоратор",
         "перфоратор аккумуляторный",
         "перфоратор 4 режима",
         "máy khoan bê tông",
         "máy khoan búa",
-        "rotary hammer drill"
+        "rotary hammer drill",
+        "rotary hammers"
       ],
       "negative_aliases": [
         "demolition hammer"
@@ -2801,22 +2796,24 @@
         "martelo demolidor",
         "martelo rompedor",
         "demolition breaker",
-        "demolition breaker hammer"
+        "demolition breaker hammer",
+        "demolition hammers"
       ]
     },
     "DRILL": {
       "aliases": [
-        "drill driver",
         "drill/driver",
         "cordless drill",
         "electric drill",
         "furadeira",
         "furadeira/parafusadeira",
         "taladro",
-        "taladro atornillador",
         "taladro/atornillador",
-        "taladro atornillador inalambrico",
-        "taladro atornillador inalámbrico"
+        "taladro atornillador inalámbrico",
+        "drill",
+        "drills",
+        "power tools",
+        "power tool"
       ],
       "negative_aliases": [
         "drill press",
@@ -2849,7 +2846,9 @@
     "EARTH AUGER": {
       "aliases": [
         "earth auger",
-        "perfurador de solo"
+        "perfurador de solo",
+        "earth augers",
+        "drillers"
       ],
       "fallback_pair": [
         "DRILLERS",
@@ -2864,7 +2863,8 @@
         "secateur",
         "secateurs",
         "tesoura de poda",
-        "podador de galhos"
+        "podador de galhos",
+        "garden pruners"
       ]
     },
     "PRUNING SAW": {
@@ -2891,12 +2891,12 @@
         "leaf blower vacuum",
         "soprador de folhas",
         "soplador de hojas",
-        "soprador a bateria",
         "soprador à bateria",
-        "soplador a bateria",
         "soplador a batería",
         "soprador costal",
-        "soplador de mochila"
+        "soplador de mochila",
+        "blower",
+        "blowers"
       ],
       "negative_aliases": [
         "blower fan",
@@ -2917,13 +2917,12 @@
     },
     "WALK BEHIND MOWER": {
       "aliases": [
-        "walk behind mower",
         "walk-behind mower",
         "push mower",
         "push lawn mower",
         "walk behind lawn mower",
-        "cortador de grama empurrável",
-        "cortador de grama empurravel"
+        "cortador de grama empurravel",
+        "walk behind mowers"
       ],
       "negative_aliases": [
         "garden tractor",
@@ -2948,19 +2947,16 @@
       "aliases": [
         "orbital sander",
         "random orbital sander",
-        "random orbit sander",
+        "random-orbit sander",
         "lixadeira orbital",
-        "lixadeira roto orbital",
+        "lixadeira roto-orbital",
         "finishing sander",
         "palm grip finishing sander",
         "palm sander",
         "sheet sander",
         "finishing palm sander",
-        "lijadora roto-orbital",
         "lijadora roto orbital",
-        "lixadeira roto-orbital",
         "orbital finishing sander",
-        "random-orbit sander",
         "random orbit finishing sander",
         "palm orbital sander",
         "orbital palm sander",
@@ -2971,7 +2967,8 @@
         "lixadeira orbital de palma",
         "lixadeira de acabamento orbital",
         "ponceuse orbitale",
-        "ponceuse excentrique"
+        "ponceuse excentrique",
+        "orbital sanders"
       ],
       "negative_aliases": [
         "angle grinder",
@@ -2983,43 +2980,40 @@
         "wall sander",
         "drywall sander",
         "lixadeira de parede",
-        "lixadeira girafa"
+        "lixadeira girafa",
+        "wall sanders"
       ]
     },
     "OSCILLATING MULTI-TOOL": {
       "aliases": [
-        "oscillating multi-tool",
+        "oscillating multi tool",
         "oscillating multitool",
         "oscillating tool",
         "multicortadora oscilante",
         "sierra oscilante",
-        "sierra oscilante multipropósito",
         "sierra oscilante multiproposito",
         "serra oscilante",
-        "serra oscilante multipropósito",
         "serra oscilante multiproposito",
-        "oscillating multi tool",
-        "oscillating multi function tool",
-        "oscillating multi-function tool"
+        "oscillating multi-function tool",
+        "oscillating multi-tools"
       ]
     },
     "MULTI-TOOL": {
       "aliases": [
-        "multi-tool",
+        "multi tool",
         "multitool",
-        "multi tool"
+        "multi-tools"
       ]
     },
     "MULTI-CUTTER": {
       "aliases": [
-        "multi-cutter",
         "multi cutter",
-        "multicutter"
+        "multicutter",
+        "multi-cutters"
       ]
     },
     "MULTI-CUT SAW": {
       "aliases": [
-        "multi-cut saw",
         "multi cut saw"
       ]
     },
@@ -3039,7 +3033,8 @@
         "bandsaw",
         "band saw",
         "serra de fita",
-        "sierra de cinta"
+        "sierra de cinta",
+        "bandsaws"
       ]
     },
     "CHOP SAW": {
@@ -3058,33 +3053,29 @@
     },
     "CUT-OFF SAW": {
       "aliases": [
-        "cut-off saw",
         "cut off saw",
         "cutoff saw",
         "power cutter",
-        "cut-off machine",
         "cut off machine",
         "cutoff machine"
       ]
     },
     "ABRASIVE CUT-OFF": {
       "aliases": [
-        "abrasive cut-off",
         "abrasive cut off",
-        "abrasive cutoff"
+        "abrasive cutoff",
+        "abrasive cut-offs"
       ]
     },
     "MARBLE SAW": {
       "aliases": [
         "marble saw",
         "masonry saw",
-        "serra mármore",
         "serra marmore"
       ]
     },
     "METAL-CUTTING SAW": {
       "aliases": [
-        "metal-cutting saw",
         "metal cutting saw",
         "metal saw",
         "serra para corte de metal"
@@ -3095,13 +3086,15 @@
         "metal cutter",
         "metal shear",
         "cortador de metal",
-        "tesoura para metal"
+        "tesoura para metal",
+        "metal cutters"
       ]
     },
     "CUTTER": {
       "aliases": [
         "cutter",
-        "cutting tool"
+        "cutting tool",
+        "cutters"
       ]
     },
     "WALL CHASER": {
@@ -3109,7 +3102,8 @@
         "wall chaser",
         "wall groove cutter",
         "abridora de rasgos",
-        "frezadora de parede"
+        "frezadora de parede",
+        "wall chasers"
       ]
     },
     "WALL CUTTER": {
@@ -3122,14 +3116,16 @@
         "cordless drywall saw",
         "plasterboard saw",
         "gypsum board saw",
-        "gypsum saw"
+        "gypsum saw",
+        "wall cutters"
       ]
     },
     "MARBLE GROOVE CUTTER": {
       "aliases": [
         "marble groove cutter",
         "marble grooving machine",
-        "cortadora de ranhuras em mármore"
+        "cortadora de ranhuras em mármore",
+        "marble groove cutters"
       ]
     },
     "GROOVE CUTTER": {
@@ -3137,7 +3133,8 @@
         "groove cutter",
         "grooving cutter",
         "grooving machine",
-        "cortadora de ranhuras"
+        "cortadora de ranhuras",
+        "groove cutters"
       ]
     },
     "ROUTER TOOL": {
@@ -3152,22 +3149,22 @@
       "aliases": [
         "wood router",
         "router",
-        "tupia"
+        "tupia",
+        "routers"
       ]
     },
     "REBAR CUTTER": {
       "aliases": [
         "rebar cutter",
         "rebar cutting machine",
-        "cortador de vergalhão",
-        "cortador de vergalhao"
+        "cortador de vergalhao",
+        "rebar cutters"
       ]
     },
     "BOLT CUTTER": {
       "aliases": [
         "bolt cutter",
         "bolt cutters",
-        "alicate corta vergalhão",
         "alicate corta vergalhao"
       ]
     },
@@ -3175,14 +3172,16 @@
       "aliases": [
         "cable cutter",
         "cable cutting tool",
-        "corta cabos"
+        "corta cabos",
+        "cable cutters"
       ]
     },
     "WIRE CUTTER": {
       "aliases": [
         "wire cutter",
         "wire cutting tool",
-        "alicate de corte"
+        "alicate de corte",
+        "wire cutters"
       ]
     },
     "CONCRETE CUTTER": {
@@ -3190,7 +3189,8 @@
         "concrete cutter",
         "concrete saw",
         "cortadora de concreto",
-        "cortador de asfalto"
+        "cortador de asfalto",
+        "concrete cutters"
       ]
     },
     "CONCRETE MIXER": {
@@ -3198,14 +3198,16 @@
         "concrete mixer",
         "cement mixer",
         "betoneira",
-        "misturador de concreto"
+        "misturador de concreto",
+        "concrete mixers"
       ]
     },
     "GLASS CUTTER": {
       "aliases": [
         "glass cutter",
         "glass cutting tool",
-        "cortador de vidro"
+        "cortador de vidro",
+        "glass cutters"
       ]
     },
     "PLASTER CAST SAW": {
@@ -3244,7 +3246,8 @@
       "aliases": [
         "belt slitter",
         "belt cutting machine",
-        "cortador de correia"
+        "cortador de correia",
+        "belt slitters"
       ]
     },
     "STEP DRILL BIT SET": {
@@ -3295,7 +3298,8 @@
         "drip coffee maker",
         "coffee maker",
         "drip coffee",
-        "cafeteira"
+        "cafeteira",
+        "drip coffees"
       ]
     },
     "BATTERY": {
@@ -3306,10 +3310,10 @@
         "power tool battery",
         "lithium ion battery pack",
         "li-ion battery pack",
-        "bateria de reposição",
         "bateria de reposicao",
-        "batería de repuesto",
-        "bateria de repuesto"
+        "bateria de repuesto",
+        "battery",
+        "batterys"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -3324,12 +3328,13 @@
         "fast charger",
         "power tool charger",
         "carregador de bateria",
-        "carregador rápido",
         "carregador rapido",
-        "cargador de batería",
         "cargador de bateria",
-        "cargador rápido",
-        "cargador rapido"
+        "cargador rapido",
+        "charger",
+        "chargers",
+        "accessories",
+        "accessory"
       ],
       "fallback_pair": [
         "PARTS & ACCESSORIES",
@@ -3340,9 +3345,9 @@
       "aliases": [
         "accessory kit",
         "accessories kit",
-        "kit de acessórios",
         "kit de acessorios",
-        "kit de accesorios"
+        "kit de accesorios",
+        "accessorys"
       ]
     },
     "PART": {
@@ -3351,8 +3356,8 @@
         "spare part",
         "spare parts",
         "replacement parts",
-        "peça de reposição",
-        "peca de reposicao"
+        "peca de reposicao",
+        "part"
       ]
     },
     "ENGINE": {
@@ -3360,14 +3365,13 @@
         "stationary engine",
         "replacement engine",
         "industrial engine",
-        "motor estacionário",
         "motor estacionario",
-        "motor de reposição",
         "motor de reposicao",
         "gasoline engine",
         "petrol engine",
         "small engine",
-        "engine assembly"
+        "engine assembly",
+        "engine"
       ],
       "fallback_pair": [
         "ENGINES",
@@ -3387,7 +3391,8 @@
         "generator",
         "portable generator",
         "gerador",
-        "generador"
+        "generador",
+        "generators"
       ],
       "negative_aliases": [
         "generador inverter",
@@ -3414,7 +3419,10 @@
         "atomizer",
         "atomiser",
         "atomizador",
-        "pulverizador atomizador"
+        "pulverizador atomizador",
+        "misters",
+        "mister/duster",
+        "mister/dusters"
       ],
       "fallback_pair": [
         "MISTER/DUSTER",
@@ -3432,7 +3440,8 @@
         "dust applicator",
         "backpack duster",
         "polvilhadeira",
-        "polvilhador"
+        "polvilhador",
+        "dusters"
       ],
       "fallback_pair": [
         "MISTER/DUSTER",
@@ -3443,26 +3452,20 @@
       "aliases": [
         "pressure washer",
         "power washer",
-        "lavadora de alta pressão",
         "lavadora de alta pressao",
         "hidrolavadora",
-        "high pressure washer",
         "high-pressure washer",
         "pressure cleaner",
         "pressure washer gun",
         "cordless pressure washer",
         "battery pressure washer",
-        "lavadora a presión",
         "lavadora a presion",
-        "lavadora de presión",
         "lavadora de presion",
-        "limpiadora de alta presión",
         "limpiadora de alta presion",
-        "hidrolavadora inalámbrica",
         "hidrolavadora inalambrica",
         "pistola hidrolavadora",
-        "lavadora portátil de alta presión",
-        "lavadora portatil de alta presion"
+        "lavadora portatil de alta presion",
+        "pressure washers"
       ]
     },
     "WATERPUMP": {
@@ -3476,42 +3479,33 @@
         "submersible pump",
         "sewage pump",
         "peripheral pump",
-        "bomba periférica",
         "bomba periferica",
         "bomba sumergible",
-        "bomba submersível",
         "bomba submersivel",
         "centrifugal pump",
-        "bomba centrífuga",
         "bomba centrifuga",
         "circulation pump",
         "circulating pump",
         "circulator pump",
         "recirculation pump",
         "bomba circuladora",
-        "bomba de circulação",
         "bomba de circulacao",
-        "bomba de circulación",
         "bomba de circulacion",
         "multistage pump",
-        "multi stage pump",
         "multi-stage pump",
         "vertical multistage pump",
         "horizontal multistage pump",
         "jet pump",
-        "self priming pump",
         "self-priming pump",
-        "self priming water pump",
         "self-priming water pump",
         "pool pump",
         "spa pump",
         "jacuzzi pump",
         "swimming pool pump",
-        "single stage inline pump",
         "single-stage inline pump",
         "end suction pump",
-        "single impeller pump",
-        "single-impeller pump"
+        "single-impeller pump",
+        "waterpumps"
       ],
       "negative_aliases": [
         "windscreen washer pump",
@@ -3544,8 +3538,8 @@
         "robotic lawn mower",
         "robot mower",
         "automower",
-        "robô cortador de grama",
-        "robo cortador de grama"
+        "robo cortador de grama",
+        "robotic lawn mowers"
       ]
     },
     "TRACTOR": {
@@ -3554,22 +3548,20 @@
         "garden tractor",
         "riding tractor",
         "trator cortador de grama",
-        "ride-on lawn tractor"
+        "ride-on lawn tractor",
+        "tractor",
+        "tractors"
       ]
     },
     "ZERO TURN": {
       "aliases": [
-        "zero turn mower",
         "zero-turn mower",
         "zero turn",
         "giro zero",
-        "zero-turn riding mower",
         "zero turn riding mower",
         "zero-turn riding lawn mower",
         "ultima zt1",
         "ultima zt2",
-        "zt1 zero turn",
-        "zt2 zero turn",
         "zt1 zero-turn",
         "zt2 zero-turn"
       ]
@@ -3578,10 +3570,10 @@
       "aliases": [
         "rider mower",
         "rider",
-        "ride-on mower",
         "ride on mower",
         "ride-on lawn mower",
-        "riding mower"
+        "riding mower",
+        "riders"
       ],
       "negative_aliases": [
         "disc mower",
@@ -3613,17 +3605,15 @@
     "POLISHER": {
       "aliases": [
         "polisher",
-        "variable speed polisher",
         "variable-speed polisher",
         "rotary polisher",
         "politriz",
-        "dual action polisher",
         "dual-action polisher",
         "da polisher",
         "pulidora dual action",
-        "pulidora de doble acción",
         "pulidora de doble accion",
-        "politriz dual action"
+        "politriz dual action",
+        "polishers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -3639,7 +3629,6 @@
         "rebitador",
         "rebiteador",
         "rivet gun",
-        "rivet gun tool",
         "rivet gun (tool)"
       ],
       "fallback_pair": [
@@ -3653,8 +3642,8 @@
         "drain cleaner",
         "drain cleaning machine",
         "cordless drain snake",
-        "desentupidor de tubulação",
-        "desentupidor de tubulacao"
+        "desentupidor de tubulacao",
+        "drain snakes"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -3666,22 +3655,22 @@
         "lubricant",
         "lubricating oil",
         "chain oil",
-        "2-stroke oil",
         "2 stroke oil",
-        "óleo lubrificante",
-        "oleo lubrificante"
+        "oleo lubrificante",
+        "lubricants"
       ]
     },
     "GRINDING MACHINE": {
       "aliases": [
         "grinding machine",
-        "retifica",
-        "retífica"
+        "retífica",
+        "grinding machines"
       ]
     },
     "TOOL GRINDER": {
       "aliases": [
-        "tool grinder"
+        "tool grinder",
+        "tool grinders"
       ]
     },
     "GREASE GUN": {
@@ -3698,7 +3687,6 @@
         "18v grease gun",
         "20v grease gun",
         "pistola engrasadora",
-        "pistola engrasadora a bateria",
         "pistola engrasadora a batería"
       ],
       "negative_aliases": [
@@ -3725,10 +3713,9 @@
         "battery pole pruner",
         "cordless pole pruner",
         "podador de altura",
-        "podador telescópico",
         "podador telescopico",
-        "podador de galhos telescópico",
-        "podador de galhos telescopico"
+        "podador de galhos telescopico",
+        "pole pruners"
       ],
       "negative_aliases": [
         "pole saw attachment",
@@ -3741,13 +3728,12 @@
     },
     "INVERTER GENERATOR": {
       "aliases": [
-        "inverter generator",
-        "generator inverter",
         "inverter-generator",
+        "generator inverter",
         "gerador inverter",
         "generador inverter",
-        "générateur inverter",
-        "generateur inverter"
+        "generateur inverter",
+        "inverter generators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -3761,7 +3747,6 @@
         "cordless heat gun",
         "hot air gun",
         "pistola de calor",
-        "soprador termico",
         "soprador térmico"
       ],
       "negative_aliases": [
@@ -3782,9 +3767,7 @@
         "plastic toolbox",
         "tool box",
         "toolbox",
-        "caixa plastica de ferramentas",
         "caixa plástica de ferramentas",
-        "caja plastica de herramientas",
         "caja plástica de herramientas"
       ],
       "fallback_pair": [
@@ -3799,10 +3782,11 @@
         "tile vibrating machine",
         "vibration machine for tiles",
         "vibrador de azulejos",
-        "vibrador de ceramica",
         "vibrador de cerâmica",
-        "maquina vibratoria para azulejos",
-        "máquina vibratória para azulejos"
+        "máquina vibratória para azulejos",
+        "tile vibration machines",
+        "floor installer",
+        "floor installers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -3814,10 +3798,11 @@
         "hydraulic spring compressor",
         "hydraulic coil spring compressor",
         "coil spring compressor",
-        "compresor hidraulico de espirales",
         "compresor hidráulico de espirales",
-        "compressor hidraulico de molas",
-        "compressor hidráulico de molas"
+        "compressor hidráulico de molas",
+        "hydraulic spring compressors",
+        "hydraulic compressor",
+        "hydraulic compressors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -3862,12 +3847,10 @@
     "HAMMER DRILL": {
       "aliases": [
         "hammer drill",
-        "hammer drill driver",
         "hammer drill/driver",
         "cordless hammer drill",
         "combi drill",
         "taladro percutor",
-        "taladro percutor inalambrico",
         "taladro percutor inalámbrico",
         "furadeira de impacto",
         "furadeira percutora",
@@ -3876,7 +3859,8 @@
         "brushless cordless impact drill",
         "compact cordless impact drill",
         "impact drill driver",
-        "drill impact"
+        "drill impact",
+        "hammer drills"
       ],
       "negative_aliases": [
         "impact wrench",
@@ -3896,7 +3880,8 @@
         "magnetic drilling press",
         "magnetic drill press",
         "magnetic base drill",
-        "magnetic drilling machine"
+        "magnetic drilling machine",
+        "magnetic drills"
       ],
       "negative_aliases": [
         "hammer drill",
@@ -3916,12 +3901,11 @@
         "petrol lawn mower",
         "gas lawn mower",
         "cortador de grama",
-        "cortacésped",
         "cortacesped",
         "lawnmower",
-        "cortadora de césped",
         "cortadora de cesped",
-        "cortadora de grama"
+        "cortadora de grama",
+        "lawn mowers"
       ],
       "negative_aliases": [
         "ride-on mower",
@@ -3949,12 +3933,10 @@
         "hydraulic crimper",
         "hydraulic crimping tool",
         "hydraulic crimp tool",
-        "crimpadora hidráulica",
         "crimpadora hidraulica",
-        "crimpeadora hidráulica",
         "crimpeadora hidraulica",
-        "prensa hidráulica de crimpagem",
-        "prensa hidraulica de crimpagem"
+        "prensa hidraulica de crimpagem",
+        "hydraulic crimpers"
       ],
       "negative_aliases": [
         "crimping jaw",
@@ -3969,10 +3951,10 @@
       "aliases": [
         "straight grinder",
         "straight grinding machine",
-        "retífica reta",
         "retifica reta",
         "rectificadora recta",
-        "esmeril recto"
+        "esmeril recto",
+        "straight grinders"
       ],
       "negative_aliases": [
         "angle grinder"
@@ -3988,7 +3970,8 @@
         "heater blower motor",
         "hvac blower motor",
         "motor do soprador",
-        "motor soprador"
+        "motor soprador",
+        "blower motors"
       ],
       "negative_aliases": [
         "leaf blower",
@@ -4007,10 +3990,9 @@
       "aliases": [
         "electric sander",
         "corded sander",
-        "lijadora eléctrica",
         "lijadora electrica",
-        "lixadeira elétrica",
-        "lixadeira eletrica"
+        "lixadeira eletrica",
+        "electric sanders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4022,10 +4004,9 @@
         "strobe siren",
         "siren strobe",
         "alarm siren with strobe",
-        "sirena estroboscópica",
         "sirena estroboscopica",
-        "sirene estroboscópica",
-        "sirene estroboscopica"
+        "sirene estroboscopica",
+        "strobe sirens"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4037,9 +4018,9 @@
         "air fryer",
         "digital air fryer",
         "freidora de aire",
-        "fritadeira elétrica sem óleo",
         "fritadeira eletrica sem oleo",
-        "fritadeira air fryer"
+        "fritadeira air fryer",
+        "air fryers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4053,8 +4034,10 @@
         "welding inverter",
         "soldadora inverter",
         "soldador inverter",
-        "máquina de solda inverter",
-        "maquina de solda inverter"
+        "maquina de solda inverter",
+        "inverter welders",
+        "inverter welding",
+        "inverter weldings"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4069,10 +4052,9 @@
         "hand planer",
         "garlopa",
         "garlopa recargable",
-        "cepillo eléctrico",
         "cepillo electrico",
-        "plaina elétrica",
-        "plaina eletrica"
+        "plaina eletrica",
+        "planers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4087,15 +4069,14 @@
         "power mixer",
         "mezclador de pintura",
         "mezclador pintura",
-        "mezclador eléctrico",
         "mezclador electrico",
         "misturador de tinta",
-        "misturador elétrico",
         "misturador eletrico",
         "cordless mixer",
         "battery mixer",
         "cordless power mixer",
-        "cordless paddle mixer"
+        "cordless paddle mixer",
+        "electric mixers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4108,7 +4089,6 @@
         "booster pump",
         "water booster pump",
         "bomba elevadora",
-        "bomba de elevación",
         "bomba de elevacion",
         "bomba pressurizadora",
         "bomba presurizadora",
@@ -4149,7 +4129,8 @@
         "lijadora delta",
         "lijadora triangular",
         "lixadeira delta",
-        "lixadeira triangular"
+        "lixadeira triangular",
+        "delta sanders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4163,10 +4144,10 @@
         "cordless stapler",
         "battery stapler",
         "grapadora",
-        "grapadora a batería",
         "grapadora a bateria",
         "grampeador",
-        "grampeador a bateria"
+        "grampeador a bateria",
+        "staplers"
       ],
       "negative_aliases": [
         "nailer",
@@ -4185,7 +4166,8 @@
         "force logic crimper",
         "crimpadora",
         "crimpeadora",
-        "alicate de crimpagem"
+        "alicate de crimpagem",
+        "crimpers"
       ],
       "negative_aliases": [
         "crimping jaw",
@@ -4202,9 +4184,7 @@
         "powered fish tape",
         "electric fish tape",
         "cable puller fish tape",
-        "pasacables eléctrico",
         "pasacables electrico",
-        "passa fio elétrico",
         "passa fio eletrico"
       ],
       "fallback_pair": [
@@ -4231,11 +4211,10 @@
         "tape measure",
         "wide blade tape measure",
         "measuring tape",
-        "cinta métrica",
         "cinta metrica",
         "trena",
-        "fita métrica",
-        "fita metrica"
+        "fita metrica",
+        "tape measures"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4281,12 +4260,9 @@
         "rear disc mower",
         "front mower",
         "rear mower",
-        "front-mounted mower",
         "front mounted mower",
-        "rear-mounted mower",
         "rear mounted mower",
         "mounted mower",
-        "mower conditioner",
         "mower-conditioner",
         "disc mower conditioner",
         "mounted mower conditioner",
@@ -4297,7 +4273,10 @@
         "segadora trasera",
         "segadeira de discos",
         "segadeira frontal",
-        "segadeira traseira"
+        "segadeira traseira",
+        "disc mowers",
+        "high performance front mower",
+        "high performance front mowers"
       ],
       "negative_aliases": [
         "zero turn mower",
@@ -4321,7 +4300,8 @@
         "cordless belt sander",
         "lijadora de banda",
         "lixadeira de cinta",
-        "lixadeira de correia"
+        "lixadeira de correia",
+        "belt sanders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4338,7 +4318,8 @@
         "amoladora con freno",
         "amoladora angular con freno",
         "esmerilhadeira com freio",
-        "esmerilhadeira angular com freio"
+        "esmerilhadeira angular com freio",
+        "braking grinders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4390,7 +4371,8 @@
         "mini air blower",
         "mini dust blower",
         "mini soprador",
-        "soprador compacto"
+        "soprador compacto",
+        "mini blowers"
       ],
       "negative_aliases": [
         "blower motor",
@@ -4410,7 +4392,8 @@
         "mezclador de pintura",
         "mezclador pintura",
         "misturador de tinta",
-        "misturador para tinta"
+        "misturador para tinta",
+        "paint mixers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4420,13 +4403,10 @@
     "PLUNGE SAW": {
       "aliases": [
         "plunge saw",
-        "plunge-cut saw",
         "plunge cut saw",
         "track saw",
         "guide rail saw",
-        "serra de imersão",
         "serra de imersao",
-        "sierra de inmersión",
         "sierra de inmersion"
       ],
       "negative_aliases": [
@@ -4445,10 +4425,9 @@
         "electric ratchet wrench",
         "chave catraca a bateria",
         "chave de catraca a bateria",
-        "llave de carraca a batería",
         "llave de carraca a bateria",
-        "llave de trinquete inalámbrica",
-        "llave de trinquete inalambrica"
+        "llave de trinquete inalambrica",
+        "ratchet wrenchs"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4464,7 +4443,8 @@
         "lijadora de rodillo",
         "lijadora de rodillos",
         "lixadeira de rolo",
-        "lixadeira de rolos"
+        "lixadeira de rolos",
+        "sanding rollers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4481,8 +4461,8 @@
         "aerator scarifier",
         "escarificador",
         "escarificador de gramado",
-        "escarificador de césped",
-        "escarificador de cesped"
+        "escarificador de cesped",
+        "scarifiers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4512,9 +4492,9 @@
         "electric nibbler",
         "sheet metal nibbler",
         "roedora",
-        "roedora elétrica",
         "roedora eletrica",
-        "punzonadora de chapa"
+        "punzonadora de chapa",
+        "nibblers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4525,12 +4505,11 @@
       "aliases": [
         "line laser",
         "laser line",
-        "cross line laser",
         "cross-line laser",
         "laser level",
         "line laser level",
-        "nivel laser",
-        "nível laser"
+        "nível laser",
+        "line lasers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4544,8 +4523,8 @@
         "needle vibrator",
         "vibrador de concreto",
         "vibrador para concreto",
-        "vibrador de hormigón",
-        "vibrador de hormigon"
+        "vibrador de hormigon",
+        "concrete vibrators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4556,14 +4535,13 @@
       "aliases": [
         "vacuum cleaner",
         "cordless vacuum cleaner",
-        "wet dry vacuum",
         "wet/dry vacuum",
         "shop vacuum",
         "dust extractor",
-        "aspirador de pó",
         "aspirador de po",
         "aspiradora",
-        "aspirador"
+        "aspirador",
+        "vacuum cleaners"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4578,8 +4556,8 @@
         "vibrating screed",
         "vibratory screed",
         "regla vibratoria",
-        "régua vibratória",
-        "regua vibratoria"
+        "regua vibratoria",
+        "concrete screeds"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4594,7 +4572,6 @@
         "paint sprayer gun",
         "pistola de pintura",
         "pistola pulverizadora",
-        "pistola de pulverização",
         "pistola de pulverizacao"
       ],
       "fallback_pair": [
@@ -4616,7 +4593,8 @@
         "disc sander",
         "rotary disc sander",
         "lijadora rotativa",
-        "lixadeira rotativa"
+        "lixadeira rotativa",
+        "rotary sanders"
       ],
       "negative_aliases": [
         "random orbital sander",
@@ -4630,13 +4608,12 @@
     },
     "MINI GRINDER": {
       "aliases": [
-        "mini grinder",
         "mini-grinder",
         "mini grinding tool",
         "mini rotary grinder",
         "mini esmeril",
-        "mini retífica",
-        "mini retifica"
+        "mini retifica",
+        "mini grinders"
       ],
       "negative_aliases": [
         "angle grinder",
@@ -4659,7 +4636,9 @@
         "power edger",
         "cordless edger",
         "battery edger",
-        "electric edger"
+        "electric edger",
+        "edger",
+        "edgers"
       ],
       "negative_aliases": [
         "hedge trimmer",
@@ -4681,7 +4660,8 @@
         "cordless screwdriver",
         "power screwdriver",
         "parafusadeira",
-        "atornillador"
+        "atornillador",
+        "screwdrivers"
       ],
       "negative_aliases": [
         "impact screwdriver",
@@ -4707,7 +4687,8 @@
         "power tools combo kit",
         "kit combinado de ferramentas",
         "kit de herramientas combinadas",
-        "kit de ferramentas combinadas"
+        "kit de ferramentas combinadas",
+        "combo kit"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -4721,7 +4702,6 @@
         "variable speed rotary tool",
         "ferramenta rotativa",
         "herramienta rotativa",
-        "micro retífica rotativa",
         "micro retifica rotativa"
       ],
       "negative_aliases": [
@@ -4737,9 +4717,7 @@
       "aliases": [
         "industrial blower",
         "industrial air blower",
-        "explosion-proof blower",
         "explosion proof blower",
-        "explosion-proof axial blower",
         "explosion proof axial blower",
         "axial blower",
         "centrifugal blower",
@@ -4747,7 +4725,8 @@
         "confined space blower",
         "industrial ventilator blower",
         "com-pax-ial blower",
-        "compaxial blower"
+        "compaxial blower",
+        "industrial blowers"
       ],
       "negative_aliases": [
         "leaf blower",
@@ -4766,12 +4745,12 @@
       "aliases": [
         "venturi blower",
         "pneumatic venturi blower",
-        "air driven venturi blower",
         "air-driven venturi blower",
         "pneumatic air blower",
         "venturi air blower",
         "blower venturi",
-        "pneumatic blower venturi"
+        "pneumatic blower venturi",
+        "venturi blowers"
       ],
       "negative_aliases": [
         "leaf blower",
@@ -4787,7 +4766,6 @@
         "axial fan",
         "ac axial fan",
         "dc axial fan",
-        "axial flow fan",
         "axial-flow fan",
         "axial cooling fan"
       ],
@@ -4832,7 +4810,8 @@
         "radiator fan blade",
         "ventilator blade",
         "ventilador blade",
-        "fan impeller blade"
+        "fan impeller blade",
+        "fan blades"
       ],
       "negative_aliases": [
         "blower fan"
@@ -4847,7 +4826,8 @@
         "fan module",
         "cooling fan module",
         "fan assembly module",
-        "cooling module fan"
+        "cooling module fan",
+        "fan modules"
       ],
       "negative_aliases": [
         "blower motor"
@@ -4864,7 +4844,8 @@
         "radiator fan motor",
         "ventilator motor",
         "motor de ventilador",
-        "motor do ventilador"
+        "motor do ventilador",
+        "fan motors"
       ],
       "negative_aliases": [
         "blower motor",
@@ -4901,10 +4882,11 @@
         "cpu air cooler",
         "computer cooler",
         "processor cooling unit",
-        "air-cooled heat sink",
         "air cooled heat sink",
         "cpu heatsink",
-        "cpu heat sink"
+        "cpu heat sink",
+        "cooler",
+        "coolers"
       ],
       "negative_aliases": [
         "cooling fan",
@@ -5009,7 +4991,8 @@
       "aliases": [
         "mixer",
         "mixing machine",
-        "industrial mixer"
+        "industrial mixer",
+        "mixers"
       ],
       "negative_aliases": [
         "concrete mixer",
@@ -5029,7 +5012,8 @@
     },
     "ATOMIZER": {
       "aliases": [
-        "atomizer"
+        "atomizer",
+        "atomizers"
       ],
       "fallback_pair": [
         "ATOMIZER",
@@ -5038,7 +5022,8 @@
     },
     "BATTERY TRACTOR": {
       "aliases": [
-        "battery tractor"
+        "battery tractor",
+        "battery tractors"
       ],
       "fallback_pair": [
         "BATTERY PRODUCT",
@@ -5056,7 +5041,8 @@
     },
     "ABRASIVE BLASTING": {
       "aliases": [
-        "abrasive blasting"
+        "abrasive blasting",
+        "abrasive blastings"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5065,7 +5051,8 @@
     },
     "ACCESS CONTROLLER": {
       "aliases": [
-        "access controller"
+        "access controller",
+        "access controllers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5074,7 +5061,8 @@
     },
     "ACTION FIGURE": {
       "aliases": [
-        "action figure"
+        "action figure",
+        "action figures"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5092,7 +5080,8 @@
     },
     "AIR BLOWER": {
       "aliases": [
-        "air blower"
+        "air blower",
+        "air blowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5101,7 +5090,8 @@
     },
     "AIR COMPRESSOR": {
       "aliases": [
-        "air compressor"
+        "air compressor",
+        "air compressors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5119,7 +5109,8 @@
     },
     "AIR CONDITIONING FILTER": {
       "aliases": [
-        "air conditioning filter"
+        "air conditioning filter",
+        "air conditioning filters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5128,7 +5119,8 @@
     },
     "AIR COOLER": {
       "aliases": [
-        "air cooler"
+        "air cooler",
+        "air coolers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5146,7 +5138,8 @@
     },
     "AIR EVAPORATOR": {
       "aliases": [
-        "air evaporator"
+        "air evaporator",
+        "air evaporators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5155,7 +5148,8 @@
     },
     "AIR FILTER": {
       "aliases": [
-        "air filter"
+        "air filter",
+        "air filters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5173,7 +5167,8 @@
     },
     "AIR HUMIDIFIER": {
       "aliases": [
-        "air humidifier"
+        "air humidifier",
+        "air humidifiers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5191,7 +5186,8 @@
     },
     "AIR RIFLE": {
       "aliases": [
-        "air rifle"
+        "air rifle",
+        "air rifles"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5227,7 +5223,8 @@
     },
     "ASPIRATED ENGINE": {
       "aliases": [
-        "aspirated engine"
+        "aspirated engine",
+        "aspirated engines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5245,7 +5242,8 @@
     },
     "AUTO SWATHER": {
       "aliases": [
-        "auto swather"
+        "auto swather",
+        "auto swathers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5263,7 +5261,8 @@
     },
     "AUTOMATIC CORRUGATED PIPE CUTTING MACHINE": {
       "aliases": [
-        "automatic corrugated pipe cutting machine"
+        "automatic corrugated pipe cutting machine",
+        "automatic corrugated pipe cutting machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5281,7 +5280,8 @@
     },
     "AUTOMATIC WATER DISPENSER": {
       "aliases": [
-        "automatic water dispenser"
+        "automatic water dispenser",
+        "automatic water dispensers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5299,7 +5299,8 @@
     },
     "AXIAL EXPLOSION-PROOF": {
       "aliases": [
-        "axial explosion-proof"
+        "axial explosion-proof",
+        "axial explosion-proofs"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5308,7 +5309,8 @@
     },
     "AXIAL EXTRACTOR": {
       "aliases": [
-        "axial extractor"
+        "axial extractor",
+        "axial extractors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5317,7 +5319,8 @@
     },
     "AXIAL FAN ASSEMBLY": {
       "aliases": [
-        "axial fan assembly"
+        "axial fan assembly",
+        "axial fan assemblys"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5344,7 +5347,8 @@
     },
     "BATTERY BLENDER": {
       "aliases": [
-        "battery blender"
+        "battery blender",
+        "battery blenders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5353,7 +5357,8 @@
     },
     "BEAD BREAKER": {
       "aliases": [
-        "bead breaker"
+        "bead breaker",
+        "bead breakers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5362,7 +5367,8 @@
     },
     "BELT DRYER": {
       "aliases": [
-        "belt dryer"
+        "belt dryer",
+        "belt dryers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5371,7 +5377,8 @@
     },
     "BENCH GRINDER": {
       "aliases": [
-        "bench grinder"
+        "bench grinder",
+        "bench grinders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5380,7 +5387,8 @@
     },
     "BENCHTOP MICROMOTOR": {
       "aliases": [
-        "benchtop micromotor"
+        "benchtop micromotor",
+        "benchtop micromotors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5398,7 +5406,8 @@
     },
     "BENDING MACHINE": {
       "aliases": [
-        "bending machine"
+        "bending machine",
+        "bending machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5407,7 +5416,8 @@
     },
     "BLASTING BOOTH": {
       "aliases": [
-        "blasting booth"
+        "blasting booth",
+        "blasting booths"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5434,7 +5444,8 @@
     },
     "BLOWER ASSEMBLY": {
       "aliases": [
-        "blower assembly"
+        "blower assembly",
+        "blower assemblys"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5443,7 +5454,8 @@
     },
     "BLOWER COMPLETE": {
       "aliases": [
-        "blower complete"
+        "blower complete",
+        "blower completes"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5452,7 +5464,8 @@
     },
     "BLOWER EVAPORATOR ASSEMBLY": {
       "aliases": [
-        "blower evaporator assembly"
+        "blower evaporator assembly",
+        "blower evaporator assemblys"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5461,7 +5474,8 @@
     },
     "BLOWER FAN ASSEMBLY": {
       "aliases": [
-        "blower fan assembly"
+        "blower fan assembly",
+        "blower fan assemblys"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5479,7 +5493,8 @@
     },
     "BLOWER MANUAL": {
       "aliases": [
-        "blower manual"
+        "blower manual",
+        "blower manuals"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5488,7 +5503,8 @@
     },
     "BLOWER WHEEL": {
       "aliases": [
-        "blower wheel"
+        "blower wheel",
+        "blower wheels"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5524,7 +5540,8 @@
     },
     "CABIN HEATER MOTOR": {
       "aliases": [
-        "cabin heater motor"
+        "cabin heater motor",
+        "cabin heater motors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5542,7 +5559,8 @@
     },
     "CAMERA": {
       "aliases": [
-        "camera"
+        "camera",
+        "cameras"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5578,7 +5596,8 @@
     },
     "CENTER-PIVOT DISC MOWER-CONDITIONERS": {
       "aliases": [
-        "center-pivot disc mower-conditioners"
+        "center-pivot disc mower-conditioners",
+        "center-pivot disc mower-conditioner"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5587,7 +5606,8 @@
     },
     "CENTER-PIVOT MOWER CONDITIONERS": {
       "aliases": [
-        "center-pivot mower conditioners"
+        "center-pivot mower conditioners",
+        "center-pivot mower conditioner"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5596,7 +5616,8 @@
     },
     "CENTRAL AIR DIFFUSER": {
       "aliases": [
-        "central air diffuser"
+        "central air diffuser",
+        "central air diffusers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5605,7 +5626,8 @@
     },
     "CENTRIFUGAL BLOWER": {
       "aliases": [
-        "centrifugal blower"
+        "centrifugal blower",
+        "centrifugal blowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5659,7 +5681,8 @@
     },
     "CHAMFER PIPES": {
       "aliases": [
-        "chamfer pipes"
+        "chamfer pipes",
+        "chamfer pipe"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5686,7 +5709,8 @@
     },
     "CIP STATION": {
       "aliases": [
-        "cip station"
+        "cip station",
+        "cip stations"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5695,7 +5719,8 @@
     },
     "CIRCULATION FAN MOTOR": {
       "aliases": [
-        "circulation fan motor"
+        "circulation fan motor",
+        "circulation fan motors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5722,7 +5747,8 @@
     },
     "CLOSED CIRCUIT COOLING TOWERS": {
       "aliases": [
-        "closed circuit cooling towers"
+        "closed circuit cooling towers",
+        "closed circuit cooling tower"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5731,7 +5757,8 @@
     },
     "CLUTCH": {
       "aliases": [
-        "clutch"
+        "clutch",
+        "clutchs"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5740,7 +5767,8 @@
     },
     "COIL CLEANING MACHINE": {
       "aliases": [
-        "coil cleaning machine"
+        "coil cleaning machine",
+        "coil cleaning machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5749,7 +5777,8 @@
     },
     "COMBINE HARVESTER HEADER": {
       "aliases": [
-        "combine harvester header"
+        "combine harvester header",
+        "combine harvester headers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5767,7 +5796,8 @@
     },
     "COMPRESSED-AIR CANNON": {
       "aliases": [
-        "compressed-air cannon"
+        "compressed-air cannon",
+        "compressed-air cannons"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5785,7 +5815,8 @@
     },
     "CONCRETE SCARIFIER": {
       "aliases": [
-        "concrete scarifier"
+        "concrete scarifier",
+        "concrete scarifiers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5794,7 +5825,8 @@
     },
     "CONDENSER": {
       "aliases": [
-        "condenser"
+        "condenser",
+        "condensers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5803,7 +5835,8 @@
     },
     "CONDENSER COOLER": {
       "aliases": [
-        "condenser cooler"
+        "condenser cooler",
+        "condenser coolers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5821,7 +5854,8 @@
     },
     "COOLER AXIAL": {
       "aliases": [
-        "cooler axial"
+        "cooler axial",
+        "cooler axials"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5857,7 +5891,8 @@
     },
     "COOLING RADIATOR GAMING": {
       "aliases": [
-        "cooling radiator gaming"
+        "cooling radiator gaming",
+        "cooling radiator gamings"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5866,7 +5901,8 @@
     },
     "CORE CUTTING MACHINE": {
       "aliases": [
-        "core cutting machine"
+        "core cutting machine",
+        "core cutting machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5884,7 +5920,8 @@
     },
     "CRUSHER": {
       "aliases": [
-        "crusher"
+        "crusher",
+        "crushers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5893,7 +5930,8 @@
     },
     "CULTICHISSEL": {
       "aliases": [
-        "cultichissel"
+        "cultichissel",
+        "cultichissels"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5911,7 +5949,8 @@
     },
     "DC COOLING": {
       "aliases": [
-        "dc cooling"
+        "dc cooling",
+        "dc coolings"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5920,7 +5959,8 @@
     },
     "DEBRIS BLOWER": {
       "aliases": [
-        "debris blower"
+        "debris blower",
+        "debris blowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5929,7 +5969,8 @@
     },
     "DECIBEL METER": {
       "aliases": [
-        "decibel meter"
+        "decibel meter",
+        "decibel meters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5938,7 +5979,8 @@
     },
     "DEEP IMPACT SOCKET": {
       "aliases": [
-        "deep impact socket"
+        "deep impact socket",
+        "deep impact sockets"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5947,7 +5989,8 @@
     },
     "DENTAL ELECTRIC MOTOR": {
       "aliases": [
-        "dental electric motor"
+        "dental electric motor",
+        "dental electric motors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5965,7 +6008,8 @@
     },
     "DESOLDERING STATION": {
       "aliases": [
-        "desoldering station"
+        "desoldering station",
+        "desoldering stations"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5974,7 +6018,8 @@
     },
     "DIAMOND CORE DRILL": {
       "aliases": [
-        "diamond core drill"
+        "diamond core drill",
+        "diamond core drills"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -5992,7 +6037,8 @@
     },
     "DIESEL ENGINE FIRE PUMP CONTROLLER": {
       "aliases": [
-        "diesel engine fire pump controller"
+        "diesel engine fire pump controller",
+        "diesel engine fire pump controllers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6001,7 +6047,8 @@
     },
     "DISC MOWER-CONDITIONER": {
       "aliases": [
-        "disc mower-conditioner"
+        "disc mower-conditioner",
+        "disc mower-conditioners"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6019,7 +6066,8 @@
     },
     "DISPENSER": {
       "aliases": [
-        "dispenser"
+        "dispenser",
+        "dispensers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6028,7 +6076,8 @@
     },
     "DISPLAY REFRIGERATOR": {
       "aliases": [
-        "display refrigerator"
+        "display refrigerator",
+        "display refrigerators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6046,7 +6095,8 @@
     },
     "DRAIN PUMP MOTOR": {
       "aliases": [
-        "drain pump motor"
+        "drain pump motor",
+        "drain pump motors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6055,7 +6105,8 @@
     },
     "DRILLING HAMMER": {
       "aliases": [
-        "drilling hammer"
+        "drilling hammer",
+        "drilling hammers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6073,7 +6124,8 @@
     },
     "DRIVE RETAINER ASSEMBLY": {
       "aliases": [
-        "drive retainer assembly"
+        "drive retainer assembly",
+        "drive retainer assemblys"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6082,7 +6134,8 @@
     },
     "DRUM MOWER": {
       "aliases": [
-        "drum mower"
+        "drum mower",
+        "drum mowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6100,7 +6153,8 @@
     },
     "DRY ICE BLASTER": {
       "aliases": [
-        "dry ice blaster"
+        "dry ice blaster",
+        "dry ice blasters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6109,7 +6163,8 @@
     },
     "DRY ICE PELLET BLASTING": {
       "aliases": [
-        "dry ice pellet blasting"
+        "dry ice pellet blasting",
+        "dry ice pellet blastings"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6118,7 +6173,8 @@
     },
     "DRY ICE PELLETIZER": {
       "aliases": [
-        "dry ice pelletizer"
+        "dry ice pelletizer",
+        "dry ice pelletizers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6127,7 +6183,8 @@
     },
     "DRY SANDBLAST MACHINE": {
       "aliases": [
-        "dry sandblast machine"
+        "dry sandblast machine",
+        "dry sandblast machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6145,7 +6202,8 @@
     },
     "EAR MUFFS AND FACE SCREEN SET": {
       "aliases": [
-        "ear muffs and face screen set"
+        "ear muffs and face screen set",
+        "ear muffs & face screen set"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6154,7 +6212,8 @@
     },
     "ELECTRIC COLD FOGGER": {
       "aliases": [
-        "electric cold fogger"
+        "electric cold fogger",
+        "electric cold foggers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6163,7 +6222,8 @@
     },
     "ELECTRIC ENGRAVER": {
       "aliases": [
-        "electric engraver"
+        "electric engraver",
+        "electric engravers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6181,7 +6241,8 @@
     },
     "ELECTRIC GLUE REMOVER": {
       "aliases": [
-        "electric glue remover"
+        "electric glue remover",
+        "electric glue removers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6190,7 +6251,8 @@
     },
     "ELECTRIC MICROMOTOR": {
       "aliases": [
-        "electric micromotor"
+        "electric micromotor",
+        "electric micromotors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6199,7 +6261,8 @@
     },
     "ELECTRIC MOTOR": {
       "aliases": [
-        "electric motor"
+        "electric motor",
+        "electric motors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6226,7 +6289,8 @@
     },
     "ELECTRIC ROLLING MOTOR": {
       "aliases": [
-        "electric rolling motor"
+        "electric rolling motor",
+        "electric rolling motors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6235,7 +6299,8 @@
     },
     "ELECTRIC TOASTER": {
       "aliases": [
-        "electric toaster"
+        "electric toaster",
+        "electric toasters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6244,7 +6309,8 @@
     },
     "ELECTRIC WELDING MACHINE": {
       "aliases": [
-        "electric welding machine"
+        "electric welding machine",
+        "electric welding machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6253,7 +6319,8 @@
     },
     "ELECTRODE": {
       "aliases": [
-        "electrode"
+        "electrode",
+        "electrodes"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6271,7 +6338,8 @@
     },
     "EMERGENCY SHOWER": {
       "aliases": [
-        "emergency shower"
+        "emergency shower",
+        "emergency showers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6280,7 +6348,8 @@
     },
     "ENCLOSED GENERATOR": {
       "aliases": [
-        "enclosed generator"
+        "enclosed generator",
+        "enclosed generators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6289,7 +6358,8 @@
     },
     "ENGINE BLOCK": {
       "aliases": [
-        "engine block"
+        "engine block",
+        "engine blocks"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6298,7 +6368,8 @@
     },
     "ENGINE-DRIVEN WELDER": {
       "aliases": [
-        "engine-driven welder"
+        "engine-driven welder",
+        "engine-driven welders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6307,7 +6378,8 @@
     },
     "ENGRAVER": {
       "aliases": [
-        "engraver"
+        "engraver",
+        "engravers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6316,7 +6388,8 @@
     },
     "ERGONOMIC SUPPORT": {
       "aliases": [
-        "ergonomic support"
+        "ergonomic support",
+        "ergonomic supports"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6343,7 +6416,8 @@
     },
     "E-WRENCH CABLE": {
       "aliases": [
-        "e-wrench cable"
+        "e-wrench cable",
+        "e-wrench cables"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6361,7 +6435,8 @@
     },
     "FAIRWAY MOWER": {
       "aliases": [
-        "fairway mower"
+        "fairway mower",
+        "fairway mowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6370,7 +6445,8 @@
     },
     "FAN ASSEMBLY": {
       "aliases": [
-        "fan assembly"
+        "fan assembly",
+        "fan assemblys"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6379,7 +6455,8 @@
     },
     "FAN BATTERY": {
       "aliases": [
-        "fan battery"
+        "fan battery",
+        "fan batterys"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6397,7 +6474,8 @@
     },
     "FAN CLUTCH": {
       "aliases": [
-        "fan clutch"
+        "fan clutch",
+        "fan clutchs"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6406,7 +6484,8 @@
     },
     "FAN COMPLETE": {
       "aliases": [
-        "fan complete"
+        "fan complete",
+        "fan completes"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6415,7 +6494,8 @@
     },
     "FAN COOLER": {
       "aliases": [
-        "fan cooler"
+        "fan cooler",
+        "fan coolers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6424,7 +6504,8 @@
     },
     "FAN ENGINE COOLING": {
       "aliases": [
-        "fan engine cooling"
+        "fan engine cooling",
+        "fan engine coolings"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6433,7 +6514,8 @@
     },
     "FAN EXTRACTOR": {
       "aliases": [
-        "fan extractor"
+        "fan extractor",
+        "fan extractors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6451,7 +6533,8 @@
     },
     "FAN HOUSING ASSEMBLY": {
       "aliases": [
-        "fan housing assembly"
+        "fan housing assembly",
+        "fan housing assemblys"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6469,7 +6552,8 @@
     },
     "FAN RETAINER.": {
       "aliases": [
-        "fan retainer."
+        "fan retainer.",
+        "fan retainer.s"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6478,7 +6562,8 @@
     },
     "FAN ROTOR": {
       "aliases": [
-        "fan rotor"
+        "fan rotor",
+        "fan rotors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6514,7 +6599,8 @@
     },
     "FIXTURED SPINDLE": {
       "aliases": [
-        "fixtured spindle"
+        "fixtured spindle",
+        "fixtured spindles"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6523,7 +6609,8 @@
     },
     "FLAIL COLLECTOR": {
       "aliases": [
-        "flail collector"
+        "flail collector",
+        "flail collectors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6541,7 +6628,8 @@
     },
     "FLY REPELLENT": {
       "aliases": [
-        "fly repellent"
+        "fly repellent",
+        "fly repellents"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6550,7 +6638,8 @@
     },
     "FRONT-MOUNTED DISC MOWER": {
       "aliases": [
-        "front-mounted disc mower"
+        "front-mounted disc mower",
+        "front-mounted disc mowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6559,7 +6648,8 @@
     },
     "FRUIT HARVESTER": {
       "aliases": [
-        "fruit harvester"
+        "fruit harvester",
+        "fruit harvesters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6595,7 +6685,8 @@
     },
     "GARMENT STEAMER": {
       "aliases": [
-        "garment steamer"
+        "garment steamer",
+        "garment steamers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6613,7 +6704,8 @@
     },
     "GLASS CURTAIN WALL CLEANING": {
       "aliases": [
-        "glass curtain wall cleaning"
+        "glass curtain wall cleaning",
+        "glass curtain wall cleanings"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6631,7 +6723,8 @@
     },
     "GLASS-LINED STEEL": {
       "aliases": [
-        "glass-lined steel"
+        "glass-lined steel",
+        "glass-lined steels"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6649,7 +6742,8 @@
     },
     "GRILL": {
       "aliases": [
-        "grill"
+        "grill",
+        "grills"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6658,7 +6752,8 @@
     },
     "GRINDER": {
       "aliases": [
-        "grinder"
+        "grinder",
+        "grinders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6685,7 +6780,8 @@
     },
     "HAIRDRYER": {
       "aliases": [
-        "hairdryer"
+        "hairdryer",
+        "hairdryers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6703,7 +6799,8 @@
     },
     "HEAT EXCHANGER": {
       "aliases": [
-        "heat exchanger"
+        "heat exchanger",
+        "heat exchangers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6730,7 +6827,8 @@
     },
     "HEATER BLEND DOOR ACTUATOR": {
       "aliases": [
-        "heater blend door actuator"
+        "heater blend door actuator",
+        "heater blend door actuators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6757,7 +6855,8 @@
     },
     "HIGH CAPACITY TORQUE MULTIPLJER": {
       "aliases": [
-        "high capacity torque multipljer"
+        "high capacity torque multipljer",
+        "high capacity torque multipljers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6775,7 +6874,8 @@
     },
     "HIGH-PERFORMANCE BRUSH CUTTER": {
       "aliases": [
-        "high-performance brush cutter"
+        "high-performance brush cutter",
+        "high-performance brush cutters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6784,7 +6884,9 @@
     },
     "HIGH-PERFORMANCE STEAM AND VACUUM MACHINE": {
       "aliases": [
-        "high-performance steam and vacuum machine"
+        "high-performance steam and vacuum machine",
+        "high-performance steam & vacuum machine",
+        "high-performance steam and vacuum machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6793,7 +6895,8 @@
     },
     "HIGH-PRESSURE CLEANING ROBOT": {
       "aliases": [
-        "high-pressure cleaning robot"
+        "high-pressure cleaning robot",
+        "high-pressure cleaning robots"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6811,7 +6914,8 @@
     },
     "HOME GENERATOR": {
       "aliases": [
-        "home generator"
+        "home generator",
+        "home generators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6847,7 +6951,8 @@
     },
     "HYBRID BIG-MOUTH": {
       "aliases": [
-        "hybrid big-mouth"
+        "hybrid big-mouth",
+        "hybrid big-mouths"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6856,7 +6961,8 @@
     },
     "HYBRID REMOTE CONTROL LAWN MOWER": {
       "aliases": [
-        "hybrid remote control lawn mower"
+        "hybrid remote control lawn mower",
+        "hybrid remote control lawn mowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6865,7 +6971,8 @@
     },
     "HYDRAULIC AIR BLOWER": {
       "aliases": [
-        "hydraulic air blower"
+        "hydraulic air blower",
+        "hydraulic air blowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6874,7 +6981,8 @@
     },
     "HYDRAULIC BREAKER": {
       "aliases": [
-        "hydraulic breaker"
+        "hydraulic breaker",
+        "hydraulic breakers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6892,7 +7000,8 @@
     },
     "HYDRAULIC DRIVE": {
       "aliases": [
-        "hydraulic drive"
+        "hydraulic drive",
+        "hydraulic drives"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6901,7 +7010,8 @@
     },
     "HYDRAULIC ENGINE": {
       "aliases": [
-        "hydraulic engine"
+        "hydraulic engine",
+        "hydraulic engines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6910,7 +7020,8 @@
     },
     "HYDRAULIC EXPANDER": {
       "aliases": [
-        "hydraulic expander"
+        "hydraulic expander",
+        "hydraulic expanders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6919,7 +7030,8 @@
     },
     "HYDRAULIC EXTRACTOR": {
       "aliases": [
-        "hydraulic extractor"
+        "hydraulic extractor",
+        "hydraulic extractors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6928,7 +7040,8 @@
     },
     "HYDRAULIC HOLE PUNCHING TOOLS": {
       "aliases": [
-        "hydraulic hole punching tools"
+        "hydraulic hole punching tools",
+        "hydraulic hole punching tool"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6946,7 +7059,8 @@
     },
     "HYDRAULIC NUT SPLITTER": {
       "aliases": [
-        "hydraulic nut splitter"
+        "hydraulic nut splitter",
+        "hydraulic nut splitters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6955,7 +7069,8 @@
     },
     "HYDRAULIC PIPE BENDERS": {
       "aliases": [
-        "hydraulic pipe benders"
+        "hydraulic pipe benders",
+        "hydraulic pipe bender"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6964,7 +7079,8 @@
     },
     "HYDRAULIC POWER": {
       "aliases": [
-        "hydraulic power"
+        "hydraulic power",
+        "hydraulic powers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6973,7 +7089,8 @@
     },
     "HYDRAULIC SHEET METAL PUNCH": {
       "aliases": [
-        "hydraulic sheet metal punch"
+        "hydraulic sheet metal punch",
+        "hydraulic sheet metal punchs"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6982,7 +7099,8 @@
     },
     "HYDRAULIC TAMPER": {
       "aliases": [
-        "hydraulic tamper"
+        "hydraulic tamper",
+        "hydraulic tampers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -6991,7 +7109,8 @@
     },
     "HYDRAULIC TOOLS": {
       "aliases": [
-        "hydraulic tools"
+        "hydraulic tools",
+        "hydraulic tool"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7000,7 +7119,8 @@
     },
     "HYDRAULIC TORQUE WRENCH": {
       "aliases": [
-        "hydraulic torque wrench"
+        "hydraulic torque wrench",
+        "hydraulic torque wrenchs"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7009,7 +7129,8 @@
     },
     "HYDRAULIC VALVE": {
       "aliases": [
-        "hydraulic valve"
+        "hydraulic valve",
+        "hydraulic valves"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7018,7 +7139,8 @@
     },
     "IMPACT TORQUE WRENCH": {
       "aliases": [
-        "impact torque wrench"
+        "impact torque wrench",
+        "impact torque wrenchs"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7027,7 +7149,8 @@
     },
     "INCUBATOR": {
       "aliases": [
-        "incubator"
+        "incubator",
+        "incubators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7036,7 +7159,8 @@
     },
     "INDUSTRIAL AIR CURTAIN": {
       "aliases": [
-        "industrial air curtain"
+        "industrial air curtain",
+        "industrial air curtains"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7081,7 +7205,8 @@
     },
     "INDUSTRIAL COOLER": {
       "aliases": [
-        "industrial cooler"
+        "industrial cooler",
+        "industrial coolers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7117,7 +7242,8 @@
     },
     "INDUSTRIAL HEATER": {
       "aliases": [
-        "industrial heater"
+        "industrial heater",
+        "industrial heaters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7126,7 +7252,8 @@
     },
     "INDUSTRIAL MOTOR": {
       "aliases": [
-        "industrial motor"
+        "industrial motor",
+        "industrial motors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7135,7 +7262,8 @@
     },
     "INDUSTRIAL PARTS WASHER": {
       "aliases": [
-        "industrial parts washer"
+        "industrial parts washer",
+        "industrial parts washers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7153,7 +7281,8 @@
     },
     "IN-LINE BLOWER": {
       "aliases": [
-        "in-line blower"
+        "in-line blower",
+        "in-line blowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7171,7 +7300,8 @@
     },
     "INTELLIGENT TOUCHLESS ROBOT CAR WASH MACHINE": {
       "aliases": [
-        "intelligent touchless robot car wash machine"
+        "intelligent touchless robot car wash machine",
+        "intelligent touchless robot car wash machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7189,7 +7319,8 @@
     },
     "INVERTER ELECTRIC WELDING MACHINE": {
       "aliases": [
-        "inverter electric welding machine"
+        "inverter electric welding machine",
+        "inverter electric welding machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7207,7 +7338,8 @@
     },
     "JACKING MACHINE": {
       "aliases": [
-        "jacking machine"
+        "jacking machine",
+        "jacking machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7216,7 +7348,8 @@
     },
     "KNOCKOUTPUNCHTOOL": {
       "aliases": [
-        "knockoutpunchtool"
+        "knockoutpunchtool",
+        "knockoutpunchtools"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7225,7 +7358,8 @@
     },
     "LAPTOP COOLER": {
       "aliases": [
-        "laptop cooler"
+        "laptop cooler",
+        "laptop coolers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7234,7 +7368,8 @@
     },
     "LARGE AREA ROTARY MOWER": {
       "aliases": [
-        "large area rotary mower"
+        "large area rotary mower",
+        "large area rotary mowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7243,7 +7378,8 @@
     },
     "LARGE WATER BASED PARTS WASHER": {
       "aliases": [
-        "large water based parts washer"
+        "large water based parts washer",
+        "large water based parts washers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7252,7 +7388,8 @@
     },
     "LEVEL RULER": {
       "aliases": [
-        "level ruler"
+        "level ruler",
+        "level rulers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7261,7 +7398,8 @@
     },
     "LOCKBOLT": {
       "aliases": [
-        "lockbolt"
+        "lockbolt",
+        "lockbolts"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7288,7 +7426,8 @@
     },
     "MANUAL BLOWER FIRE STARTER": {
       "aliases": [
-        "manual blower fire starter"
+        "manual blower fire starter",
+        "manual blower fire starters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7297,7 +7436,8 @@
     },
     "MANUAL RULER": {
       "aliases": [
-        "manual ruler"
+        "manual ruler",
+        "manual rulers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7324,7 +7464,8 @@
     },
     "MECHANICAL PRUNER": {
       "aliases": [
-        "mechanical pruner"
+        "mechanical pruner",
+        "mechanical pruners"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7369,7 +7510,8 @@
     },
     "MINI MANUAL SIDE SHIFT": {
       "aliases": [
-        "mini manual side shift"
+        "mini manual side shift",
+        "mini manual side shifts"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7378,7 +7520,8 @@
     },
     "MINI PULL STRETCHER": {
       "aliases": [
-        "mini pull stretcher"
+        "mini pull stretcher",
+        "mini pull stretchers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7387,7 +7530,8 @@
     },
     "MINI SCREWDRIVER": {
       "aliases": [
-        "mini screwdriver"
+        "mini screwdriver",
+        "mini screwdrivers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7396,7 +7540,8 @@
     },
     "MODULE": {
       "aliases": [
-        "module"
+        "module",
+        "modules"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7405,7 +7550,8 @@
     },
     "MODULE COOLING": {
       "aliases": [
-        "module cooling"
+        "module cooling",
+        "module coolings"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7414,7 +7560,8 @@
     },
     "MOTOR": {
       "aliases": [
-        "motor"
+        "motor",
+        "motors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7450,7 +7597,8 @@
     },
     "MOTOR-DRIVEN TANK CLEANER": {
       "aliases": [
-        "motor-driven tank cleaner"
+        "motor-driven tank cleaner",
+        "motor-driven tank cleaners"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7459,7 +7607,8 @@
     },
     "MOUNTED DISC MOWERS": {
       "aliases": [
-        "mounted disc mowers"
+        "mounted disc mowers",
+        "mounted disc mower"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7468,7 +7617,8 @@
     },
     "MOWER-CONDITIONER": {
       "aliases": [
-        "mower-conditioner"
+        "mower-conditioner",
+        "mower-conditioners"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7486,7 +7636,8 @@
     },
     "MULTI-PURPOSE SANDER": {
       "aliases": [
-        "multi-purpose sander"
+        "multi-purpose sander",
+        "multi-purpose sanders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7495,7 +7646,8 @@
     },
     "NAIL DRILL": {
       "aliases": [
-        "nail drill"
+        "nail drill",
+        "nail drills"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7504,7 +7656,8 @@
     },
     "NAIL SANDER": {
       "aliases": [
-        "nail sander"
+        "nail sander",
+        "nail sanders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7513,7 +7666,8 @@
     },
     "NEBULIZER": {
       "aliases": [
-        "nebulizer"
+        "nebulizer",
+        "nebulizers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7531,7 +7685,8 @@
     },
     "NOTEBOOK COOLING": {
       "aliases": [
-        "notebook cooling"
+        "notebook cooling",
+        "notebook coolings"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7540,7 +7695,8 @@
     },
     "NUTRUNNER": {
       "aliases": [
-        "nutrunner"
+        "nutrunner",
+        "nutrunners"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7549,7 +7705,8 @@
     },
     "ORGANOMINERAL FOLIAR FERTILIZER": {
       "aliases": [
-        "organomineral foliar fertilizer"
+        "organomineral foliar fertilizer",
+        "organomineral foliar fertilizers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7567,7 +7724,8 @@
     },
     "OTHERS": {
       "aliases": [
-        "others"
+        "others",
+        "other"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7594,7 +7752,8 @@
     },
     "PET DRYER": {
       "aliases": [
-        "pet dryer"
+        "pet dryer",
+        "pet dryers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7612,7 +7771,8 @@
     },
     "POLYMER BLOWGUN": {
       "aliases": [
-        "polymer blowgun"
+        "polymer blowgun",
+        "polymer blowguns"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7621,7 +7781,8 @@
     },
     "PORTABLE ACTUATOR": {
       "aliases": [
-        "portable actuator"
+        "portable actuator",
+        "portable actuators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7648,7 +7809,8 @@
     },
     "PORTABLE SANDBLASTING": {
       "aliases": [
-        "portable sandblasting"
+        "portable sandblasting",
+        "portable sandblastings"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7657,7 +7819,8 @@
     },
     "PORTABLE SHOWER": {
       "aliases": [
-        "portable shower"
+        "portable shower",
+        "portable showers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7666,7 +7829,8 @@
     },
     "POSITIVE-PRESSURE VENTILATOR": {
       "aliases": [
-        "positive-pressure ventilator"
+        "positive-pressure ventilator",
+        "positive-pressure ventilators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7675,7 +7839,8 @@
     },
     "POTATO HARVESTER": {
       "aliases": [
-        "potato harvester"
+        "potato harvester",
+        "potato harvesters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7684,7 +7849,8 @@
     },
     "POWER DRIVE PIPE THREADER": {
       "aliases": [
-        "power drive pipe threader"
+        "power drive pipe threader",
+        "power drive pipe threaders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7702,7 +7868,8 @@
     },
     "PRE-PRUNER CRAWLER": {
       "aliases": [
-        "pre-pruner crawler"
+        "pre-pruner crawler",
+        "pre-pruner crawlers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7711,7 +7878,8 @@
     },
     "PRESSURE CONTROLLER FOR WATER PUMPS": {
       "aliases": [
-        "pressure controller for water pumps"
+        "pressure controller for water pumps",
+        "pressure controller for water pump"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7720,7 +7888,8 @@
     },
     "PRESSURIZATION SYSTEM": {
       "aliases": [
-        "pressurization system"
+        "pressurization system",
+        "pressurization systems"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7747,7 +7916,8 @@
     },
     "PROFESSIONAL LAWN MOWER": {
       "aliases": [
-        "professional lawn mower"
+        "professional lawn mower",
+        "professional lawn mowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7774,7 +7944,8 @@
     },
     "PUMP KIT WITH THERMAL PROTECTOR": {
       "aliases": [
-        "pump kit with thermal protector"
+        "pump kit with thermal protector",
+        "pump kit with thermal protectors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7783,7 +7954,8 @@
     },
     "PUNCH": {
       "aliases": [
-        "punch"
+        "punch",
+        "punchs"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7810,7 +7982,8 @@
     },
     "QUIET BLOWER PANEL": {
       "aliases": [
-        "quiet blower panel"
+        "quiet blower panel",
+        "quiet blower panels"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7819,7 +7992,8 @@
     },
     "RADIAL BLOWER": {
       "aliases": [
-        "radial blower"
+        "radial blower",
+        "radial blowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7828,7 +8002,8 @@
     },
     "RADIAL ENGINE": {
       "aliases": [
-        "radial engine"
+        "radial engine",
+        "radial engines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7855,7 +8030,8 @@
     },
     "RADIATOR WATER RESERVOIR": {
       "aliases": [
-        "radiator water reservoir"
+        "radiator water reservoir",
+        "radiator water reservoirs"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7864,7 +8040,8 @@
     },
     "RAIL CUTTER": {
       "aliases": [
-        "rail cutter"
+        "rail cutter",
+        "rail cutters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7882,7 +8059,8 @@
     },
     "READ CABLE ASSEMBLY": {
       "aliases": [
-        "read cable assembly"
+        "read cable assembly",
+        "read cable assemblys"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7891,7 +8069,8 @@
     },
     "REAR DISC MOWER": {
       "aliases": [
-        "rear disc mower"
+        "rear disc mower",
+        "rear disc mowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7900,7 +8079,8 @@
     },
     "REAR DISC MOWER-CONDITIONER": {
       "aliases": [
-        "rear disc mower-conditioner"
+        "rear disc mower-conditioner",
+        "rear disc mower-conditioners"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7909,7 +8089,8 @@
     },
     "RECIRCULATORS": {
       "aliases": [
-        "recirculators"
+        "recirculators",
+        "recirculator"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7918,7 +8099,8 @@
     },
     "REFRIGERATOR": {
       "aliases": [
-        "refrigerator"
+        "refrigerator",
+        "refrigerators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7927,7 +8109,8 @@
     },
     "REGENERATIVE EXHAUST": {
       "aliases": [
-        "regenerative exhaust"
+        "regenerative exhaust",
+        "regenerative exhausts"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7945,7 +8128,8 @@
     },
     "REGULAR AIRFLOW": {
       "aliases": [
-        "regular airflow"
+        "regular airflow",
+        "regular airflows"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7954,7 +8138,8 @@
     },
     "REMOTE GRINDER": {
       "aliases": [
-        "remote grinder"
+        "remote grinder",
+        "remote grinders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7963,7 +8148,8 @@
     },
     "REMOTE-OPERATED MOWER": {
       "aliases": [
-        "remote-operated mower"
+        "remote-operated mower",
+        "remote-operated mowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7972,7 +8158,8 @@
     },
     "REPEATER": {
       "aliases": [
-        "repeater"
+        "repeater",
+        "repeaters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7981,7 +8168,8 @@
     },
     "RIGID DECK ROLLER MOWERS": {
       "aliases": [
-        "rigid deck roller mowers"
+        "rigid deck roller mowers",
+        "rigid deck roller mower"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -7990,7 +8178,8 @@
     },
     "RING BLOWER": {
       "aliases": [
-        "ring blower"
+        "ring blower",
+        "ring blowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8008,7 +8197,8 @@
     },
     "ROBOTIC NOZZLE CLEANING STATION": {
       "aliases": [
-        "robotic nozzle cleaning station"
+        "robotic nozzle cleaning station",
+        "robotic nozzle cleaning stations"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8035,7 +8225,8 @@
     },
     "ROTARY HEADER": {
       "aliases": [
-        "rotary header"
+        "rotary header",
+        "rotary headers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8044,7 +8235,8 @@
     },
     "ROTARY LAWN MOWER": {
       "aliases": [
-        "rotary lawn mower"
+        "rotary lawn mower",
+        "rotary lawn mowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8053,7 +8245,8 @@
     },
     "ROTARY POSITIVE BLOWER": {
       "aliases": [
-        "rotary positive blower"
+        "rotary positive blower",
+        "rotary positive blowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8071,7 +8264,8 @@
     },
     "ROTATING SPRINKLER": {
       "aliases": [
-        "rotating sprinkler"
+        "rotating sprinkler",
+        "rotating sprinklers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8080,7 +8274,8 @@
     },
     "ROTOR ASSEMBLY": {
       "aliases": [
-        "rotor assembly"
+        "rotor assembly",
+        "rotor assemblys"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8089,7 +8284,8 @@
     },
     "ROUGH MOWER": {
       "aliases": [
-        "rough mower"
+        "rough mower",
+        "rough mowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8098,7 +8294,8 @@
     },
     "SANDBLASTER": {
       "aliases": [
-        "sandblaster"
+        "sandblaster",
+        "sandblasters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8107,7 +8304,8 @@
     },
     "SANDBLASTING BOOTH": {
       "aliases": [
-        "sandblasting booth"
+        "sandblasting booth",
+        "sandblasting booths"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8125,7 +8323,8 @@
     },
     "SEALLESS MAGNETIC DRIVE": {
       "aliases": [
-        "sealless magnetic drive"
+        "sealless magnetic drive",
+        "sealless magnetic drives"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8134,7 +8333,8 @@
     },
     "SELF-PROPELLED SPRAYER": {
       "aliases": [
-        "self-propelled sprayer"
+        "self-propelled sprayer",
+        "self-propelled sprayers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8143,7 +8343,8 @@
     },
     "SELF-PROPELLED WINDROWERS": {
       "aliases": [
-        "self-propelled windrowers"
+        "self-propelled windrowers",
+        "self-propelled windrower"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8179,7 +8380,8 @@
     },
     "SHREDDING MACHINE": {
       "aliases": [
-        "shredding machine"
+        "shredding machine",
+        "shredding machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8188,7 +8390,8 @@
     },
     "SHROUD ASSEMBLY": {
       "aliases": [
-        "shroud assembly"
+        "shroud assembly",
+        "shroud assemblys"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8197,7 +8400,8 @@
     },
     "SIDE BLOWER": {
       "aliases": [
-        "side blower"
+        "side blower",
+        "side blowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8206,7 +8410,8 @@
     },
     "SIDE-CHANNEL BLOWER": {
       "aliases": [
-        "side-channel blower"
+        "side-channel blower",
+        "side-channel blowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8224,7 +8429,8 @@
     },
     "SLIDE HAMMER": {
       "aliases": [
-        "slide hammer"
+        "slide hammer",
+        "slide hammers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8233,7 +8439,8 @@
     },
     "SLOTTING MACHINE": {
       "aliases": [
-        "slotting machine"
+        "slotting machine",
+        "slotting machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8260,7 +8467,8 @@
     },
     "SOLDERING STATION": {
       "aliases": [
-        "soldering station"
+        "soldering station",
+        "soldering stations"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8296,7 +8504,8 @@
     },
     "SPRAYING DRONE": {
       "aliases": [
-        "spraying drone"
+        "spraying drone",
+        "spraying drones"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8305,7 +8514,8 @@
     },
     "SPRAYING SYSTEM": {
       "aliases": [
-        "spraying system"
+        "spraying system",
+        "spraying systems"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8314,7 +8524,8 @@
     },
     "SPREADING SYSTEM": {
       "aliases": [
-        "spreading system"
+        "spreading system",
+        "spreading systems"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8323,7 +8534,8 @@
     },
     "STABILIZERS": {
       "aliases": [
-        "stabilizers"
+        "stabilizers",
+        "stabilizer"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8332,7 +8544,8 @@
     },
     "STATIONARY ENGINE": {
       "aliases": [
-        "stationary engine"
+        "stationary engine",
+        "stationary engines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8341,7 +8554,8 @@
     },
     "STATIONARY GENERATOR": {
       "aliases": [
-        "stationary generator"
+        "stationary generator",
+        "stationary generators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8350,7 +8564,8 @@
     },
     "STEAM CLEANER": {
       "aliases": [
-        "steam cleaner"
+        "steam cleaner",
+        "steam cleaners"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8359,7 +8574,8 @@
     },
     "STEAM JET DEVICE": {
       "aliases": [
-        "steam jet device"
+        "steam jet device",
+        "steam jet devices"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8368,7 +8584,8 @@
     },
     "STINGER": {
       "aliases": [
-        "stinger"
+        "stinger",
+        "stingers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8377,7 +8594,8 @@
     },
     "STONE CUTTER": {
       "aliases": [
-        "stone cutter"
+        "stone cutter",
+        "stone cutters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8431,7 +8649,8 @@
     },
     "SURFACE BRUSH": {
       "aliases": [
-        "surface brush"
+        "surface brush",
+        "surface brushs"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8467,7 +8686,8 @@
     },
     "TAMPING RAMMER": {
       "aliases": [
-        "tamping rammer"
+        "tamping rammer",
+        "tamping rammers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8494,7 +8714,8 @@
     },
     "TENSIONER": {
       "aliases": [
-        "tensioner"
+        "tensioner",
+        "tensioners"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8503,7 +8724,8 @@
     },
     "THREADED ROD CUTTER": {
       "aliases": [
-        "threaded rod cutter"
+        "threaded rod cutter",
+        "threaded rod cutters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8521,7 +8743,8 @@
     },
     "TILE CUTTER": {
       "aliases": [
-        "tile cutter"
+        "tile cutter",
+        "tile cutters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8530,7 +8753,8 @@
     },
     "TOOL HOLDER": {
       "aliases": [
-        "tool holder"
+        "tool holder",
+        "tool holders"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8539,7 +8763,8 @@
     },
     "TORQUE METER": {
       "aliases": [
-        "torque meter"
+        "torque meter",
+        "torque meters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8557,7 +8782,8 @@
     },
     "TORQUE WRENCH": {
       "aliases": [
-        "torque wrench"
+        "torque wrench",
+        "torque wrenchs"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8566,7 +8792,8 @@
     },
     "TRACKED REMOTE LAWN MOWER": {
       "aliases": [
-        "tracked remote lawn mower"
+        "tracked remote lawn mower",
+        "tracked remote lawn mowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8575,7 +8802,8 @@
     },
     "TUBE BUNDLE CLEANER": {
       "aliases": [
-        "tube bundle cleaner"
+        "tube bundle cleaner",
+        "tube bundle cleaners"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8584,7 +8812,8 @@
     },
     "TURBINE": {
       "aliases": [
-        "turbine"
+        "turbine",
+        "turbines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8602,7 +8831,8 @@
     },
     "TYING MACHINE": {
       "aliases": [
-        "tying machine"
+        "tying machine",
+        "tying machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8620,7 +8850,8 @@
     },
     "UNIVERSAL CUTTER": {
       "aliases": [
-        "universal cutter"
+        "universal cutter",
+        "universal cutters"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8629,7 +8860,8 @@
     },
     "VACCINATION DEVICES": {
       "aliases": [
-        "vaccination devices"
+        "vaccination devices",
+        "vaccination device"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8638,7 +8870,8 @@
     },
     "VACUUM BLOWER": {
       "aliases": [
-        "vacuum blower"
+        "vacuum blower",
+        "vacuum blowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8647,7 +8880,8 @@
     },
     "VACUUM CIRCUIT BREAKER": {
       "aliases": [
-        "vacuum circuit breaker"
+        "vacuum circuit breaker",
+        "vacuum circuit breakers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8656,7 +8890,8 @@
     },
     "VACUUM MOTOR": {
       "aliases": [
-        "vacuum motor"
+        "vacuum motor",
+        "vacuum motors"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8701,7 +8936,8 @@
     },
     "VIBRATORY PLATE": {
       "aliases": [
-        "vibratory plate"
+        "vibratory plate",
+        "vibratory plates"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8710,7 +8946,8 @@
     },
     "VIBRATORY PLATE COMPACTOR FOR EXCAVATOR": {
       "aliases": [
-        "vibratory plate compactor for excavator"
+        "vibratory plate compactor for excavator",
+        "vibratory plate compactor for excavators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8737,7 +8974,8 @@
     },
     "WALNUT SAND DE-CARBON CLEANER": {
       "aliases": [
-        "walnut sand de-carbon cleaner"
+        "walnut sand de-carbon cleaner",
+        "walnut sand de-carbon cleaners"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8755,7 +8993,8 @@
     },
     "WATER COOLER": {
       "aliases": [
-        "water cooler"
+        "water cooler",
+        "water coolers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8773,7 +9012,8 @@
     },
     "WHEEL BLOWER": {
       "aliases": [
-        "wheel blower"
+        "wheel blower",
+        "wheel blowers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8791,7 +9031,8 @@
     },
     "WIND MACHINE": {
       "aliases": [
-        "wind machine"
+        "wind machine",
+        "wind machines"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8800,7 +9041,8 @@
     },
     "WIND-POWERED VENTILATOR": {
       "aliases": [
-        "wind-powered ventilator"
+        "wind-powered ventilator",
+        "wind-powered ventilators"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8809,7 +9051,8 @@
     },
     "WINDROWER HEADERS": {
       "aliases": [
-        "windrower headers"
+        "windrower headers",
+        "windrower header"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8818,7 +9061,8 @@
     },
     "WINDSHIELD WASHER FLUID RESERVOIR": {
       "aliases": [
-        "windshield washer fluid reservoir"
+        "windshield washer fluid reservoir",
+        "windshield washer fluid reservoirs"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8827,7 +9071,8 @@
     },
     "WINE DISPENSER": {
       "aliases": [
-        "wine dispenser"
+        "wine dispenser",
+        "wine dispensers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8845,7 +9090,8 @@
     },
     "WIRELESS CONTROLLER": {
       "aliases": [
-        "wireless controller"
+        "wireless controller",
+        "wireless controllers"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -8854,7 +9100,8 @@
     },
     "WORK LIGHT": {
       "aliases": [
-        "work light"
+        "work light",
+        "work lights"
       ],
       "fallback_pair": [
         "OTHERS",
@@ -12742,7 +12989,9 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "LOWARA",
       "model_regex": "^1016L[CD]\\d+",
-      "aliases": [],
+      "aliases": [
+        "centrifugal pump"
+      ],
       "priority": 390
     },
     {
@@ -12751,7 +13000,9 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "WILO",
       "model_regex": "^MEDANA\\s+CH1",
-      "aliases": [],
+      "aliases": [
+        "centrifugal pump"
+      ],
       "priority": 390
     },
     {
@@ -12776,7 +13027,6 @@
         "waste water pump",
         "wastewater pump",
         "grinder pump",
-        "bomba submersível",
         "bomba submersivel",
         "bomba sumergible",
         "bomba fecal"
@@ -12797,9 +13047,7 @@
         "circulator pump",
         "recirculation pump",
         "bomba circuladora",
-        "bomba de circulação",
         "bomba de circulacao",
-        "bomba de circulación",
         "bomba de circulacion"
       ],
       "priority": 315
@@ -12811,7 +13059,6 @@
       "aliases": [
         "peripheral water pump",
         "peripheral pump",
-        "bomba periférica",
         "bomba periferica"
       ],
       "priority": 310
@@ -12838,11 +13085,10 @@
       "family": "PRIMING PUMP",
       "aliases": [
         "jet self priming pump",
-        "self priming pump",
         "self-priming pump",
-        "self priming water pump",
         "self-priming water pump",
-        "bomba autocebante"
+        "bomba autocebante",
+        "priming pump"
       ],
       "priority": 300
     },
@@ -12866,14 +13112,11 @@
       "category_general": "OTHERS",
       "family": "CENTRIFUGAL PUMP",
       "aliases": [
-        "single stage inline centrifugal pump",
         "single-stage inline centrifugal pump",
         "end suction centrifugal pump",
-        "single impeller centrifugal pump",
         "single-impeller centrifugal pump",
         "centrifugal water pump",
         "centrifugal pump",
-        "bomba centrífuga",
         "bomba centrifuga"
       ],
       "priority": 304
@@ -12885,10 +13128,11 @@
       "brand": "GRUNDFOS",
       "aliases": [
         "grundfos ups",
-        "grundfos up ",
+        "grundfos up",
         "grundfos magna",
         "alpha2",
-        "magna3"
+        "magna3",
+        "circulation pump"
       ],
       "priority": 360
     },
@@ -12898,7 +13142,8 @@
       "family": "PRESSURIZATION PUMP",
       "brand": "GRUNDFOS",
       "aliases": [
-        "scala1"
+        "scala1",
+        "pressurization pump"
       ],
       "priority": 365
     },
@@ -12908,8 +13153,9 @@
       "family": "SUBMERSIBLE PUMP",
       "brand": "GRUNDFOS",
       "aliases": [
-        "grundfos sp ",
-        "sp submersible groundwater"
+        "grundfos sp",
+        "sp submersible groundwater",
+        "submersible pump"
       ],
       "priority": 355
     },
@@ -12920,10 +13166,10 @@
       "brand": "GRUNDFOS",
       "aliases": [
         "grundfos cm",
-        "grundfos cr ",
+        "grundfos cr",
         "grundfos crn",
         "grundfos crne",
-        "grundfos tp ",
+        "grundfos tp",
         "grundfos tpd",
         "grundfos nbg",
         "cm 1-",
@@ -12935,7 +13181,8 @@
         "tp 80-",
         "tp 100-",
         "tp 125-",
-        "nbg "
+        "nbg",
+        "centrifugal pump"
       ],
       "priority": 340
     },
@@ -12951,7 +13198,8 @@
         "domo15",
         "domo 15",
         "domo20",
-        "domo 20"
+        "domo 20",
+        "submersible pump"
       ],
       "priority": 350
     },
@@ -12963,8 +13211,9 @@
       "aliases": [
         "lowara 15hm",
         "lowara 22hm",
-        "15hm ",
-        "22hm "
+        "15hm",
+        "22hm",
+        "multistage pump"
       ],
       "priority": 345
     },
@@ -12976,9 +13225,9 @@
       "aliases": [
         "lowara cea",
         "lowara ceam",
-        "single-impeller pump",
         "single impeller pump",
-        "end suction pump"
+        "end suction pump",
+        "centrifugal pump"
       ],
       "priority": 335
     },
@@ -12991,7 +13240,8 @@
         "cpm170",
         "cpm190",
         "cpm200",
-        "centrifugal water pump"
+        "centrifugal water pump",
+        "centrifugal pump"
       ],
       "priority": 350
     },
@@ -13019,7 +13269,8 @@
         "wvsd",
         "wqd",
         "submersible sewage pump",
-        "sewage pump"
+        "sewage pump",
+        "submersible pump"
       ],
       "priority": 350
     },
@@ -13030,7 +13281,8 @@
       "brand": "SHIMGE",
       "aliases": [
         "zp15",
-        "zp 15"
+        "zp 15",
+        "priming pump"
       ],
       "priority": 340
     },
@@ -13040,12 +13292,10 @@
       "family": "PERIPHERAL PUMP",
       "brand": "PLUVIUS",
       "aliases": [
-        "qb-60",
         "qb 60",
-        "qb-70",
         "qb 70",
-        "qb-80",
-        "qb 80"
+        "qb 80",
+        "peripheral pump"
       ],
       "priority": 345
     },
@@ -13055,8 +13305,8 @@
       "family": "PERIPHERAL PUMP",
       "brand": "VASSER",
       "aliases": [
-        "qb 60",
-        "qb-60"
+        "qb-60",
+        "peripheral pump"
       ],
       "priority": 345
     },
@@ -13091,7 +13341,8 @@
       "aliases": [
         "intelligent permanent magnet booster pump",
         "smart booster pump",
-        "smart water pump"
+        "smart water pump",
+        "pressurization pump"
       ],
       "priority": 330
     },
@@ -13101,7 +13352,8 @@
       "family": "PRESSURIZATION PUMP",
       "brand": "GRUNDFOS",
       "aliases": [
-        "scala1"
+        "scala1",
+        "pressurization pump"
       ],
       "priority": 365
     },
@@ -13114,7 +13366,8 @@
         "ca1000",
         "ca600",
         "ca200",
-        "pa500"
+        "pa500",
+        "pressurization pump"
       ],
       "priority": 360
     },
@@ -13127,7 +13380,8 @@
         "pre 1",
         "pre 2",
         "qc pres",
-        "qc te"
+        "qc te",
+        "pressure booster pump"
       ],
       "priority": 355
     },
@@ -13139,7 +13393,8 @@
       "aliases": [
         "pres 260",
         "pres 500",
-        "pres vvi"
+        "pres vvi",
+        "pressure booster pump"
       ],
       "priority": 355
     },
@@ -13185,7 +13440,8 @@
       "model_regex": "^MHIKE[ _/-]*803A$",
       "aliases": [
         "booster pump",
-        "water pressure"
+        "water pressure",
+        "pressure booster pump"
       ],
       "priority": 370
     },
@@ -13207,7 +13463,10 @@
       "family": "SHEARS",
       "brand": "INFACO",
       "model_regex": "^F3020$",
-      "aliases": [],
+      "aliases": [
+        "shears",
+        "shear"
+      ],
       "priority": 900
     },
     {
@@ -13225,7 +13484,10 @@
       "family": "CYLINDER MOWERS",
       "brand": "DENNIS",
       "model_regex": "^G860$",
-      "aliases": [],
+      "aliases": [
+        "cylinder mowers",
+        "cylinder mower"
+      ],
       "priority": 900
     },
     {
@@ -13234,7 +13496,9 @@
       "family": "ENGINE",
       "brand": "KOOP",
       "model_regex": "^192F$",
-      "aliases": [],
+      "aliases": [
+        "engine"
+      ],
       "priority": 900
     },
     {
@@ -13243,7 +13507,10 @@
       "family": "SOIL COMPACTOR",
       "brand": "MASALTA",
       "model_regex": "^EMR70H$",
-      "aliases": [],
+      "aliases": [
+        "soil compactor",
+        "soil compactors"
+      ],
       "priority": 900
     },
     {
@@ -13252,7 +13519,10 @@
       "family": "FLAIL MOWER",
       "brand": "TAVOL",
       "model_regex": "^FLAIL\\ MOWER$",
-      "aliases": [],
+      "aliases": [
+        "flail mower",
+        "flail mowers"
+      ],
       "priority": 900
     },
     {
@@ -13270,7 +13540,10 @@
       "family": "GENERATOR",
       "brand": "BRANIK",
       "model_regex": "^BK20RSE\\.3$",
-      "aliases": [],
+      "aliases": [
+        "generator",
+        "generators"
+      ],
       "priority": 900
     },
     {
@@ -13297,7 +13570,10 @@
       "family": "GENERATOR",
       "brand": "PRAMAC",
       "model_regex": "^GA13000$",
-      "aliases": [],
+      "aliases": [
+        "generator",
+        "generators"
+      ],
       "priority": 900
     },
     {
@@ -13306,7 +13582,9 @@
       "family": "DRAIN PUMP",
       "brand": "RATIONAL",
       "model_regex": "^87\\.01\\.954S$",
-      "aliases": [],
+      "aliases": [
+        "drain pump"
+      ],
       "priority": 900
     },
     {
@@ -13315,7 +13593,10 @@
       "family": "GENERATOR",
       "brand": "TOMAHAWK",
       "model_regex": "^TG3500E$",
-      "aliases": [],
+      "aliases": [
+        "generator",
+        "generators"
+      ],
       "priority": 900
     },
     {
@@ -13324,7 +13605,10 @@
       "family": "GENERATOR",
       "brand": "WEICHAI",
       "model_regex": "^WPG22L1$",
-      "aliases": [],
+      "aliases": [
+        "generator",
+        "generators"
+      ],
       "priority": 900
     },
     {
@@ -13369,7 +13653,10 @@
       "family": "WASHER",
       "brand": "ADV3",
       "model_regex": "^HL1400$",
-      "aliases": [],
+      "aliases": [
+        "washer",
+        "washers"
+      ],
       "priority": 900
     },
     {
@@ -13378,7 +13665,9 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "AMT",
       "model_regex": "^2763\\ 95$",
-      "aliases": [],
+      "aliases": [
+        "centrifugal pump"
+      ],
       "priority": 900
     },
     {
@@ -13387,7 +13676,9 @@
       "family": "WATER PUMP",
       "brand": "CET",
       "model_regex": "^PFP\\ 9HP\\ DSL$",
-      "aliases": [],
+      "aliases": [
+        "water pump"
+      ],
       "priority": 900
     },
     {
@@ -13405,7 +13696,9 @@
       "family": "PARTS",
       "brand": "GESIPA",
       "model_regex": "^1679664$",
-      "aliases": [],
+      "aliases": [
+        "parts"
+      ],
       "priority": 900
     },
     {
@@ -13414,7 +13707,9 @@
       "family": "ELETRIC PUMP",
       "brand": "GRIFO",
       "model_regex": "^G20I95$",
-      "aliases": [],
+      "aliases": [
+        "eletric pump"
+      ],
       "priority": 900
     },
     {
@@ -13432,7 +13727,10 @@
       "family": "MULTIFUNCTIONAL",
       "brand": "HEAR",
       "model_regex": "^HSM300$",
-      "aliases": [],
+      "aliases": [
+        "multifunctional",
+        "multifunctionals"
+      ],
       "priority": 900
     },
     {
@@ -13450,7 +13748,9 @@
       "family": "BATTERY BLOWER",
       "brand": "MIYAWA",
       "model_regex": "^DSTI_155B$",
-      "aliases": [],
+      "aliases": [
+        "battery blowers"
+      ],
       "priority": 900
     },
     {
@@ -13459,7 +13759,9 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "PEDROLLO",
       "model_regex": "^CP\\ 160C$",
-      "aliases": [],
+      "aliases": [
+        "centrifugal pump"
+      ],
       "priority": 900
     },
     {
@@ -13468,7 +13770,9 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "PEDROLLO",
       "model_regex": "^CP\\ 220C$",
-      "aliases": [],
+      "aliases": [
+        "centrifugal pump"
+      ],
       "priority": 900
     },
     {
@@ -13477,7 +13781,9 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "PEDROLLO",
       "model_regex": "^CP\\ 230A$",
-      "aliases": [],
+      "aliases": [
+        "centrifugal pump"
+      ],
       "priority": 900
     },
     {
@@ -13486,7 +13792,9 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "PEDROLLO",
       "model_regex": "^CP\\ 230B$",
-      "aliases": [],
+      "aliases": [
+        "centrifugal pump"
+      ],
       "priority": 900
     },
     {
@@ -13495,7 +13803,9 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "PEDROLLO",
       "model_regex": "^CPM160B$",
-      "aliases": [],
+      "aliases": [
+        "centrifugal pump"
+      ],
       "priority": 900
     },
     {
@@ -13504,7 +13814,9 @@
       "family": "PERIPHERAL PUMP",
       "brand": "PEDROLLO",
       "model_regex": "^PKM80$",
-      "aliases": [],
+      "aliases": [
+        "peripheral pump"
+      ],
       "priority": 900
     },
     {
@@ -13513,7 +13825,9 @@
       "family": "ROUTER GLASS",
       "brand": "ROUTECK",
       "model_regex": "^JATECK$",
-      "aliases": [],
+      "aliases": [
+        "router glass"
+      ],
       "priority": 900
     },
     {
@@ -13522,7 +13836,9 @@
       "family": "CENTRIFUGAL PUMP",
       "brand": "SPERONI",
       "model_regex": "^CAM\\ 100$",
-      "aliases": [],
+      "aliases": [
+        "centrifugal pump"
+      ],
       "priority": 900
     },
     {
@@ -13567,7 +13883,9 @@
       "family": "DRAINAGE PUMP",
       "brand": "ASKOLL",
       "model_regex": "^EAU61383505$",
-      "aliases": [],
+      "aliases": [
+        "drainage pump"
+      ],
       "priority": 900
     },
     {
@@ -13612,7 +13930,9 @@
       "family": "REBAR TYING TOOL",
       "brand": "MAX",
       "model_regex": "^RB611T$",
-      "aliases": [],
+      "aliases": [
+        "rebar tying tool"
+      ],
       "priority": 900
     },
     {
@@ -13648,7 +13968,9 @@
       "family": "DRAINAGE PUMP",
       "brand": "SAMSUNG",
       "model_regex": "^DC31\\ 00187A$",
-      "aliases": [],
+      "aliases": [
+        "drainage pump"
+      ],
       "priority": 900
     },
     {
@@ -13711,7 +14033,10 @@
       "family": "TILLERS",
       "brand": "AMAZONE",
       "model_regex": "^CEUS\\ 5000\\ 2TX$",
-      "aliases": [],
+      "aliases": [
+        "tillers",
+        "tiller"
+      ],
       "priority": 900
     },
     {
@@ -13720,7 +14045,10 @@
       "family": "PORTABLE WASHER",
       "brand": "FANTTIK",
       "model_regex": "^K100\\ FLIP$",
-      "aliases": [],
+      "aliases": [
+        "portable washer",
+        "portable washers"
+      ],
       "priority": 900
     },
     {
@@ -13729,7 +14057,10 @@
       "family": "WASHER",
       "brand": "BESTOOL",
       "model_regex": "^HL2500$",
-      "aliases": [],
+      "aliases": [
+        "washer",
+        "washers"
+      ],
       "priority": 925
     },
     {
@@ -13738,7 +14069,9 @@
       "family": "PARTS",
       "brand": "ALLLEN BRADLEY",
       "model_regex": "^41391/801/01$",
-      "aliases": [],
+      "aliases": [
+        "parts"
+      ],
       "priority": 925
     },
     {
@@ -13747,7 +14080,9 @@
       "family": "SPRAYERS",
       "brand": "ANNOVI REVERBERI",
       "model_regex": "^52180\\.$",
-      "aliases": [],
+      "aliases": [
+        "sprayers"
+      ],
       "priority": 925
     },
     {
@@ -13756,7 +14091,9 @@
       "family": "HYDRAULIC PUMP",
       "brand": "AZCUE",
       "model_regex": "^MO\\ 19/20$",
-      "aliases": [],
+      "aliases": [
+        "hydraulic pump"
+      ],
       "priority": 925
     },
     {
@@ -13765,7 +14102,10 @@
       "family": "WASHER",
       "brand": "BELARRA",
       "model_regex": "^H\\ 6501/1$",
-      "aliases": [],
+      "aliases": [
+        "washer",
+        "washers"
+      ],
       "priority": 925
     },
     {
@@ -13774,7 +14114,10 @@
       "family": "WASHER",
       "brand": "BLITZ",
       "model_regex": "^FCHPW20LX$",
-      "aliases": [],
+      "aliases": [
+        "washer",
+        "washers"
+      ],
       "priority": 925
     },
     {
@@ -13783,7 +14126,9 @@
       "family": "SUCTION SUBMERSIBLE PUMP",
       "brand": "BRINKMANN PUMPS",
       "model_regex": "^SGL502/450\\+001$",
-      "aliases": [],
+      "aliases": [
+        "suction submersible pump"
+      ],
       "priority": 925
     },
     {
@@ -13792,7 +14137,10 @@
       "family": "BRUSH SANDER",
       "brand": "BRISTLE BLASTER",
       "model_regex": "^SE\\ 1399$",
-      "aliases": [],
+      "aliases": [
+        "brush sander",
+        "brush sanders"
+      ],
       "priority": 925
     },
     {
@@ -13801,7 +14149,9 @@
       "family": "WATER PUMP",
       "brand": "BRUMBY",
       "model_regex": "^490B\\ 42004$",
-      "aliases": [],
+      "aliases": [
+        "water pump"
+      ],
       "priority": 925
     },
     {
@@ -13810,7 +14160,9 @@
       "family": "PARTS",
       "brand": "ALLEN BRADLEY",
       "model_regex": "^41391/801/01$",
-      "aliases": [],
+      "aliases": [
+        "parts"
+      ],
       "priority": 925
     },
     {
@@ -13819,7 +14171,9 @@
       "family": "PARTS",
       "brand": "ALLE N BRADLEY",
       "model_regex": "^41391/801/01$",
-      "aliases": [],
+      "aliases": [
+        "parts"
+      ],
       "priority": 925
     },
     {
@@ -13827,7 +14181,8 @@
       "category_general": "ENGINE",
       "family": "PETROL WALK BEHIND MOWER",
       "aliases": [
-        "petrol walk behind mower"
+        "petrol walk behind mower",
+        "petrol walk behind mowers"
       ],
       "priority": 180
     },
@@ -13836,7 +14191,8 @@
       "category_general": "OTHERS",
       "family": "CORDED CHAINSAW",
       "aliases": [
-        "corded chainsaw"
+        "corded chainsaw",
+        "corded chainsaws"
       ],
       "priority": 180
     },
@@ -13845,7 +14201,8 @@
       "category_general": "OTHERS",
       "family": "DRILLERS",
       "aliases": [
-        "drillers"
+        "drillers",
+        "driller"
       ],
       "priority": 180
     },
@@ -13854,7 +14211,8 @@
       "category_general": "OTHERS",
       "family": "DUSTER",
       "aliases": [
-        "duster"
+        "duster",
+        "dusters"
       ],
       "priority": 180
     },
@@ -13872,7 +14230,8 @@
       "category_general": "OTHERS",
       "family": "ROBOTIC LAWN MOWER",
       "aliases": [
-        "robotic lawn mower"
+        "robotic lawn mower",
+        "robotic lawn mowers"
       ],
       "priority": 180
     },
@@ -13881,7 +14240,8 @@
       "category_general": "OTHERS",
       "family": "TILE VIBRATION MACHINE",
       "aliases": [
-        "tile vibration machine"
+        "tile vibration machine",
+        "tile vibration machines"
       ],
       "priority": 180
     },
@@ -13890,7 +14250,8 @@
       "category_general": "OTHERS",
       "family": "WASHER",
       "aliases": [
-        "washer"
+        "washer",
+        "washers"
       ],
       "priority": 180
     },
@@ -13899,7 +14260,8 @@
       "category_general": "PETROL TRACTOR",
       "family": "PETROL WALK BEHIND MOWER",
       "aliases": [
-        "petrol walk behind mower"
+        "petrol walk behind mower",
+        "petrol walk behind mowers"
       ],
       "priority": 180
     },
