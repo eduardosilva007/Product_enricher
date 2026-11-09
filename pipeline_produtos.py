@@ -4446,23 +4446,23 @@ def _combo_kit_components(rules: Rules, s1: Stage1Result) -> List[str]:
 
 
 def choose_combo_title(rules: Rules, s1: Stage1Result) -> Tuple[str, str]:
-    """Título da própria fonte STRONG que comprovou o combo multi-tool."""
+    """Título da fonte STRONG que sustenta dois ou mais produtos físicos do mesmo SKU."""
     policy = rules.raw.get("COMBO_KIT_POLICY", {}) or {}
     eligible = {safe(x) for x in (policy.get("eligible_primary_types", []) or []) if safe(x)}
-    combo_terms = [safe(x) for x in (policy.get("combo_terms", []) or []) if safe(x)]
     min_types = int(policy.get("min_distinct_primary_types", 2) or 2)
     candidates: List[Source] = []
     for src in s1.sources:
         if src.relevance != "STRONG":
             continue
-        folded = norm_text(f"{src.title}\n{src.content[:1200]}")
-        if not any(contains_alias_prepared(folded, term) for term in combo_terms):
-            continue
         explicit = {
             t for t in s1.type_candidates
-            if t in eligible and float(src.type_scores.get(t, 0.0) or 0.0) > 0.0
+            if t in eligible
+            and t not in rules.component_types
+            and float(src.type_scores.get(t, 0.0) or 0.0) > 0.0
+            and ("TITLE" in (src.type_evidence_fields.get(t, []) or [])
+                 or "BODY" in (src.type_evidence_fields.get(t, []) or []))
         }
-        if len(explicit) >= min_types:
+        if len(_collapse_related_primary_types(rules, explicit)) >= min_types:
             candidates.append(src)
     if not candidates:
         return "", ""
@@ -6288,7 +6288,7 @@ def finalize_product(
             "Auto Eligible": "SIM",
             "Double Check Priority": "BAIXA",
             "Reason Code": "POWER_TOOL_COMBO_KIT",
-            "Motivo": f"Combo kit explícito com múltiplas ferramentas principais: {', '.join(combo_components)} | {tax_reason}",
+            "Motivo": f"Mesmo SKU contém múltiplos produtos físicos principais: {', '.join(combo_components)} | {tax_reason}",
             "Clef Provider": "",
             "Clef Model": "",
             "Clef Cache": "",
