@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-28-v3.0.15-audited-multilingual-tool-taxonomy",
+  "VERSION": "2026-11-09-v3.0.16-reviewed-family-catalog",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -31,7 +31,8 @@
     "AUTO_APROVADO exige identidade STRONG: Marca e Modelo devem estar ancorados no TITLE/URL da fonte que sustenta o TYPE; modelo isolado sem a marca pode gerar candidato/revisão, nunca aprovação automática.",
     "Ruído de importação de FAN/COOLER/BLOWER industrial é classificado como OTHERS na FAMILY física específica, evitando inflar PETROL/CORDED/BATTERY garden equipment.",
     "WATERPUMP não pode nascer de usos não-hídricos de pump (windscreen/windshield washer, ink, fuel, oil, vacuum, condensate); quando explícitos, esses produtos usam TYPE/FAMILY próprios em OTHERS.",
-    "Próxima Ação deve ser CONCLUIDO em todo registro realmente RESOLVED; AUTO_APROVADO nunca pode coexistir com ação de LLM/revisão."
+    "Próxima Ação deve ser CONCLUIDO em todo registro realmente RESOLVED; AUTO_APROVADO nunca pode coexistir com ação de LLM/revisão.",
+    "Reviewed FAMILY catalog from Base Final is authoritative for accepted Category General|FAMILY labels; WATERPUMPS|WATER PUMP is the canonical generic water-pump pair."
   ],
   "TAXONOMY_PAIRS": [
     {
@@ -832,7 +833,7 @@
     },
     {
       "category_general": "WATERPUMPS",
-      "family": "WATERPUMP"
+      "family": "WATER PUMP"
     },
     {
       "category_general": "OTHERS",
@@ -849,6 +850,1738 @@
     {
       "category_general": "OTHERS",
       "family": "WATER PUMP"
+    },
+    {
+      "category_general": "ATOMIZER",
+      "family": "ATOMIZER"
+    },
+    {
+      "category_general": "BATTERY PRODUCT",
+      "family": "BATTERY TRACTOR"
+    },
+    {
+      "category_general": "ENGINE",
+      "family": "PETROL WALK BEHIND MOWER"
+    },
+    {
+      "category_general": "ENGINES",
+      "family": "ENGINES"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ABRASIVE BLASTING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ACCESS CONTROLLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ACTION FIGURE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ACTIVE HEAT SINK"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR COMPRESSOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR CONDITIONER FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR CONDITIONING FILTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR ELECTRIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR EVAPORATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR FILTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR FLOW FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR HUMIDIFIER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR RIFLE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR SYSTEM FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR WASHING GUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR-COOLED HEAT SINK"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ASPIRATED ENGINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ASSY FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AUTO SWATHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AUTOMAT LUBRICANT PU"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AUTOMATIC CORRUGATED PIPE CUTTING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AUTOMATIC HOSE REEL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AUTOMATIC WATER DISPENSER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AXIAL EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AXIAL EXPLOSION-PROOF"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AXIAL EXTRACTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AXIAL FAN ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AXIAL FLOW FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BARREL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BATTERY BLENDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BEAD BREAKER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BELT DRYER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BENCH GRINDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BENCHTOP MICROMOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BENDABLE NECK HANGING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BENDING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLASTING BOOTH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOW GUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOW MOLDING UNIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER COMPLETE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER EVAPORATOR ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER FAN ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER MANUAL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER WHEEL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BOX FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BRIDGE SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BRIDGE WET SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CABIN HEATER MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CABIN INTERIOR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CAMERA"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CASE FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CEILING EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CEILING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTER-PIVOT DISC MOWER-CONDITIONERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTER-PIVOT MOWER CONDITIONERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTRAL AIR DIFFUSER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL BOOSTER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL HYDRAULIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CERAMIC MUG"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CHAMFER PIPES"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CHARGE FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CINEMATIC LENS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CIP STATION"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CIRCULATION FAN MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CLEANING GUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CLEANING PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CLOSED CIRCUIT COOLING TOWERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CLUTCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COIL CLEANING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COMBINE HARVESTER HEADER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COMBUSTION BLOWER KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COMPRESSED-AIR CANNON"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONCRETE SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONCRETE SCARIFIER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONDENSER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONDENSER COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONDENSER FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COOLER AXIAL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COOLER CPU"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COOLER FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COOLER PAD"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COOLING RADIATOR GAMING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CORDED CHAINSAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CORE CUTTING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CROSS FLOW FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CRUSHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CULTICHISSEL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CUT-OFF TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DC COOLING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DEBRIS BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DECIBEL METER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DEEP IMPACT SOCKET"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DENTAL ELECTRIC MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DESCALING PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DESOLDERING STATION"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DIAMOND CORE DRILL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DIAPHRAGM PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DIESEL ENGINE FIRE PUMP CONTROLLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DISC MOWER-CONDITIONER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DISCHARGE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DISPENSER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DISPLAY REFRIGERATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DOT PEEN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRAIN PUMP MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRILLING HAMMER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRILLING RIG"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRIVE RETAINER ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRUM MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRUM PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRY ICE BLASTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRY ICE PELLET BLASTING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRY ICE PELLETIZER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRY SANDBLAST MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRYING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DUSTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "EAR MUFFS AND FACE SCREEN SET"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC COLD FOGGER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC ENGRAVER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC GLUE REMOVER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC MICROMOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC REMOVE GLUE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC ROLLING MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC TOASTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC WELDING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRODE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELEVATOR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "EMERGENCY SHOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ENCLOSED GENERATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ENGINE BLOCK"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ENGINE-DRIVEN WELDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ENGINES"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ENGRAVER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ERGONOMIC SUPPORT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "EVAPORATOR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "EVAPORATOR UNIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "E-WRENCH CABLE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAIRWAY MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN BATTERY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN BOX"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN CLUTCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN COMPLETE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN ENGINE COOLING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN EXTRACTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN FILTER KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN HOUSING ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN RETAINER."
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN ROTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN TRAY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FILTERED FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FIRE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FIXTURED SPINDLE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FLAIL COLLECTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FLOATING WATER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FLY REPELLENT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FRONT-MOUNTED DISC MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FRUIT HARVESTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GARDEN HOSE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GARDEN PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GARMENT STEAMER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GENERATOR ASSY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GLASS CURTAIN WALL CLEANING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GLASS CUT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GLASS-LINED STEEL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GLUE GUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GRILL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GRINDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GROUND POWER UNIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GYM FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HAIRDRYER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HEAD COOLING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HEAT EXCHANGER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HEAT FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HEAT PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HEATER BLEND DOOR ACTUATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HELICAL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HERMETIC REFRIGERANT PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HIGH CAPACITY TORQUE MULTIPLJER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HIGH PRESSURE COMBUSTION BLOWER FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HIGH-PERFORMANCE BRUSH CUTTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HIGH-PERFORMANCE STEAM AND VACUUM MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HIGH-PRESSURE CLEANING ROBOT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HIGH-PRESSURE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HOME GENERATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HOSE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HOT AIR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HOT WATER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYBRID BIG-MOUTH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYBRID REMOTE CONTROL LAWN MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC AIR BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC BREAKER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC COPPER TUBE EXPANDER TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC DRIVE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC ENGINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC EXPANDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC EXTRACTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC HOLE PUNCHING TOOLS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC JACK"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC NUT SPLITTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC PIPE BENDERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC POWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC SHEET METAL PUNCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC TAMPER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC TOOLS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC TORQUE WRENCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC VALVE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "IMPACT TORQUE WRENCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INCUBATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL AIR CURTAIN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL AXIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL CENTRIFUGAL EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL CENTRIFUGAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL CENTRIFUGE FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL COOLING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL HEATER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL PARTS WASHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "IN-LINE BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INSULATION PUSHING DEVICE SET"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INTELLIGENT TOUCHLESS ROBOT CAR WASH MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INTERCOOLER ELECTRIC FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INVERTER ELECTRIC WELDING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "IRON"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "JACKING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "KNOCKOUTPUNCHTOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LAPTOP COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LARGE AREA ROTARY MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LARGE WATER BASED PARTS WASHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LEVEL RULER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LOCKBOLT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LUBRICATION PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MAGNETIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MANUAL BLOWER FIRE STARTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MANUAL RULER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MARINE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MASONRY SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MECHANICAL PRUNER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "METAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MICRO-PUNCHING TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MILK PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MINI FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MINI MANUAL SIDE SHIFT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MINI PULL STRETCHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MINI SCREWDRIVER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MODULE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MODULE COOLING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOTOR AXIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOTOR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOTOR KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOTOR-DRIVEN TANK CLEANER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOUNTED DISC MOWERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOWER-CONDITIONER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MUD PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MULTI-PURPOSE SANDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NAIL DRILL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NAIL SANDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NEBULIZER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NORM PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NOTEBOOK COOLING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NUTRUNNER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ORGANOMINERAL FOLIAR FERTILIZER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "OSCILLATING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "OTHERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PEDESTAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PERMANENT MAGNETIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PET DRYER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PLUG FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "POLYMER BLOWGUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PORTABLE ACTUATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PORTABLE FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PORTABLE FIRE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PORTABLE SANDBLASTING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PORTABLE SHOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "POSITIVE-PRESSURE VENTILATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "POTATO HARVESTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "POWER DRIVE PIPE THREADER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRECISION SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRE-PRUNER CRAWLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRESSURE CONTROLLER FOR WATER PUMPS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRESSURIZATION SYSTEM"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRESSURIZED CLEANING PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRESSURIZER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PROFESSIONAL LAWN MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PULP PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PUMP KIT WITH THERMAL PROTECTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PUNCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PUNCHING TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PYROGRAPHY TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "QUIET BLOWER PANEL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RADIAL BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RADIAL ENGINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RADIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RADIATOR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RADIATOR WATER RESERVOIR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RAIL CUTTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RATCHET SET"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "READ CABLE ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REAR DISC MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REAR DISC MOWER-CONDITIONER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RECIRCULATORS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REFRIGERATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REGENERATIVE EXHAUST"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REGENERATIVE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REGULAR AIRFLOW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REMOTE GRINDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REMOTE-OPERATED MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REPEATER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RIGID DECK ROLLER MOWERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RING BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RINSE BOOSTER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROBOTIC LAWN MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROBOTIC NOZZLE CLEANING STATION"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROOF FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY ELECTRIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY HEADER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY LAWN MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY POSITIVE BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY TILLERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTATING SPRINKLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTOR ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROUGH MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SANDBLASTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SANDBLASTING BOOTH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SANITARY PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SEALLESS MAGNETIC DRIVE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SELF-PROPELLED SPRAYER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SELF-PROPELLED WINDROWERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SERVICE KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SHEAR PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SHREDDING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SHREDDING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SHROUD ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SIDE BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SIDE-CHANNEL BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SIDE-CHANNEL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SLIDE HAMMER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SLOTTING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SLURRY TEST KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SMOKE EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SOLDERING STATION"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SOLUTION PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SPIRAL COMPRESSED AIR HOSE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SPLIT CASE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SPRAYING DRONE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SPRAYING SYSTEM"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SPREADING SYSTEM"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STABILIZERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STATIONARY ENGINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STATIONARY GENERATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STEAM CLEANER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STEAM JET DEVICE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STINGER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STONE CUTTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STRAPPING TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SUBMERSIBLE CENTRIFUGAL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SUCTION CUP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SUCTION ELECTRIC FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SUCTION PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SURFACE BRUSH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SURFACE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SURFACE SOLAR PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SYSTEM PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TAMPING RAMMER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TANGENCIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TANGENTIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TENSIONER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "THREADED ROD CUTTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "THROTTLE BODY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TILE CUTTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TILE VIBRATION MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TOOL HOLDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TORQUE METER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TORQUE TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TORQUE WRENCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TRACKED REMOTE LAWN MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TUBE BUNDLE CLEANER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TURBINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TURBINE FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TYING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "UNDER COATING GUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "UNIVERSAL CUTTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VACCINATION DEVICES"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VACUUM BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VACUUM CIRCUIT BREAKER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VACUUM MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VARIATOR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VERTICAL PROCESS PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VERTICAL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VIBRATING SUCTION CUP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VIBRATORY PLATE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VIBRATORY PLATE COMPACTOR FOR EXCAVATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WALK BEHIND SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WALL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WALNUT SAND DE-CARBON CLEANER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WASHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WATER COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WEED WAND"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WHEEL BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WHEEL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WIND MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WIND-POWERED VENTILATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WINDROWER HEADERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WINDSHIELD WASHER FLUID RESERVOIR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WINE DISPENSER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WIRE SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WIRELESS CONTROLLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WORK LIGHT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WORKSHOP CART"
+    },
+    {
+      "category_general": "PETROL TRACTOR",
+      "family": "PETROL WALK BEHIND MOWER"
     }
   ],
   "PRODUCT_TYPES": {
@@ -1803,7 +3536,7 @@
       ],
       "fallback_pair": [
         "WATERPUMPS",
-        "WATERPUMP"
+        "WATER PUMP"
       ]
     },
     "ROBOTIC LAWN MOWER": {
@@ -3292,6 +5025,3849 @@
       "fallback_pair": [
         "OTHERS",
         "MIXER"
+      ]
+    },
+    "ATOMIZER": {
+      "aliases": [
+        "atomizer"
+      ],
+      "fallback_pair": [
+        "ATOMIZER",
+        "ATOMIZER"
+      ]
+    },
+    "BATTERY TRACTOR": {
+      "aliases": [
+        "battery tractor"
+      ],
+      "fallback_pair": [
+        "BATTERY PRODUCT",
+        "BATTERY TRACTOR"
+      ]
+    },
+    "ENGINES": {
+      "aliases": [
+        "engines"
+      ],
+      "fallback_pair": [
+        "ENGINES",
+        "ENGINES"
+      ]
+    },
+    "ABRASIVE BLASTING": {
+      "aliases": [
+        "abrasive blasting"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ABRASIVE BLASTING"
+      ]
+    },
+    "ACCESS CONTROLLER": {
+      "aliases": [
+        "access controller"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ACCESS CONTROLLER"
+      ]
+    },
+    "ACTION FIGURE": {
+      "aliases": [
+        "action figure"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ACTION FIGURE"
+      ]
+    },
+    "ACTIVE HEAT SINK": {
+      "aliases": [
+        "active heat sink"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ACTIVE HEAT SINK"
+      ]
+    },
+    "AIR BLOWER": {
+      "aliases": [
+        "air blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR BLOWER"
+      ]
+    },
+    "AIR COMPRESSOR": {
+      "aliases": [
+        "air compressor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR COMPRESSOR"
+      ]
+    },
+    "AIR CONDITIONER FAN": {
+      "aliases": [
+        "air conditioner fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR CONDITIONER FAN"
+      ]
+    },
+    "AIR CONDITIONING FILTER": {
+      "aliases": [
+        "air conditioning filter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR CONDITIONING FILTER"
+      ]
+    },
+    "AIR COOLER": {
+      "aliases": [
+        "air cooler"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR COOLER"
+      ]
+    },
+    "AIR ELECTRIC PUMP": {
+      "aliases": [
+        "air electric pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR ELECTRIC PUMP"
+      ]
+    },
+    "AIR EVAPORATOR": {
+      "aliases": [
+        "air evaporator"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR EVAPORATOR"
+      ]
+    },
+    "AIR FILTER": {
+      "aliases": [
+        "air filter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR FILTER"
+      ]
+    },
+    "AIR FLOW FAN": {
+      "aliases": [
+        "air flow fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR FLOW FAN"
+      ]
+    },
+    "AIR HUMIDIFIER": {
+      "aliases": [
+        "air humidifier"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR HUMIDIFIER"
+      ]
+    },
+    "AIR PUMP": {
+      "aliases": [
+        "air pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR PUMP"
+      ]
+    },
+    "AIR RIFLE": {
+      "aliases": [
+        "air rifle"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR RIFLE"
+      ]
+    },
+    "AIR SYSTEM FAN": {
+      "aliases": [
+        "air system fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR SYSTEM FAN"
+      ]
+    },
+    "AIR WASHING GUN": {
+      "aliases": [
+        "air washing gun"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR WASHING GUN"
+      ]
+    },
+    "AIR-COOLED HEAT SINK": {
+      "aliases": [
+        "air-cooled heat sink"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR-COOLED HEAT SINK"
+      ]
+    },
+    "ASPIRATED ENGINE": {
+      "aliases": [
+        "aspirated engine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ASPIRATED ENGINE"
+      ]
+    },
+    "ASSY FAN": {
+      "aliases": [
+        "assy fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ASSY FAN"
+      ]
+    },
+    "AUTO SWATHER": {
+      "aliases": [
+        "auto swather"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AUTO SWATHER"
+      ]
+    },
+    "AUTOMAT LUBRICANT PU": {
+      "aliases": [
+        "automat lubricant pu"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AUTOMAT LUBRICANT PU"
+      ]
+    },
+    "AUTOMATIC CORRUGATED PIPE CUTTING MACHINE": {
+      "aliases": [
+        "automatic corrugated pipe cutting machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AUTOMATIC CORRUGATED PIPE CUTTING MACHINE"
+      ]
+    },
+    "AUTOMATIC HOSE REEL": {
+      "aliases": [
+        "automatic hose reel"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AUTOMATIC HOSE REEL"
+      ]
+    },
+    "AUTOMATIC WATER DISPENSER": {
+      "aliases": [
+        "automatic water dispenser"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AUTOMATIC WATER DISPENSER"
+      ]
+    },
+    "AXIAL EXHAUST FAN": {
+      "aliases": [
+        "axial exhaust fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AXIAL EXHAUST FAN"
+      ]
+    },
+    "AXIAL EXPLOSION-PROOF": {
+      "aliases": [
+        "axial explosion-proof"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AXIAL EXPLOSION-PROOF"
+      ]
+    },
+    "AXIAL EXTRACTOR": {
+      "aliases": [
+        "axial extractor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AXIAL EXTRACTOR"
+      ]
+    },
+    "AXIAL FAN ASSEMBLY": {
+      "aliases": [
+        "axial fan assembly"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AXIAL FAN ASSEMBLY"
+      ]
+    },
+    "AXIAL FLOW FAN": {
+      "aliases": [
+        "axial flow fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AXIAL FLOW FAN"
+      ]
+    },
+    "BARREL PUMP": {
+      "aliases": [
+        "barrel pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BARREL PUMP"
+      ]
+    },
+    "BATTERY BLENDER": {
+      "aliases": [
+        "battery blender"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BATTERY BLENDER"
+      ]
+    },
+    "BEAD BREAKER": {
+      "aliases": [
+        "bead breaker"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BEAD BREAKER"
+      ]
+    },
+    "BELT DRYER": {
+      "aliases": [
+        "belt dryer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BELT DRYER"
+      ]
+    },
+    "BENCH GRINDER": {
+      "aliases": [
+        "bench grinder"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BENCH GRINDER"
+      ]
+    },
+    "BENCHTOP MICROMOTOR": {
+      "aliases": [
+        "benchtop micromotor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BENCHTOP MICROMOTOR"
+      ]
+    },
+    "BENDABLE NECK HANGING FAN": {
+      "aliases": [
+        "bendable neck hanging fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BENDABLE NECK HANGING FAN"
+      ]
+    },
+    "BENDING MACHINE": {
+      "aliases": [
+        "bending machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BENDING MACHINE"
+      ]
+    },
+    "BLASTING BOOTH": {
+      "aliases": [
+        "blasting booth"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BLASTING BOOTH"
+      ]
+    },
+    "BLOW GUN": {
+      "aliases": [
+        "blow gun"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BLOW GUN"
+      ]
+    },
+    "BLOW MOLDING UNIT": {
+      "aliases": [
+        "blow molding unit"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BLOW MOLDING UNIT"
+      ]
+    },
+    "BLOWER ASSEMBLY": {
+      "aliases": [
+        "blower assembly"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BLOWER ASSEMBLY"
+      ]
+    },
+    "BLOWER COMPLETE": {
+      "aliases": [
+        "blower complete"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BLOWER COMPLETE"
+      ]
+    },
+    "BLOWER EVAPORATOR ASSEMBLY": {
+      "aliases": [
+        "blower evaporator assembly"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BLOWER EVAPORATOR ASSEMBLY"
+      ]
+    },
+    "BLOWER FAN ASSEMBLY": {
+      "aliases": [
+        "blower fan assembly"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BLOWER FAN ASSEMBLY"
+      ]
+    },
+    "BLOWER KIT": {
+      "aliases": [
+        "blower kit"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BLOWER KIT"
+      ]
+    },
+    "BLOWER MANUAL": {
+      "aliases": [
+        "blower manual"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BLOWER MANUAL"
+      ]
+    },
+    "BLOWER WHEEL": {
+      "aliases": [
+        "blower wheel"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BLOWER WHEEL"
+      ]
+    },
+    "BOX FAN": {
+      "aliases": [
+        "box fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BOX FAN"
+      ]
+    },
+    "BRIDGE SAW": {
+      "aliases": [
+        "bridge saw"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BRIDGE SAW"
+      ]
+    },
+    "BRIDGE WET SAW": {
+      "aliases": [
+        "bridge wet saw"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BRIDGE WET SAW"
+      ]
+    },
+    "CABIN HEATER MOTOR": {
+      "aliases": [
+        "cabin heater motor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CABIN HEATER MOTOR"
+      ]
+    },
+    "CABIN INTERIOR FAN": {
+      "aliases": [
+        "cabin interior fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CABIN INTERIOR FAN"
+      ]
+    },
+    "CAMERA": {
+      "aliases": [
+        "camera"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CAMERA"
+      ]
+    },
+    "CASE FAN": {
+      "aliases": [
+        "case fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CASE FAN"
+      ]
+    },
+    "CEILING EXHAUST FAN": {
+      "aliases": [
+        "ceiling exhaust fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CEILING EXHAUST FAN"
+      ]
+    },
+    "CEILING FAN": {
+      "aliases": [
+        "ceiling fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CEILING FAN"
+      ]
+    },
+    "CENTER-PIVOT DISC MOWER-CONDITIONERS": {
+      "aliases": [
+        "center-pivot disc mower-conditioners"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CENTER-PIVOT DISC MOWER-CONDITIONERS"
+      ]
+    },
+    "CENTER-PIVOT MOWER CONDITIONERS": {
+      "aliases": [
+        "center-pivot mower conditioners"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CENTER-PIVOT MOWER CONDITIONERS"
+      ]
+    },
+    "CENTRAL AIR DIFFUSER": {
+      "aliases": [
+        "central air diffuser"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CENTRAL AIR DIFFUSER"
+      ]
+    },
+    "CENTRIFUGAL BLOWER": {
+      "aliases": [
+        "centrifugal blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CENTRIFUGAL BLOWER"
+      ]
+    },
+    "CENTRIFUGAL BOOSTER PUMP": {
+      "aliases": [
+        "centrifugal booster pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CENTRIFUGAL BOOSTER PUMP"
+      ]
+    },
+    "CENTRIFUGAL EXHAUST FAN": {
+      "aliases": [
+        "centrifugal exhaust fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CENTRIFUGAL EXHAUST FAN"
+      ]
+    },
+    "CENTRIFUGAL FAN": {
+      "aliases": [
+        "centrifugal fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CENTRIFUGAL FAN"
+      ]
+    },
+    "CENTRIFUGAL HYDRAULIC PUMP": {
+      "aliases": [
+        "centrifugal hydraulic pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CENTRIFUGAL HYDRAULIC PUMP"
+      ]
+    },
+    "CERAMIC MUG": {
+      "aliases": [
+        "ceramic mug"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CERAMIC MUG"
+      ]
+    },
+    "CHAMFER PIPES": {
+      "aliases": [
+        "chamfer pipes"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CHAMFER PIPES"
+      ]
+    },
+    "CHARGE FAN": {
+      "aliases": [
+        "charge fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CHARGE FAN"
+      ]
+    },
+    "CINEMATIC LENS": {
+      "aliases": [
+        "cinematic lens"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CINEMATIC LENS"
+      ]
+    },
+    "CIP STATION": {
+      "aliases": [
+        "cip station"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CIP STATION"
+      ]
+    },
+    "CIRCULATION FAN MOTOR": {
+      "aliases": [
+        "circulation fan motor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CIRCULATION FAN MOTOR"
+      ]
+    },
+    "CLEANING GUN": {
+      "aliases": [
+        "cleaning gun"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CLEANING GUN"
+      ]
+    },
+    "CLEANING PUMP": {
+      "aliases": [
+        "cleaning pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CLEANING PUMP"
+      ]
+    },
+    "CLOSED CIRCUIT COOLING TOWERS": {
+      "aliases": [
+        "closed circuit cooling towers"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CLOSED CIRCUIT COOLING TOWERS"
+      ]
+    },
+    "CLUTCH": {
+      "aliases": [
+        "clutch"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CLUTCH"
+      ]
+    },
+    "COIL CLEANING MACHINE": {
+      "aliases": [
+        "coil cleaning machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "COIL CLEANING MACHINE"
+      ]
+    },
+    "COMBINE HARVESTER HEADER": {
+      "aliases": [
+        "combine harvester header"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "COMBINE HARVESTER HEADER"
+      ]
+    },
+    "COMBUSTION BLOWER KIT": {
+      "aliases": [
+        "combustion blower kit"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "COMBUSTION BLOWER KIT"
+      ]
+    },
+    "COMPRESSED-AIR CANNON": {
+      "aliases": [
+        "compressed-air cannon"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "COMPRESSED-AIR CANNON"
+      ]
+    },
+    "CONCRETE SAW": {
+      "aliases": [
+        "concrete saw"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CONCRETE SAW"
+      ]
+    },
+    "CONCRETE SCARIFIER": {
+      "aliases": [
+        "concrete scarifier"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CONCRETE SCARIFIER"
+      ]
+    },
+    "CONDENSER": {
+      "aliases": [
+        "condenser"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CONDENSER"
+      ]
+    },
+    "CONDENSER COOLER": {
+      "aliases": [
+        "condenser cooler"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CONDENSER COOLER"
+      ]
+    },
+    "CONDENSER FAN": {
+      "aliases": [
+        "condenser fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CONDENSER FAN"
+      ]
+    },
+    "COOLER AXIAL": {
+      "aliases": [
+        "cooler axial"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "COOLER AXIAL"
+      ]
+    },
+    "COOLER CPU": {
+      "aliases": [
+        "cooler cpu"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "COOLER CPU"
+      ]
+    },
+    "COOLER FAN": {
+      "aliases": [
+        "cooler fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "COOLER FAN"
+      ]
+    },
+    "COOLER PAD": {
+      "aliases": [
+        "cooler pad"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "COOLER PAD"
+      ]
+    },
+    "COOLING RADIATOR GAMING": {
+      "aliases": [
+        "cooling radiator gaming"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "COOLING RADIATOR GAMING"
+      ]
+    },
+    "CORE CUTTING MACHINE": {
+      "aliases": [
+        "core cutting machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CORE CUTTING MACHINE"
+      ]
+    },
+    "CROSS FLOW FAN": {
+      "aliases": [
+        "cross flow fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CROSS FLOW FAN"
+      ]
+    },
+    "CRUSHER": {
+      "aliases": [
+        "crusher"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CRUSHER"
+      ]
+    },
+    "CULTICHISSEL": {
+      "aliases": [
+        "cultichissel"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CULTICHISSEL"
+      ]
+    },
+    "CUT-OFF TOOL": {
+      "aliases": [
+        "cut-off tool"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CUT-OFF TOOL"
+      ]
+    },
+    "DC COOLING": {
+      "aliases": [
+        "dc cooling"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DC COOLING"
+      ]
+    },
+    "DEBRIS BLOWER": {
+      "aliases": [
+        "debris blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DEBRIS BLOWER"
+      ]
+    },
+    "DECIBEL METER": {
+      "aliases": [
+        "decibel meter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DECIBEL METER"
+      ]
+    },
+    "DEEP IMPACT SOCKET": {
+      "aliases": [
+        "deep impact socket"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DEEP IMPACT SOCKET"
+      ]
+    },
+    "DENTAL ELECTRIC MOTOR": {
+      "aliases": [
+        "dental electric motor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DENTAL ELECTRIC MOTOR"
+      ]
+    },
+    "DESCALING PUMP": {
+      "aliases": [
+        "descaling pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DESCALING PUMP"
+      ]
+    },
+    "DESOLDERING STATION": {
+      "aliases": [
+        "desoldering station"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DESOLDERING STATION"
+      ]
+    },
+    "DIAMOND CORE DRILL": {
+      "aliases": [
+        "diamond core drill"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DIAMOND CORE DRILL"
+      ]
+    },
+    "DIAPHRAGM PUMP": {
+      "aliases": [
+        "diaphragm pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DIAPHRAGM PUMP"
+      ]
+    },
+    "DIESEL ENGINE FIRE PUMP CONTROLLER": {
+      "aliases": [
+        "diesel engine fire pump controller"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DIESEL ENGINE FIRE PUMP CONTROLLER"
+      ]
+    },
+    "DISC MOWER-CONDITIONER": {
+      "aliases": [
+        "disc mower-conditioner"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DISC MOWER-CONDITIONER"
+      ]
+    },
+    "DISCHARGE PUMP": {
+      "aliases": [
+        "discharge pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DISCHARGE PUMP"
+      ]
+    },
+    "DISPENSER": {
+      "aliases": [
+        "dispenser"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DISPENSER"
+      ]
+    },
+    "DISPLAY REFRIGERATOR": {
+      "aliases": [
+        "display refrigerator"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DISPLAY REFRIGERATOR"
+      ]
+    },
+    "DOT PEEN": {
+      "aliases": [
+        "dot peen"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DOT PEEN"
+      ]
+    },
+    "DRAIN PUMP MOTOR": {
+      "aliases": [
+        "drain pump motor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DRAIN PUMP MOTOR"
+      ]
+    },
+    "DRILLING HAMMER": {
+      "aliases": [
+        "drilling hammer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DRILLING HAMMER"
+      ]
+    },
+    "DRILLING RIG": {
+      "aliases": [
+        "drilling rig"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DRILLING RIG"
+      ]
+    },
+    "DRIVE RETAINER ASSEMBLY": {
+      "aliases": [
+        "drive retainer assembly"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DRIVE RETAINER ASSEMBLY"
+      ]
+    },
+    "DRUM MOWER": {
+      "aliases": [
+        "drum mower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DRUM MOWER"
+      ]
+    },
+    "DRUM PUMP": {
+      "aliases": [
+        "drum pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DRUM PUMP"
+      ]
+    },
+    "DRY ICE BLASTER": {
+      "aliases": [
+        "dry ice blaster"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DRY ICE BLASTER"
+      ]
+    },
+    "DRY ICE PELLET BLASTING": {
+      "aliases": [
+        "dry ice pellet blasting"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DRY ICE PELLET BLASTING"
+      ]
+    },
+    "DRY ICE PELLETIZER": {
+      "aliases": [
+        "dry ice pelletizer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DRY ICE PELLETIZER"
+      ]
+    },
+    "DRY SANDBLAST MACHINE": {
+      "aliases": [
+        "dry sandblast machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DRY SANDBLAST MACHINE"
+      ]
+    },
+    "DRYING FAN": {
+      "aliases": [
+        "drying fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DRYING FAN"
+      ]
+    },
+    "EAR MUFFS AND FACE SCREEN SET": {
+      "aliases": [
+        "ear muffs and face screen set"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "EAR MUFFS AND FACE SCREEN SET"
+      ]
+    },
+    "ELECTRIC COLD FOGGER": {
+      "aliases": [
+        "electric cold fogger"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELECTRIC COLD FOGGER"
+      ]
+    },
+    "ELECTRIC ENGRAVER": {
+      "aliases": [
+        "electric engraver"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELECTRIC ENGRAVER"
+      ]
+    },
+    "ELECTRIC FAN": {
+      "aliases": [
+        "electric fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELECTRIC FAN"
+      ]
+    },
+    "ELECTRIC GLUE REMOVER": {
+      "aliases": [
+        "electric glue remover"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELECTRIC GLUE REMOVER"
+      ]
+    },
+    "ELECTRIC MICROMOTOR": {
+      "aliases": [
+        "electric micromotor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELECTRIC MICROMOTOR"
+      ]
+    },
+    "ELECTRIC MOTOR": {
+      "aliases": [
+        "electric motor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELECTRIC MOTOR"
+      ]
+    },
+    "ELECTRIC PUMP": {
+      "aliases": [
+        "electric pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELECTRIC PUMP"
+      ]
+    },
+    "ELECTRIC REMOVE GLUE": {
+      "aliases": [
+        "electric remove glue"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELECTRIC REMOVE GLUE"
+      ]
+    },
+    "ELECTRIC ROLLING MOTOR": {
+      "aliases": [
+        "electric rolling motor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELECTRIC ROLLING MOTOR"
+      ]
+    },
+    "ELECTRIC TOASTER": {
+      "aliases": [
+        "electric toaster"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELECTRIC TOASTER"
+      ]
+    },
+    "ELECTRIC WELDING MACHINE": {
+      "aliases": [
+        "electric welding machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELECTRIC WELDING MACHINE"
+      ]
+    },
+    "ELECTRODE": {
+      "aliases": [
+        "electrode"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELECTRODE"
+      ]
+    },
+    "ELEVATOR FAN": {
+      "aliases": [
+        "elevator fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ELEVATOR FAN"
+      ]
+    },
+    "EMERGENCY SHOWER": {
+      "aliases": [
+        "emergency shower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "EMERGENCY SHOWER"
+      ]
+    },
+    "ENCLOSED GENERATOR": {
+      "aliases": [
+        "enclosed generator"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ENCLOSED GENERATOR"
+      ]
+    },
+    "ENGINE BLOCK": {
+      "aliases": [
+        "engine block"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ENGINE BLOCK"
+      ]
+    },
+    "ENGINE-DRIVEN WELDER": {
+      "aliases": [
+        "engine-driven welder"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ENGINE-DRIVEN WELDER"
+      ]
+    },
+    "ENGRAVER": {
+      "aliases": [
+        "engraver"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ENGRAVER"
+      ]
+    },
+    "ERGONOMIC SUPPORT": {
+      "aliases": [
+        "ergonomic support"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ERGONOMIC SUPPORT"
+      ]
+    },
+    "EVAPORATOR FAN": {
+      "aliases": [
+        "evaporator fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "EVAPORATOR FAN"
+      ]
+    },
+    "EVAPORATOR UNIT": {
+      "aliases": [
+        "evaporator unit"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "EVAPORATOR UNIT"
+      ]
+    },
+    "E-WRENCH CABLE": {
+      "aliases": [
+        "e-wrench cable"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "E-WRENCH CABLE"
+      ]
+    },
+    "EXHAUST FAN": {
+      "aliases": [
+        "exhaust fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "EXHAUST FAN"
+      ]
+    },
+    "FAIRWAY MOWER": {
+      "aliases": [
+        "fairway mower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAIRWAY MOWER"
+      ]
+    },
+    "FAN ASSEMBLY": {
+      "aliases": [
+        "fan assembly"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN ASSEMBLY"
+      ]
+    },
+    "FAN BATTERY": {
+      "aliases": [
+        "fan battery"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN BATTERY"
+      ]
+    },
+    "FAN BOX": {
+      "aliases": [
+        "fan box"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN BOX"
+      ]
+    },
+    "FAN CLUTCH": {
+      "aliases": [
+        "fan clutch"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN CLUTCH"
+      ]
+    },
+    "FAN COMPLETE": {
+      "aliases": [
+        "fan complete"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN COMPLETE"
+      ]
+    },
+    "FAN COOLER": {
+      "aliases": [
+        "fan cooler"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN COOLER"
+      ]
+    },
+    "FAN ENGINE COOLING": {
+      "aliases": [
+        "fan engine cooling"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN ENGINE COOLING"
+      ]
+    },
+    "FAN EXTRACTOR": {
+      "aliases": [
+        "fan extractor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN EXTRACTOR"
+      ]
+    },
+    "FAN FILTER KIT": {
+      "aliases": [
+        "fan filter kit"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN FILTER KIT"
+      ]
+    },
+    "FAN HOUSING ASSEMBLY": {
+      "aliases": [
+        "fan housing assembly"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN HOUSING ASSEMBLY"
+      ]
+    },
+    "FAN KIT": {
+      "aliases": [
+        "fan kit"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN KIT"
+      ]
+    },
+    "FAN RETAINER.": {
+      "aliases": [
+        "fan retainer."
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN RETAINER."
+      ]
+    },
+    "FAN ROTOR": {
+      "aliases": [
+        "fan rotor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN ROTOR"
+      ]
+    },
+    "FAN TRAY": {
+      "aliases": [
+        "fan tray"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FAN TRAY"
+      ]
+    },
+    "FILTERED FAN": {
+      "aliases": [
+        "filtered fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FILTERED FAN"
+      ]
+    },
+    "FIRE PUMP": {
+      "aliases": [
+        "fire pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FIRE PUMP"
+      ]
+    },
+    "FIXTURED SPINDLE": {
+      "aliases": [
+        "fixtured spindle"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FIXTURED SPINDLE"
+      ]
+    },
+    "FLAIL COLLECTOR": {
+      "aliases": [
+        "flail collector"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FLAIL COLLECTOR"
+      ]
+    },
+    "FLOATING WATER PUMP": {
+      "aliases": [
+        "floating water pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FLOATING WATER PUMP"
+      ]
+    },
+    "FLY REPELLENT": {
+      "aliases": [
+        "fly repellent"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FLY REPELLENT"
+      ]
+    },
+    "FRONT-MOUNTED DISC MOWER": {
+      "aliases": [
+        "front-mounted disc mower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FRONT-MOUNTED DISC MOWER"
+      ]
+    },
+    "FRUIT HARVESTER": {
+      "aliases": [
+        "fruit harvester"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "FRUIT HARVESTER"
+      ]
+    },
+    "GARDEN HOSE": {
+      "aliases": [
+        "garden hose"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GARDEN HOSE"
+      ]
+    },
+    "GARDEN PUMP": {
+      "aliases": [
+        "garden pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GARDEN PUMP"
+      ]
+    },
+    "GARDEN PUMP KIT": {
+      "aliases": [
+        "garden pump kit"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GARDEN PUMP KIT"
+      ]
+    },
+    "GARMENT STEAMER": {
+      "aliases": [
+        "garment steamer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GARMENT STEAMER"
+      ]
+    },
+    "GENERATOR ASSY": {
+      "aliases": [
+        "generator assy"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GENERATOR ASSY"
+      ]
+    },
+    "GLASS CURTAIN WALL CLEANING": {
+      "aliases": [
+        "glass curtain wall cleaning"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GLASS CURTAIN WALL CLEANING"
+      ]
+    },
+    "GLASS CUT": {
+      "aliases": [
+        "glass cut"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GLASS CUT"
+      ]
+    },
+    "GLASS-LINED STEEL": {
+      "aliases": [
+        "glass-lined steel"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GLASS-LINED STEEL"
+      ]
+    },
+    "GLUE GUN": {
+      "aliases": [
+        "glue gun"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GLUE GUN"
+      ]
+    },
+    "GRILL": {
+      "aliases": [
+        "grill"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GRILL"
+      ]
+    },
+    "GRINDER": {
+      "aliases": [
+        "grinder"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GRINDER"
+      ]
+    },
+    "GROUND POWER UNIT": {
+      "aliases": [
+        "ground power unit"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GROUND POWER UNIT"
+      ]
+    },
+    "GYM FAN": {
+      "aliases": [
+        "gym fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "GYM FAN"
+      ]
+    },
+    "HAIRDRYER": {
+      "aliases": [
+        "hairdryer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HAIRDRYER"
+      ]
+    },
+    "HEAD COOLING FAN": {
+      "aliases": [
+        "head cooling fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HEAD COOLING FAN"
+      ]
+    },
+    "HEAT EXCHANGER": {
+      "aliases": [
+        "heat exchanger"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HEAT EXCHANGER"
+      ]
+    },
+    "HEAT FAN": {
+      "aliases": [
+        "heat fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HEAT FAN"
+      ]
+    },
+    "HEAT PUMP": {
+      "aliases": [
+        "heat pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HEAT PUMP"
+      ]
+    },
+    "HEATER BLEND DOOR ACTUATOR": {
+      "aliases": [
+        "heater blend door actuator"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HEATER BLEND DOOR ACTUATOR"
+      ]
+    },
+    "HELICAL PUMP": {
+      "aliases": [
+        "helical pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HELICAL PUMP"
+      ]
+    },
+    "HERMETIC REFRIGERANT PUMP": {
+      "aliases": [
+        "hermetic refrigerant pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HERMETIC REFRIGERANT PUMP"
+      ]
+    },
+    "HIGH CAPACITY TORQUE MULTIPLJER": {
+      "aliases": [
+        "high capacity torque multipljer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HIGH CAPACITY TORQUE MULTIPLJER"
+      ]
+    },
+    "HIGH PRESSURE COMBUSTION BLOWER FAN": {
+      "aliases": [
+        "high pressure combustion blower fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HIGH PRESSURE COMBUSTION BLOWER FAN"
+      ]
+    },
+    "HIGH-PERFORMANCE BRUSH CUTTER": {
+      "aliases": [
+        "high-performance brush cutter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HIGH-PERFORMANCE BRUSH CUTTER"
+      ]
+    },
+    "HIGH-PERFORMANCE STEAM AND VACUUM MACHINE": {
+      "aliases": [
+        "high-performance steam and vacuum machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HIGH-PERFORMANCE STEAM AND VACUUM MACHINE"
+      ]
+    },
+    "HIGH-PRESSURE CLEANING ROBOT": {
+      "aliases": [
+        "high-pressure cleaning robot"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HIGH-PRESSURE CLEANING ROBOT"
+      ]
+    },
+    "HIGH-PRESSURE PUMP": {
+      "aliases": [
+        "high-pressure pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HIGH-PRESSURE PUMP"
+      ]
+    },
+    "HOME GENERATOR": {
+      "aliases": [
+        "home generator"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HOME GENERATOR"
+      ]
+    },
+    "HOSE": {
+      "aliases": [
+        "hose"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HOSE"
+      ]
+    },
+    "HOT AIR FAN": {
+      "aliases": [
+        "hot air fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HOT AIR FAN"
+      ]
+    },
+    "HOT WATER PUMP": {
+      "aliases": [
+        "hot water pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HOT WATER PUMP"
+      ]
+    },
+    "HYBRID BIG-MOUTH": {
+      "aliases": [
+        "hybrid big-mouth"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYBRID BIG-MOUTH"
+      ]
+    },
+    "HYBRID REMOTE CONTROL LAWN MOWER": {
+      "aliases": [
+        "hybrid remote control lawn mower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYBRID REMOTE CONTROL LAWN MOWER"
+      ]
+    },
+    "HYDRAULIC AIR BLOWER": {
+      "aliases": [
+        "hydraulic air blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC AIR BLOWER"
+      ]
+    },
+    "HYDRAULIC BREAKER": {
+      "aliases": [
+        "hydraulic breaker"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC BREAKER"
+      ]
+    },
+    "HYDRAULIC COPPER TUBE EXPANDER TOOL": {
+      "aliases": [
+        "hydraulic copper tube expander tool"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC COPPER TUBE EXPANDER TOOL"
+      ]
+    },
+    "HYDRAULIC DRIVE": {
+      "aliases": [
+        "hydraulic drive"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC DRIVE"
+      ]
+    },
+    "HYDRAULIC ENGINE": {
+      "aliases": [
+        "hydraulic engine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC ENGINE"
+      ]
+    },
+    "HYDRAULIC EXPANDER": {
+      "aliases": [
+        "hydraulic expander"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC EXPANDER"
+      ]
+    },
+    "HYDRAULIC EXTRACTOR": {
+      "aliases": [
+        "hydraulic extractor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC EXTRACTOR"
+      ]
+    },
+    "HYDRAULIC HOLE PUNCHING TOOLS": {
+      "aliases": [
+        "hydraulic hole punching tools"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC HOLE PUNCHING TOOLS"
+      ]
+    },
+    "HYDRAULIC JACK": {
+      "aliases": [
+        "hydraulic jack"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC JACK"
+      ]
+    },
+    "HYDRAULIC NUT SPLITTER": {
+      "aliases": [
+        "hydraulic nut splitter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC NUT SPLITTER"
+      ]
+    },
+    "HYDRAULIC PIPE BENDERS": {
+      "aliases": [
+        "hydraulic pipe benders"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC PIPE BENDERS"
+      ]
+    },
+    "HYDRAULIC POWER": {
+      "aliases": [
+        "hydraulic power"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC POWER"
+      ]
+    },
+    "HYDRAULIC SHEET METAL PUNCH": {
+      "aliases": [
+        "hydraulic sheet metal punch"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC SHEET METAL PUNCH"
+      ]
+    },
+    "HYDRAULIC TAMPER": {
+      "aliases": [
+        "hydraulic tamper"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC TAMPER"
+      ]
+    },
+    "HYDRAULIC TOOLS": {
+      "aliases": [
+        "hydraulic tools"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC TOOLS"
+      ]
+    },
+    "HYDRAULIC TORQUE WRENCH": {
+      "aliases": [
+        "hydraulic torque wrench"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC TORQUE WRENCH"
+      ]
+    },
+    "HYDRAULIC VALVE": {
+      "aliases": [
+        "hydraulic valve"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC VALVE"
+      ]
+    },
+    "IMPACT TORQUE WRENCH": {
+      "aliases": [
+        "impact torque wrench"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "IMPACT TORQUE WRENCH"
+      ]
+    },
+    "INCUBATOR": {
+      "aliases": [
+        "incubator"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INCUBATOR"
+      ]
+    },
+    "INDUSTRIAL AIR CURTAIN": {
+      "aliases": [
+        "industrial air curtain"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL AIR CURTAIN"
+      ]
+    },
+    "INDUSTRIAL AXIAL FAN": {
+      "aliases": [
+        "industrial axial fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL AXIAL FAN"
+      ]
+    },
+    "INDUSTRIAL CENTRIFUGAL EXHAUST FAN": {
+      "aliases": [
+        "industrial centrifugal exhaust fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL CENTRIFUGAL EXHAUST FAN"
+      ]
+    },
+    "INDUSTRIAL CENTRIFUGAL FAN": {
+      "aliases": [
+        "industrial centrifugal fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL CENTRIFUGAL FAN"
+      ]
+    },
+    "INDUSTRIAL CENTRIFUGE FAN": {
+      "aliases": [
+        "industrial centrifuge fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL CENTRIFUGE FAN"
+      ]
+    },
+    "INDUSTRIAL COOLER": {
+      "aliases": [
+        "industrial cooler"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL COOLER"
+      ]
+    },
+    "INDUSTRIAL COOLING FAN": {
+      "aliases": [
+        "industrial cooling fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL COOLING FAN"
+      ]
+    },
+    "INDUSTRIAL EXHAUST FAN": {
+      "aliases": [
+        "industrial exhaust fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL EXHAUST FAN"
+      ]
+    },
+    "INDUSTRIAL FAN": {
+      "aliases": [
+        "industrial fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL FAN"
+      ]
+    },
+    "INDUSTRIAL HEATER": {
+      "aliases": [
+        "industrial heater"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL HEATER"
+      ]
+    },
+    "INDUSTRIAL MOTOR": {
+      "aliases": [
+        "industrial motor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL MOTOR"
+      ]
+    },
+    "INDUSTRIAL PARTS WASHER": {
+      "aliases": [
+        "industrial parts washer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL PARTS WASHER"
+      ]
+    },
+    "INDUSTRIAL PUMP": {
+      "aliases": [
+        "industrial pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INDUSTRIAL PUMP"
+      ]
+    },
+    "IN-LINE BLOWER": {
+      "aliases": [
+        "in-line blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "IN-LINE BLOWER"
+      ]
+    },
+    "INSULATION PUSHING DEVICE SET": {
+      "aliases": [
+        "insulation pushing device set"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INSULATION PUSHING DEVICE SET"
+      ]
+    },
+    "INTELLIGENT TOUCHLESS ROBOT CAR WASH MACHINE": {
+      "aliases": [
+        "intelligent touchless robot car wash machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INTELLIGENT TOUCHLESS ROBOT CAR WASH MACHINE"
+      ]
+    },
+    "INTERCOOLER ELECTRIC FAN": {
+      "aliases": [
+        "intercooler electric fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INTERCOOLER ELECTRIC FAN"
+      ]
+    },
+    "INVERTER ELECTRIC WELDING MACHINE": {
+      "aliases": [
+        "inverter electric welding machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "INVERTER ELECTRIC WELDING MACHINE"
+      ]
+    },
+    "IRON": {
+      "aliases": [
+        "iron"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "IRON"
+      ]
+    },
+    "JACKING MACHINE": {
+      "aliases": [
+        "jacking machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "JACKING MACHINE"
+      ]
+    },
+    "KNOCKOUTPUNCHTOOL": {
+      "aliases": [
+        "knockoutpunchtool"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "KNOCKOUTPUNCHTOOL"
+      ]
+    },
+    "LAPTOP COOLER": {
+      "aliases": [
+        "laptop cooler"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "LAPTOP COOLER"
+      ]
+    },
+    "LARGE AREA ROTARY MOWER": {
+      "aliases": [
+        "large area rotary mower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "LARGE AREA ROTARY MOWER"
+      ]
+    },
+    "LARGE WATER BASED PARTS WASHER": {
+      "aliases": [
+        "large water based parts washer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "LARGE WATER BASED PARTS WASHER"
+      ]
+    },
+    "LEVEL RULER": {
+      "aliases": [
+        "level ruler"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "LEVEL RULER"
+      ]
+    },
+    "LOCKBOLT": {
+      "aliases": [
+        "lockbolt"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "LOCKBOLT"
+      ]
+    },
+    "LUBRICATION PUMP": {
+      "aliases": [
+        "lubrication pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "LUBRICATION PUMP"
+      ]
+    },
+    "MAGNETIC PUMP": {
+      "aliases": [
+        "magnetic pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MAGNETIC PUMP"
+      ]
+    },
+    "MANUAL BLOWER FIRE STARTER": {
+      "aliases": [
+        "manual blower fire starter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MANUAL BLOWER FIRE STARTER"
+      ]
+    },
+    "MANUAL RULER": {
+      "aliases": [
+        "manual ruler"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MANUAL RULER"
+      ]
+    },
+    "MARINE PUMP": {
+      "aliases": [
+        "marine pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MARINE PUMP"
+      ]
+    },
+    "MASONRY SAW": {
+      "aliases": [
+        "masonry saw"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MASONRY SAW"
+      ]
+    },
+    "MECHANICAL PRUNER": {
+      "aliases": [
+        "mechanical pruner"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MECHANICAL PRUNER"
+      ]
+    },
+    "METAL FAN": {
+      "aliases": [
+        "metal fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "METAL FAN"
+      ]
+    },
+    "MICRO-PUNCHING TOOL": {
+      "aliases": [
+        "micro-punching tool"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MICRO-PUNCHING TOOL"
+      ]
+    },
+    "MILK PUMP": {
+      "aliases": [
+        "milk pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MILK PUMP"
+      ]
+    },
+    "MINI FAN": {
+      "aliases": [
+        "mini fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MINI FAN"
+      ]
+    },
+    "MINI MANUAL SIDE SHIFT": {
+      "aliases": [
+        "mini manual side shift"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MINI MANUAL SIDE SHIFT"
+      ]
+    },
+    "MINI PULL STRETCHER": {
+      "aliases": [
+        "mini pull stretcher"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MINI PULL STRETCHER"
+      ]
+    },
+    "MINI SCREWDRIVER": {
+      "aliases": [
+        "mini screwdriver"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MINI SCREWDRIVER"
+      ]
+    },
+    "MODULE": {
+      "aliases": [
+        "module"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MODULE"
+      ]
+    },
+    "MODULE COOLING": {
+      "aliases": [
+        "module cooling"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MODULE COOLING"
+      ]
+    },
+    "MOTOR": {
+      "aliases": [
+        "motor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MOTOR"
+      ]
+    },
+    "MOTOR AXIAL FAN": {
+      "aliases": [
+        "motor axial fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MOTOR AXIAL FAN"
+      ]
+    },
+    "MOTOR FAN": {
+      "aliases": [
+        "motor fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MOTOR FAN"
+      ]
+    },
+    "MOTOR KIT": {
+      "aliases": [
+        "motor kit"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MOTOR KIT"
+      ]
+    },
+    "MOTOR-DRIVEN TANK CLEANER": {
+      "aliases": [
+        "motor-driven tank cleaner"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MOTOR-DRIVEN TANK CLEANER"
+      ]
+    },
+    "MOUNTED DISC MOWERS": {
+      "aliases": [
+        "mounted disc mowers"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MOUNTED DISC MOWERS"
+      ]
+    },
+    "MOWER-CONDITIONER": {
+      "aliases": [
+        "mower-conditioner"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MOWER-CONDITIONER"
+      ]
+    },
+    "MUD PUMP": {
+      "aliases": [
+        "mud pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MUD PUMP"
+      ]
+    },
+    "MULTI-PURPOSE SANDER": {
+      "aliases": [
+        "multi-purpose sander"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "MULTI-PURPOSE SANDER"
+      ]
+    },
+    "NAIL DRILL": {
+      "aliases": [
+        "nail drill"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "NAIL DRILL"
+      ]
+    },
+    "NAIL SANDER": {
+      "aliases": [
+        "nail sander"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "NAIL SANDER"
+      ]
+    },
+    "NEBULIZER": {
+      "aliases": [
+        "nebulizer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "NEBULIZER"
+      ]
+    },
+    "NORM PUMP": {
+      "aliases": [
+        "norm pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "NORM PUMP"
+      ]
+    },
+    "NOTEBOOK COOLING": {
+      "aliases": [
+        "notebook cooling"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "NOTEBOOK COOLING"
+      ]
+    },
+    "NUTRUNNER": {
+      "aliases": [
+        "nutrunner"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "NUTRUNNER"
+      ]
+    },
+    "ORGANOMINERAL FOLIAR FERTILIZER": {
+      "aliases": [
+        "organomineral foliar fertilizer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ORGANOMINERAL FOLIAR FERTILIZER"
+      ]
+    },
+    "OSCILLATING FAN": {
+      "aliases": [
+        "oscillating fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "OSCILLATING FAN"
+      ]
+    },
+    "OTHERS": {
+      "aliases": [
+        "others"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "OTHERS"
+      ]
+    },
+    "PEDESTAL FAN": {
+      "aliases": [
+        "pedestal fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PEDESTAL FAN"
+      ]
+    },
+    "PERMANENT MAGNETIC PUMP": {
+      "aliases": [
+        "permanent magnetic pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PERMANENT MAGNETIC PUMP"
+      ]
+    },
+    "PET DRYER": {
+      "aliases": [
+        "pet dryer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PET DRYER"
+      ]
+    },
+    "PLUG FAN": {
+      "aliases": [
+        "plug fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PLUG FAN"
+      ]
+    },
+    "POLYMER BLOWGUN": {
+      "aliases": [
+        "polymer blowgun"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "POLYMER BLOWGUN"
+      ]
+    },
+    "PORTABLE ACTUATOR": {
+      "aliases": [
+        "portable actuator"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PORTABLE ACTUATOR"
+      ]
+    },
+    "PORTABLE FAN": {
+      "aliases": [
+        "portable fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PORTABLE FAN"
+      ]
+    },
+    "PORTABLE FIRE PUMP": {
+      "aliases": [
+        "portable fire pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PORTABLE FIRE PUMP"
+      ]
+    },
+    "PORTABLE SANDBLASTING": {
+      "aliases": [
+        "portable sandblasting"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PORTABLE SANDBLASTING"
+      ]
+    },
+    "PORTABLE SHOWER": {
+      "aliases": [
+        "portable shower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PORTABLE SHOWER"
+      ]
+    },
+    "POSITIVE-PRESSURE VENTILATOR": {
+      "aliases": [
+        "positive-pressure ventilator"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "POSITIVE-PRESSURE VENTILATOR"
+      ]
+    },
+    "POTATO HARVESTER": {
+      "aliases": [
+        "potato harvester"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "POTATO HARVESTER"
+      ]
+    },
+    "POWER DRIVE PIPE THREADER": {
+      "aliases": [
+        "power drive pipe threader"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "POWER DRIVE PIPE THREADER"
+      ]
+    },
+    "PRECISION SAW": {
+      "aliases": [
+        "precision saw"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PRECISION SAW"
+      ]
+    },
+    "PRE-PRUNER CRAWLER": {
+      "aliases": [
+        "pre-pruner crawler"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PRE-PRUNER CRAWLER"
+      ]
+    },
+    "PRESSURE CONTROLLER FOR WATER PUMPS": {
+      "aliases": [
+        "pressure controller for water pumps"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PRESSURE CONTROLLER FOR WATER PUMPS"
+      ]
+    },
+    "PRESSURIZATION SYSTEM": {
+      "aliases": [
+        "pressurization system"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PRESSURIZATION SYSTEM"
+      ]
+    },
+    "PRESSURIZED CLEANING PUMP": {
+      "aliases": [
+        "pressurized cleaning pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PRESSURIZED CLEANING PUMP"
+      ]
+    },
+    "PRESSURIZER PUMP": {
+      "aliases": [
+        "pressurizer pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PRESSURIZER PUMP"
+      ]
+    },
+    "PROFESSIONAL LAWN MOWER": {
+      "aliases": [
+        "professional lawn mower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PROFESSIONAL LAWN MOWER"
+      ]
+    },
+    "PULP PUMP": {
+      "aliases": [
+        "pulp pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PULP PUMP"
+      ]
+    },
+    "PUMP": {
+      "aliases": [
+        "pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PUMP"
+      ]
+    },
+    "PUMP KIT WITH THERMAL PROTECTOR": {
+      "aliases": [
+        "pump kit with thermal protector"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PUMP KIT WITH THERMAL PROTECTOR"
+      ]
+    },
+    "PUNCH": {
+      "aliases": [
+        "punch"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PUNCH"
+      ]
+    },
+    "PUNCHING TOOL": {
+      "aliases": [
+        "punching tool"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PUNCHING TOOL"
+      ]
+    },
+    "PYROGRAPHY TOOL": {
+      "aliases": [
+        "pyrography tool"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "PYROGRAPHY TOOL"
+      ]
+    },
+    "QUIET BLOWER PANEL": {
+      "aliases": [
+        "quiet blower panel"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "QUIET BLOWER PANEL"
+      ]
+    },
+    "RADIAL BLOWER": {
+      "aliases": [
+        "radial blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "RADIAL BLOWER"
+      ]
+    },
+    "RADIAL ENGINE": {
+      "aliases": [
+        "radial engine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "RADIAL ENGINE"
+      ]
+    },
+    "RADIAL FAN": {
+      "aliases": [
+        "radial fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "RADIAL FAN"
+      ]
+    },
+    "RADIATOR FAN": {
+      "aliases": [
+        "radiator fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "RADIATOR FAN"
+      ]
+    },
+    "RADIATOR WATER RESERVOIR": {
+      "aliases": [
+        "radiator water reservoir"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "RADIATOR WATER RESERVOIR"
+      ]
+    },
+    "RAIL CUTTER": {
+      "aliases": [
+        "rail cutter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "RAIL CUTTER"
+      ]
+    },
+    "RATCHET SET": {
+      "aliases": [
+        "ratchet set"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "RATCHET SET"
+      ]
+    },
+    "READ CABLE ASSEMBLY": {
+      "aliases": [
+        "read cable assembly"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "READ CABLE ASSEMBLY"
+      ]
+    },
+    "REAR DISC MOWER": {
+      "aliases": [
+        "rear disc mower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "REAR DISC MOWER"
+      ]
+    },
+    "REAR DISC MOWER-CONDITIONER": {
+      "aliases": [
+        "rear disc mower-conditioner"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "REAR DISC MOWER-CONDITIONER"
+      ]
+    },
+    "RECIRCULATORS": {
+      "aliases": [
+        "recirculators"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "RECIRCULATORS"
+      ]
+    },
+    "REFRIGERATOR": {
+      "aliases": [
+        "refrigerator"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "REFRIGERATOR"
+      ]
+    },
+    "REGENERATIVE EXHAUST": {
+      "aliases": [
+        "regenerative exhaust"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "REGENERATIVE EXHAUST"
+      ]
+    },
+    "REGENERATIVE PUMP": {
+      "aliases": [
+        "regenerative pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "REGENERATIVE PUMP"
+      ]
+    },
+    "REGULAR AIRFLOW": {
+      "aliases": [
+        "regular airflow"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "REGULAR AIRFLOW"
+      ]
+    },
+    "REMOTE GRINDER": {
+      "aliases": [
+        "remote grinder"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "REMOTE GRINDER"
+      ]
+    },
+    "REMOTE-OPERATED MOWER": {
+      "aliases": [
+        "remote-operated mower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "REMOTE-OPERATED MOWER"
+      ]
+    },
+    "REPEATER": {
+      "aliases": [
+        "repeater"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "REPEATER"
+      ]
+    },
+    "RIGID DECK ROLLER MOWERS": {
+      "aliases": [
+        "rigid deck roller mowers"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "RIGID DECK ROLLER MOWERS"
+      ]
+    },
+    "RING BLOWER": {
+      "aliases": [
+        "ring blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "RING BLOWER"
+      ]
+    },
+    "RINSE BOOSTER PUMP": {
+      "aliases": [
+        "rinse booster pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "RINSE BOOSTER PUMP"
+      ]
+    },
+    "ROBOTIC NOZZLE CLEANING STATION": {
+      "aliases": [
+        "robotic nozzle cleaning station"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ROBOTIC NOZZLE CLEANING STATION"
+      ]
+    },
+    "ROOF FAN": {
+      "aliases": [
+        "roof fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ROOF FAN"
+      ]
+    },
+    "ROTARY ELECTRIC PUMP": {
+      "aliases": [
+        "rotary electric pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ROTARY ELECTRIC PUMP"
+      ]
+    },
+    "ROTARY HEADER": {
+      "aliases": [
+        "rotary header"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ROTARY HEADER"
+      ]
+    },
+    "ROTARY LAWN MOWER": {
+      "aliases": [
+        "rotary lawn mower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ROTARY LAWN MOWER"
+      ]
+    },
+    "ROTARY POSITIVE BLOWER": {
+      "aliases": [
+        "rotary positive blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ROTARY POSITIVE BLOWER"
+      ]
+    },
+    "ROTARY TILLERS": {
+      "aliases": [
+        "rotary tillers"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ROTARY TILLERS"
+      ]
+    },
+    "ROTATING SPRINKLER": {
+      "aliases": [
+        "rotating sprinkler"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ROTATING SPRINKLER"
+      ]
+    },
+    "ROTOR ASSEMBLY": {
+      "aliases": [
+        "rotor assembly"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ROTOR ASSEMBLY"
+      ]
+    },
+    "ROUGH MOWER": {
+      "aliases": [
+        "rough mower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "ROUGH MOWER"
+      ]
+    },
+    "SANDBLASTER": {
+      "aliases": [
+        "sandblaster"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SANDBLASTER"
+      ]
+    },
+    "SANDBLASTING BOOTH": {
+      "aliases": [
+        "sandblasting booth"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SANDBLASTING BOOTH"
+      ]
+    },
+    "SANITARY PUMP": {
+      "aliases": [
+        "sanitary pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SANITARY PUMP"
+      ]
+    },
+    "SEALLESS MAGNETIC DRIVE": {
+      "aliases": [
+        "sealless magnetic drive"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SEALLESS MAGNETIC DRIVE"
+      ]
+    },
+    "SELF-PROPELLED SPRAYER": {
+      "aliases": [
+        "self-propelled sprayer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SELF-PROPELLED SPRAYER"
+      ]
+    },
+    "SELF-PROPELLED WINDROWERS": {
+      "aliases": [
+        "self-propelled windrowers"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SELF-PROPELLED WINDROWERS"
+      ]
+    },
+    "SERVICE KIT": {
+      "aliases": [
+        "service kit"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SERVICE KIT"
+      ]
+    },
+    "SHEAR PUMP": {
+      "aliases": [
+        "shear pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SHEAR PUMP"
+      ]
+    },
+    "SHREDDING FAN": {
+      "aliases": [
+        "shredding fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SHREDDING FAN"
+      ]
+    },
+    "SHREDDING MACHINE": {
+      "aliases": [
+        "shredding machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SHREDDING MACHINE"
+      ]
+    },
+    "SHROUD ASSEMBLY": {
+      "aliases": [
+        "shroud assembly"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SHROUD ASSEMBLY"
+      ]
+    },
+    "SIDE BLOWER": {
+      "aliases": [
+        "side blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SIDE BLOWER"
+      ]
+    },
+    "SIDE-CHANNEL BLOWER": {
+      "aliases": [
+        "side-channel blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SIDE-CHANNEL BLOWER"
+      ]
+    },
+    "SIDE-CHANNEL PUMP": {
+      "aliases": [
+        "side-channel pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SIDE-CHANNEL PUMP"
+      ]
+    },
+    "SLIDE HAMMER": {
+      "aliases": [
+        "slide hammer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SLIDE HAMMER"
+      ]
+    },
+    "SLOTTING MACHINE": {
+      "aliases": [
+        "slotting machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SLOTTING MACHINE"
+      ]
+    },
+    "SLURRY TEST KIT": {
+      "aliases": [
+        "slurry test kit"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SLURRY TEST KIT"
+      ]
+    },
+    "SMOKE EXHAUST FAN": {
+      "aliases": [
+        "smoke exhaust fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SMOKE EXHAUST FAN"
+      ]
+    },
+    "SOLDERING STATION": {
+      "aliases": [
+        "soldering station"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SOLDERING STATION"
+      ]
+    },
+    "SOLUTION PUMP": {
+      "aliases": [
+        "solution pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SOLUTION PUMP"
+      ]
+    },
+    "SPIRAL COMPRESSED AIR HOSE": {
+      "aliases": [
+        "spiral compressed air hose"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SPIRAL COMPRESSED AIR HOSE"
+      ]
+    },
+    "SPLIT CASE PUMP": {
+      "aliases": [
+        "split case pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SPLIT CASE PUMP"
+      ]
+    },
+    "SPRAYING DRONE": {
+      "aliases": [
+        "spraying drone"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SPRAYING DRONE"
+      ]
+    },
+    "SPRAYING SYSTEM": {
+      "aliases": [
+        "spraying system"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SPRAYING SYSTEM"
+      ]
+    },
+    "SPREADING SYSTEM": {
+      "aliases": [
+        "spreading system"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SPREADING SYSTEM"
+      ]
+    },
+    "STABILIZERS": {
+      "aliases": [
+        "stabilizers"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "STABILIZERS"
+      ]
+    },
+    "STATIONARY ENGINE": {
+      "aliases": [
+        "stationary engine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "STATIONARY ENGINE"
+      ]
+    },
+    "STATIONARY GENERATOR": {
+      "aliases": [
+        "stationary generator"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "STATIONARY GENERATOR"
+      ]
+    },
+    "STEAM CLEANER": {
+      "aliases": [
+        "steam cleaner"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "STEAM CLEANER"
+      ]
+    },
+    "STEAM JET DEVICE": {
+      "aliases": [
+        "steam jet device"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "STEAM JET DEVICE"
+      ]
+    },
+    "STINGER": {
+      "aliases": [
+        "stinger"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "STINGER"
+      ]
+    },
+    "STONE CUTTER": {
+      "aliases": [
+        "stone cutter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "STONE CUTTER"
+      ]
+    },
+    "STRAPPING TOOL": {
+      "aliases": [
+        "strapping tool"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "STRAPPING TOOL"
+      ]
+    },
+    "SUBMERSIBLE CENTRIFUGAL PUMP": {
+      "aliases": [
+        "submersible centrifugal pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SUBMERSIBLE CENTRIFUGAL PUMP"
+      ]
+    },
+    "SUCTION CUP": {
+      "aliases": [
+        "suction cup"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SUCTION CUP"
+      ]
+    },
+    "SUCTION ELECTRIC FAN": {
+      "aliases": [
+        "suction electric fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SUCTION ELECTRIC FAN"
+      ]
+    },
+    "SUCTION PUMP": {
+      "aliases": [
+        "suction pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SUCTION PUMP"
+      ]
+    },
+    "SURFACE BRUSH": {
+      "aliases": [
+        "surface brush"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SURFACE BRUSH"
+      ]
+    },
+    "SURFACE PUMP": {
+      "aliases": [
+        "surface pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SURFACE PUMP"
+      ]
+    },
+    "SURFACE SOLAR PUMP": {
+      "aliases": [
+        "surface solar pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SURFACE SOLAR PUMP"
+      ]
+    },
+    "SYSTEM PUMP": {
+      "aliases": [
+        "system pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SYSTEM PUMP"
+      ]
+    },
+    "TAMPING RAMMER": {
+      "aliases": [
+        "tamping rammer"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TAMPING RAMMER"
+      ]
+    },
+    "TANGENCIAL FAN": {
+      "aliases": [
+        "tangencial fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TANGENCIAL FAN"
+      ]
+    },
+    "TANGENTIAL FAN": {
+      "aliases": [
+        "tangential fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TANGENTIAL FAN"
+      ]
+    },
+    "TENSIONER": {
+      "aliases": [
+        "tensioner"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TENSIONER"
+      ]
+    },
+    "THREADED ROD CUTTER": {
+      "aliases": [
+        "threaded rod cutter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "THREADED ROD CUTTER"
+      ]
+    },
+    "THROTTLE BODY": {
+      "aliases": [
+        "throttle body"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "THROTTLE BODY"
+      ]
+    },
+    "TILE CUTTER": {
+      "aliases": [
+        "tile cutter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TILE CUTTER"
+      ]
+    },
+    "TOOL HOLDER": {
+      "aliases": [
+        "tool holder"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TOOL HOLDER"
+      ]
+    },
+    "TORQUE METER": {
+      "aliases": [
+        "torque meter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TORQUE METER"
+      ]
+    },
+    "TORQUE TOOL": {
+      "aliases": [
+        "torque tool"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TORQUE TOOL"
+      ]
+    },
+    "TORQUE WRENCH": {
+      "aliases": [
+        "torque wrench"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TORQUE WRENCH"
+      ]
+    },
+    "TRACKED REMOTE LAWN MOWER": {
+      "aliases": [
+        "tracked remote lawn mower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TRACKED REMOTE LAWN MOWER"
+      ]
+    },
+    "TUBE BUNDLE CLEANER": {
+      "aliases": [
+        "tube bundle cleaner"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TUBE BUNDLE CLEANER"
+      ]
+    },
+    "TURBINE": {
+      "aliases": [
+        "turbine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TURBINE"
+      ]
+    },
+    "TURBINE FAN": {
+      "aliases": [
+        "turbine fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TURBINE FAN"
+      ]
+    },
+    "TYING MACHINE": {
+      "aliases": [
+        "tying machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TYING MACHINE"
+      ]
+    },
+    "UNDER COATING GUN": {
+      "aliases": [
+        "under coating gun"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "UNDER COATING GUN"
+      ]
+    },
+    "UNIVERSAL CUTTER": {
+      "aliases": [
+        "universal cutter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "UNIVERSAL CUTTER"
+      ]
+    },
+    "VACCINATION DEVICES": {
+      "aliases": [
+        "vaccination devices"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "VACCINATION DEVICES"
+      ]
+    },
+    "VACUUM BLOWER": {
+      "aliases": [
+        "vacuum blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "VACUUM BLOWER"
+      ]
+    },
+    "VACUUM CIRCUIT BREAKER": {
+      "aliases": [
+        "vacuum circuit breaker"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "VACUUM CIRCUIT BREAKER"
+      ]
+    },
+    "VACUUM MOTOR": {
+      "aliases": [
+        "vacuum motor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "VACUUM MOTOR"
+      ]
+    },
+    "VARIATOR FAN": {
+      "aliases": [
+        "variator fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "VARIATOR FAN"
+      ]
+    },
+    "VERTICAL PROCESS PUMP": {
+      "aliases": [
+        "vertical process pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "VERTICAL PROCESS PUMP"
+      ]
+    },
+    "VERTICAL PUMP": {
+      "aliases": [
+        "vertical pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "VERTICAL PUMP"
+      ]
+    },
+    "VIBRATING SUCTION CUP": {
+      "aliases": [
+        "vibrating suction cup"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "VIBRATING SUCTION CUP"
+      ]
+    },
+    "VIBRATORY PLATE": {
+      "aliases": [
+        "vibratory plate"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "VIBRATORY PLATE"
+      ]
+    },
+    "VIBRATORY PLATE COMPACTOR FOR EXCAVATOR": {
+      "aliases": [
+        "vibratory plate compactor for excavator"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "VIBRATORY PLATE COMPACTOR FOR EXCAVATOR"
+      ]
+    },
+    "WALK BEHIND SAW": {
+      "aliases": [
+        "walk behind saw"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WALK BEHIND SAW"
+      ]
+    },
+    "WALL FAN": {
+      "aliases": [
+        "wall fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WALL FAN"
+      ]
+    },
+    "WALNUT SAND DE-CARBON CLEANER": {
+      "aliases": [
+        "walnut sand de-carbon cleaner"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WALNUT SAND DE-CARBON CLEANER"
+      ]
+    },
+    "WATER BOOSTER PUMP": {
+      "aliases": [
+        "water booster pump"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WATER BOOSTER PUMP"
+      ]
+    },
+    "WATER COOLER": {
+      "aliases": [
+        "water cooler"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WATER COOLER"
+      ]
+    },
+    "WEED WAND": {
+      "aliases": [
+        "weed wand"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WEED WAND"
+      ]
+    },
+    "WHEEL BLOWER": {
+      "aliases": [
+        "wheel blower"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WHEEL BLOWER"
+      ]
+    },
+    "WHEEL FAN": {
+      "aliases": [
+        "wheel fan"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WHEEL FAN"
+      ]
+    },
+    "WIND MACHINE": {
+      "aliases": [
+        "wind machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WIND MACHINE"
+      ]
+    },
+    "WIND-POWERED VENTILATOR": {
+      "aliases": [
+        "wind-powered ventilator"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WIND-POWERED VENTILATOR"
+      ]
+    },
+    "WINDROWER HEADERS": {
+      "aliases": [
+        "windrower headers"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WINDROWER HEADERS"
+      ]
+    },
+    "WINDSHIELD WASHER FLUID RESERVOIR": {
+      "aliases": [
+        "windshield washer fluid reservoir"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WINDSHIELD WASHER FLUID RESERVOIR"
+      ]
+    },
+    "WINE DISPENSER": {
+      "aliases": [
+        "wine dispenser"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WINE DISPENSER"
+      ]
+    },
+    "WIRE SAW": {
+      "aliases": [
+        "wire saw"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WIRE SAW"
+      ]
+    },
+    "WIRELESS CONTROLLER": {
+      "aliases": [
+        "wireless controller"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WIRELESS CONTROLLER"
+      ]
+    },
+    "WORK LIGHT": {
+      "aliases": [
+        "work light"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WORK LIGHT"
+      ]
+    },
+    "WORKSHOP CART": {
+      "aliases": [
+        "workshop cart"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WORKSHOP CART"
       ]
     }
   },
@@ -7808,7 +13384,7 @@
     {
       "primary_type": "WATERPUMP",
       "category_general": "WATERPUMPS",
-      "family": "WATERPUMP",
+      "family": "WATER PUMP",
       "brand": "CET",
       "model_regex": "^PFP\\ 9HP\\ DSL$",
       "aliases": [],
@@ -8245,6 +13821,96 @@
       "model_regex": "^41391/801/01$",
       "aliases": [],
       "priority": 925
+    },
+    {
+      "primary_type": "WALK BEHIND MOWER",
+      "category_general": "ENGINE",
+      "family": "PETROL WALK BEHIND MOWER",
+      "aliases": [
+        "petrol walk behind mower"
+      ],
+      "priority": 180
+    },
+    {
+      "primary_type": "CHAINSAW",
+      "category_general": "OTHERS",
+      "family": "CORDED CHAINSAW",
+      "aliases": [
+        "corded chainsaw"
+      ],
+      "priority": 180
+    },
+    {
+      "primary_type": "DRILLER",
+      "category_general": "OTHERS",
+      "family": "DRILLERS",
+      "aliases": [
+        "drillers"
+      ],
+      "priority": 180
+    },
+    {
+      "primary_type": "DUSTER",
+      "category_general": "OTHERS",
+      "family": "DUSTER",
+      "aliases": [
+        "duster"
+      ],
+      "priority": 180
+    },
+    {
+      "primary_type": "ENGINES",
+      "category_general": "OTHERS",
+      "family": "ENGINES",
+      "aliases": [
+        "engines"
+      ],
+      "priority": 180
+    },
+    {
+      "primary_type": "ROBOTIC LAWN MOWER",
+      "category_general": "OTHERS",
+      "family": "ROBOTIC LAWN MOWER",
+      "aliases": [
+        "robotic lawn mower"
+      ],
+      "priority": 180
+    },
+    {
+      "primary_type": "TILE VIBRATION MACHINE",
+      "category_general": "OTHERS",
+      "family": "TILE VIBRATION MACHINE",
+      "aliases": [
+        "tile vibration machine"
+      ],
+      "priority": 180
+    },
+    {
+      "primary_type": "PRESSURE WASHER",
+      "category_general": "OTHERS",
+      "family": "WASHER",
+      "aliases": [
+        "washer"
+      ],
+      "priority": 180
+    },
+    {
+      "primary_type": "WALK BEHIND MOWER",
+      "category_general": "PETROL TRACTOR",
+      "family": "PETROL WALK BEHIND MOWER",
+      "aliases": [
+        "petrol walk behind mower"
+      ],
+      "priority": 180
+    },
+    {
+      "primary_type": "ZERO TURN",
+      "category_general": "PETROL WHEELD",
+      "family": "PETROL ZERO TURN",
+      "aliases": [
+        "petrol zero turn"
+      ],
+      "priority": 180
     }
   ],
   "COMBO_KIT_POLICY": {
