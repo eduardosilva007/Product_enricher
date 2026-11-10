@@ -6,7 +6,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pipeline_produtos as p
+import os
+import importlib.util
+if os.getenv("ARGENTINA_PILOT_SCRIPT"):
+    spec = importlib.util.spec_from_file_location("argentina_pilot_pipeline", os.environ["ARGENTINA_PILOT_SCRIPT"])
+    p = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(p)
+else:
+    import pipeline_produtos as p
 from nightly_provider_router import Slot
 
 class CollectionAutoProviderTests(unittest.TestCase):
