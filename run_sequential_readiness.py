@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent
 TESTS = [
     ("V5 taxonomy regression", ["-m","unittest","test_v5_taxonomy_benchmark","-v"]),
     ("V5 cache-title regression", ["-m","unittest","discover","-s","tests","-p","test_v5_cache_title_ablation.py","-v"]),
@@ -56,7 +56,7 @@ def run_sequence(gold:Path, cache:Path, out:Path) -> dict:
         report_path.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
     save()
     for number,(label,argv) in enumerate(stages,1):
-        print(f"\\n[{number}/{len(stages)}] {label}",flush=True)
+        print(f"\n[{number}/{len(stages)}] {label}",flush=True)
         started=time.monotonic()
         # Captured logs are saved regardless of pass/fail; all commands explicit.
         try:
