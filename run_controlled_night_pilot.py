@@ -159,7 +159,7 @@ def run_stage(run,state,label,cmd,timeout):
 def outcome_audit(run,state,isolated):
     """Independent post-run checks. No promotion/approval happens here."""
     import pandas as pd
-    from pipeline_produtos import business_key,find_col,safe,TavilyReadOnlyStore
+    from pipeline_produtos import business_key,find_col,safe,TavilyReadOnlyStore,_is_manual_status,_is_bi_ok_value
     from contextlib import closing
     cohort=pd.read_excel(isolated["files"]["input"],dtype=object,keep_default_na=False)
     final=pd.read_excel(isolated["files"]["final"],dtype=object,keep_default_na=False)
@@ -181,8 +181,8 @@ def outcome_audit(run,state,isolated):
     review=field(original_final,["Revisão B.I","Revisao B.I"])
     checked_cols=["Category General","FAMILY","Status","Revisão B.I","Revisão"]
     for k,old in original_rows.items():
-        human=(status and safe(old.get(status)).upper() in ("MANUAL","MANUALMENTE")) or (
-            review and safe(old.get(review)).upper()=="OK")
+        human=(status and _is_manual_status(old.get(status))) or (
+            review and _is_bi_ok_value(old.get(review)))
         if not human:continue
         current=current_rows.get(k)
         if current is None:protected_changes.append({"key":k,"reason":"missing"})
@@ -293,6 +293,11 @@ def main():
                     print("Collection stopped. Same cohort may resume; no new input keys allowed.")
                     return 2
         if stages.get("classification",{}).get("status")!="PASS":
+            if stages.get("classification",{}).get("attempts",0)>0:
+                raise RuntimeError(
+                    "JEV_INCOMPLETE_REQUIRES_AUDIT: automatic classification resume disabled; "
+                    "per-run HTTP/token limits do not guarantee cumulative limits across restarts."
+                )
             success=run_stage(run,state,"classification",base+[
                 "--mode","classify","--llm-provider","jev",
                 "--max-items",str(state["cohort_count"]),
