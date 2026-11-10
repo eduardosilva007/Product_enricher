@@ -18,7 +18,7 @@ else:
     import pipeline_produtos as p
 from nightly_provider_router import Slot, DurableRouter
 
-class CollectionAutoProviderTests(unittest.TestCase):
+class RuntimeModuleContractTests(unittest.TestCase):
     def test_runtime_module_contract(self):
         self.assertTrue(callable(getattr(DurableRouter, "already_reserved", None)),
                         "nightly_provider_router.py local desatualizado: recarregue o arquivo da branch Argentina")
