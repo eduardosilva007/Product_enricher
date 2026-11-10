@@ -10437,7 +10437,7 @@ def main() -> int:
         )
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
-    if args.mode in {"collect", "full", "sync-input"}:
+    if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and args.auto_providers):
         files_cfg = cfg.get("files", {}) or {}
         input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
         master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
