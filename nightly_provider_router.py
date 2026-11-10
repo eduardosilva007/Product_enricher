@@ -85,6 +85,11 @@ class DurableRouter:
             return slot
         return None
 
+    def already_reserved(self, key: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM collection_attempt_reservations WHERE business_key=?", (key,)
+        ).fetchone() is not None
+
     def reserve(self, key: str) -> Optional[Slot]:
         self.conn.execute("BEGIN IMMEDIATE")
         try:
