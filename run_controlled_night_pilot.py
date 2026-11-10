@@ -143,6 +143,66 @@ def run_stage(run,state,label,cmd,timeout):
     print(f"[NIGHT] {label}: {item['status']} (attempt {item['attempts']})",flush=True)
     return item["status"]=="PASS"
 
+def outcome_audit(run,state,isolated):
+    """Independent post-run checks. No promotion/approval happens here."""
+    import pandas as pd
+    from pipeline_produtos import business_key,find_col,safe,TavilyReadOnlyStore
+    from contextlib import closing
+    cohort=pd.read_excel(isolated["files"]["input"],dtype=object,keep_default_na=False)
+    final=pd.read_excel(isolated["files"]["final"],dtype=object,keep_default_na=False)
+    original=json.loads(Path(state["originals"]).read_text(encoding="utf-8"))
+    original_final=pd.read_excel(original["final"]["path"],dtype=object,keep_default_na=False)
+    def field(df,aliases):return find_col(df,aliases,required=False)
+    def key_rows(df):
+        b=field(df,["Marca","Fabricante","Brand","Manufacturer"])
+        m=field(df,["Modelo","Model","SKU","Part Number"])
+        return {business_key(safe(row[b]),safe(row[m])):row for _,row in df.iterrows()
+                if safe(row[b]) and safe(row[m])}
+    cohort_rows=key_rows(cohort)
+    original_rows=key_rows(original_final)
+    current_rows=key_rows(final)
+    missing=sorted(set(cohort_rows)-set(current_rows))
+    missing_existing=sorted(set(original_rows)-set(current_rows))
+    protected_changes=[]
+    status=field(original_final,["Status"])
+    review=field(original_final,["Revisão B.I","Revisao B.I"])
+    checked_cols=["Category General","FAMILY","Status","Revisão B.I","Revisão"]
+    for k,old in original_rows.items():
+        human=(status and safe(old.get(status)).upper() in ("MANUAL","MANUALMENTE")) or (
+            review and safe(old.get(review)).upper()=="OK")
+        if not human:continue
+        current=current_rows.get(k)
+        if current is None:protected_changes.append({"key":k,"reason":"missing"})
+        else:
+            changed=[col for col in checked_cols if col in old.index and col in current.index
+                     and safe(old.get(col))!=safe(current.get(col))]
+            if changed:protected_changes.append({"key":k,"columns":changed})
+    raw_states={}
+    with closing(TavilyReadOnlyStore(Path(isolated["files"]["cache"]))) as store:
+        for k,row in cohort_rows.items():
+            b=field(cohort,["Marca","Fabricante","Brand","Manufacturer"])
+            m=field(cohort,["Modelo","Model","SKU","Part Number"])
+            ev=store.get(safe(row[b]),safe(row[m]))
+            raw_states[ev.state]=raw_states.get(ev.state,0)+1
+    labels=["BASE FINAL INPUT ROW COVERAGE OK","BASE FINAL PROCV COVERAGE OK",
+            "BASE FINAL CLASSIFICATION INTEGRITY"]
+    log=run/"classification_01.log"
+    if state["stages"].get("classification",{}).get("log"):
+        log=run/state["stages"]["classification"]["log"]
+    logtext=log.read_text(encoding="utf-8",errors="replace") if log.is_file() else ""
+    log_checks={label:label in logtext for label in labels}
+    passed=not missing and not missing_existing and not protected_changes and not protected_originals(state)
+    result={"status":"PASS" if passed else "FAIL","cohort":len(cohort_rows),
+            "missing_cohort_in_final":missing[:20],"missing_original_in_final":missing_existing[:20],
+            "protected_manual_or_bi_changes":protected_changes[:20],
+            "cache_states_after":raw_states,"log_contracts":log_checks,
+            "original_source_modified":protected_originals(state),
+            "quality_decision":"REVIEW_REQUIRED","taxonomy_accuracy_measured":False}
+    state["quality_audit"]=result
+    atomic_json(run/"quality_audit.json",result)
+    atomic_json(run/"run_report.json",state)
+    return passed
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--execute-live",action="store_true",
@@ -199,7 +259,8 @@ def main():
                 "--inventory-output",isolated["files"]["inventory_output"]],
                 args.timeout_minutes)
             if not success:return 2
-        return 0
+        passed=outcome_audit(run,state,isolated)
+        return 0 if passed else 2
     finally:
         state["source_files_modified"]=protected_originals(state)
         state["all_stages_pass"]=all(stages.get(k,{}).get("status")=="PASS" for k in (
