@@ -113,7 +113,7 @@ def split_pair(value: str) -> Tuple[str, str]:
 def load_taxonomy_normalization(path: Path) -> Dict[str, object]:
     if not path.exists():
         return {"pair_aliases": [], "catchall_pairs": [["OTHERS", "OTHERS"]]}
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     return data if isinstance(data, dict) else {}
 
 
