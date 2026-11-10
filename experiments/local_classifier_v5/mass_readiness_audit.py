@@ -9,6 +9,7 @@ pairs for human/JEV review, NEVER an identity match or automatic classification.
 from __future__ import annotations
 import argparse
 import json
+import sys
 import sqlite3
 from collections import Counter
 from contextlib import closing
@@ -16,6 +17,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
+
+# Supports direct CLI use and package imports by unittest on Windows.
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 import benchmark_taxonomy as bt
 from benchmark_cache_title_ablation import load_cache_titles, make_texts
 
