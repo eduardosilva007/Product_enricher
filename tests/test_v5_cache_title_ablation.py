@@ -3,6 +3,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -12,14 +13,21 @@ class CacheTitleAblationTests(unittest.TestCase):
     def test_only_curated_title_enters_features_and_cache_remains_readonly(self):
         with tempfile.TemporaryDirectory() as folder:
             cache=Path(folder)/"cache.sqlite"
-            with sqlite3.connect(cache) as db:
+            # sqlite3.Connection.__exit__ commits but DOES NOT close the handle.
+            # Windows refuses TemporaryDirectory cleanup while it is open.
+            with closing(sqlite3.connect(cache)) as db:
                 db.execute("CREATE TABLE tavily_cache (brand TEXT,model TEXT,response_json TEXT,created_at TEXT)")
                 payload={"results":[{"title":"BAD UNVERIFIED TITLE"}],
                          "_collection":{"curated_results":[{"title":"VERIFIED CNH 123"}]}}
                 db.execute("INSERT INTO tavily_cache VALUES(?,?,?,?)",("CNH","123",json.dumps(payload),"2026-11-10"))
+                db.commit()
             titles,stats=ab.load_cache_titles(cache)
             self.assertEqual(titles["CNH|123"],"VERIFIED CNH 123")
             self.assertEqual(stats["keys_with_titles"],1)
+            # On Windows this read/rename is also a practical open-handle check.
+            renamed = cache.with_name("cache_renamed.sqlite")
+            cache.rename(renamed)
+            renamed.rename(cache)
 
     def test_gold_title_not_used_in_cache_title_mode(self):
         df=pd.DataFrame([{"__brand":"CNH","__model":"123","__key":"CNH|123",
