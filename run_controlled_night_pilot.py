@@ -7,7 +7,7 @@ Cannot promote outputs or silently start processing the remaining 18K SKUs.
 """
 from __future__ import annotations
 import argparse,hashlib,json,os,shutil,sqlite3,subprocess,sys,uuid
-from contextlib import closing
+from contextlib import closing,contextmanager
 from datetime import datetime,timezone
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent
@@ -216,6 +216,26 @@ def outcome_audit(run,state,isolated):
     atomic_json(run/"run_report.json",state)
     return passed
 
+@contextmanager
+def exclusive_campaign_lock():
+    """OS-managed interprocess lock, automatically released after crash."""
+    OUT.mkdir(parents=True,exist_ok=True)
+    with (OUT/".campaign.lock").open("a+b") as handle:
+        handle.seek(0);handle.write(b"\0");handle.flush();handle.seek(0)
+        if os.name=="nt":
+            import msvcrt
+            try:msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
+            except OSError as exc:raise RuntimeError("Another live pilot is running; concurrent night runs blocked") from exc
+            try:yield
+            finally:
+                handle.seek(0);msvcrt.locking(handle.fileno(),msvcrt.LK_UNLCK,1)
+        else:
+            import fcntl
+            try:fcntl.flock(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except OSError as exc:raise RuntimeError("Another live pilot is running") from exc
+            try:yield
+            finally:fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--execute-live",action="store_true",
@@ -293,4 +313,6 @@ def main():
         atomic_json(run/"run_report.json",state)
         print(f"Report: {run/'run_report.json'}",flush=True)
 
-if __name__=="__main__":raise SystemExit(main())
+if __name__=="__main__":
+    with exclusive_campaign_lock():
+        raise SystemExit(main())
