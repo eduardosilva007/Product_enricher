@@ -26,6 +26,47 @@ class ExcelEvidenceExportRegressions(unittest.TestCase):
                     f"Unsanitized Excel write at line {node.lineno}")
         self.assertGreaterEqual(len(sinks), 16)
 
+    def test_consolidado_atomic_write_with_dewalt_control_character(self):
+        import pandas as pd
+        dirty = "DEWALT DCD7771D2-AR\\x07 manual evidence"
+        dirty = dirty.replace("\\\\x07", chr(7))
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "Consolidado.xlsx"
+            frame = pd.DataFrame([{
+                "Marca": "DEWALT", "Modelo": "DCD7771D2-AR",
+                "Evidências": dirty, "Revisão B.I": "OK",
+                "Category General": "OTHERS", "FAMILY": "DRILL",
+            }])
+            pipeline._atomic_write_dataframe(frame,target,"Consolidado")
+            book=load_workbook(target,read_only=True,data_only=True)
+            try:
+                row=list(book["Consolidado"].values)
+                self.assertEqual(row[1][0],"DEWALT")
+                self.assertEqual(row[1][3],"OK")
+                self.assertEqual(row[1][2],"DEWALT DCD7771D2-AR manual evidence")
+                self.assertEqual(row[1][4:6],("OTHERS","DRILL"))
+            finally:
+                book.close()
+            self.assertEqual(frame.loc[0,"Evidências"],dirty)
+
+    def test_base_final_sheet_with_dirty_evidence_preserves_review_lock(self):
+        import pandas as pd
+        dirty = "DEWALT\\x07 [4] manual\\x01 evidence".replace("\\\\x07",chr(7)).replace("\\\\x01",chr(1))
+        frame = pd.DataFrame([{
+            "Marca":"DEWALT", "Modelo":"DCD7771D2-AR",
+            "Revisão B.I":"OK", "Evidências":dirty
+        }])
+        with tempfile.TemporaryDirectory() as folder:
+            target=Path(folder)/"Base Final.xlsx"
+            pipeline._atomic_write_dataframe(frame,target,"Base Final")
+            book=load_workbook(target,read_only=True,data_only=True)
+            try:
+                cells=list(book["Base Final"].values)
+                self.assertEqual(cells[1][2],"OK")
+                self.assertEqual(cells[1][3],"DEWALT [4] manual evidence")
+            finally:
+                book.close()
+
     def test_sanitize_only_forbidden_control_characters(self):
         raw = "DCD7771D2-AR\x07 text\x0b tab\t newline\n accentuação"
         value=_excel_export_safe_value(raw)
