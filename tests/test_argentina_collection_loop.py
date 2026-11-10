@@ -18,6 +18,48 @@ else:
     import pipeline_produtos as p
 from nightly_provider_router import Slot, DurableRouter
 
+class ProviderResponseContractTests(unittest.TestCase):
+    def test_bright_direct_light_organic(self):
+        payload = {"organic":[{"title":"CNH original","link":"https://example.com/part","description":"Part",
+                               "global_rank":1}]}
+        self.assertEqual(p._normalize_brightdata_results(payload)[0]["title"],"CNH original")
+
+    def test_bright_json_wrapper_string_body(self):
+        payload = {"body":'{"organic":[{"title":"CNH engine","link":"https://example.com/engine","description":"Motor"}]}'}
+        result = p._normalize_brightdata_results(payload)
+        self.assertEqual(len(result),1)
+        self.assertEqual(result[0]["url"],"https://example.com/engine")
+
+    def test_bright_schema_malformed_fail_closed(self):
+        with self.assertRaisesRegex(RuntimeError,"SCHEMA_INVALID"):
+            p._normalize_brightdata_results({"body":{"unrelated":{"organic":[]}}})
+
+    def test_serper_http400_not_enough_credits_is_operational_pause(self):
+        from types import SimpleNamespace
+        response = SimpleNamespace(status_code=400,text='{"message":"Not enough credits","statusCode":400}')
+        mock_limiter = SimpleNamespace(wait=lambda:None)
+        mock_budget = SimpleNamespace(reserve=lambda:None)
+        with patch("requests.post",return_value=response) as post:
+            with self.assertRaises(p.OperationalPause) as error:
+                p._provider_post_once("serper","https://google.serper.dev/search",{},{"q":"test"},
+                                      3,mock_limiter,mock_budget)
+            self.assertEqual(error.exception.code,"SERPER_LIMIT")
+            self.assertEqual(post.call_count,1)
+
+    def test_bright_request_contract_uses_parsed_light_raw(self):
+        cfg = {"collection":{"providers":{"brightdata":{"base_url":"https://api.brightdata.com/request",
+             "max_results":10}}}}
+        limiter = SimpleNamespace(wait=lambda:None)
+        budget = SimpleNamespace(reserve=lambda:None,used=1)
+        creds = {"api_key":"test","zone":"serp"}
+        response = {"organic":[{"title":"Part","link":"https://example.com/part","description":"Part"}]}
+        with patch.object(p,"_provider_credentials",return_value=creds), \
+             patch.object(p,"_provider_post_once",return_value=response) as request:
+            p._provider_request_once("brightdata","CNH 123",cfg,limiter,budget)
+            body = request.call_args.args[3]
+            self.assertEqual(body["format"],"raw")
+            self.assertEqual(body["data_format"],"parsed_light")
+
 class RuntimeModuleContractTests(unittest.TestCase):
     def test_runtime_module_contract(self):
         self.assertTrue(callable(getattr(DurableRouter, "already_reserved", None)),
