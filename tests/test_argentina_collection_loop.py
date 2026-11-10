@@ -16,7 +16,15 @@ if os.getenv("ARGENTINA_PILOT_SCRIPT"):
     spec.loader.exec_module(p)
 else:
     import pipeline_produtos as p
-from nightly_provider_router import Slot
+from nightly_provider_router import Slot, DurableRouter
+
+class CollectionAutoProviderTests(unittest.TestCase):
+    def test_runtime_module_contract(self):
+        self.assertTrue(callable(getattr(DurableRouter, "already_reserved", None)),
+                        "nightly_provider_router.py local desatualizado: recarregue o arquivo da branch Argentina")
+        self.assertTrue(callable(getattr(DurableRouter, "reserve", None)))
+        self.assertTrue(callable(getattr(DurableRouter, "disable", None)))
+        self.assertIn("--auto-providers", p.build_parser().format_help())
 
 class CollectionAutoProviderTests(unittest.TestCase):
     def test_http_429_advances_provider_on_next_sku_no_retry(self):
