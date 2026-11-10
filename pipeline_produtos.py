@@ -2977,7 +2977,7 @@ def search_product_once(
     curated = _dedupe_curated(curated)
     # TF-IDF char 2-5 is ONLY a tie-breaker among structurally approved
     # evidence. It can never promote a rejected/weak-identity candidate.
-    if bool((cfg.get("identity", {}) or {}).get("char_tfidf_enabled", True)) and curated:
+    if bool((cfg.get("identity", {}) or {}).get("char_tfidf_enabled", False)) and curated:
         from identity_ranking_experiment import tfidf_cosine
         corpus = [f"{brand} {search_model}"] + [
             f"{safe(r.get('title'))} {safe(r.get('url'))}" for r in curated
