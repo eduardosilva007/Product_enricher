@@ -1903,9 +1903,9 @@ def validate_collection_cost_policy(cfg: Dict[str, Any]) -> List[str]:
 
     bright = _provider_cfg(cfg, "brightdata")
     if bright:
-        response_format = safe(bright.get("format", "json")).casefold() or "json"
-        if response_format != "json":
-            errors.append(f"BRIGHTDATA_CONFIG: format deve ser json; recebido={response_format}")
+        response_format = safe(bright.get("format", "raw")).casefold() or "raw"
+        if response_format not in {"raw", "json"}:
+            errors.append(f"BRIGHTDATA_CONFIG: format deve ser raw ou json; recebido={response_format}")
         fmt = safe(bright.get("data_format", "parsed_light")).casefold() or "parsed_light"
         if fmt != "parsed_light":
             errors.append(f"BRIGHTDATA_CONFIG: somente parsed_light permitido; recebido={fmt}")
@@ -1982,6 +1982,10 @@ def _provider_post_once(
         return payload
 
     msg = safe(response.text)[:1200]
+    # Serper may report exhausted balance as HTTP 400 instead of HTTP 429.
+    # Never retry this SKU; disable only the affected account for subsequent SKUs.
+    if provider == "serper" and status == 400 and "not enough credits" in msg.casefold():
+        raise OperationalPause("SERPER_LIMIT", "SERPER HTTP 400: insufficient credits")
     if status in {401, 403}:
         raise OperationalPause(f"{provider.upper()}_AUTH", f"{provider.upper()} HTTP {status}: autenticação/permissão")
     if status in {429, 432, 433}:
@@ -2044,14 +2048,21 @@ def _normalize_serper_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _normalize_brightdata_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Bright Data: SOMENTE Google Light JSON / parsed_light.
+    """Normalize only parsed_light organic results, including Bright's JSON wrapper.
 
-    Não existe fallback para Full JSON, Bing, Markdown, HTML ou outro schema.
-    A documentação do Light JSON garante organic[] em respostas válidas.
+    Never interpret wrapper metadata or errors as search evidence.
     """
-    rows = payload.get("organic")
+    body = payload.get("body", payload)
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: body JSON invalid") from exc
+    if not isinstance(body, dict):
+        raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: body not an object")
+    rows = body.get("organic")
     if not isinstance(rows, list):
-        raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: organic[] ausente")
+        raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: organic[] absent in parsed response")
     out: List[Dict[str, Any]] = []
     for idx, row in enumerate(rows, 1):
         if not isinstance(row, dict):
@@ -2071,8 +2082,15 @@ def _normalize_brightdata_results(payload: Dict[str, Any]) -> List[Dict[str, Any
 
 
 def _brightdata_query_meta(payload: Dict[str, Any], submitted_query: str) -> Dict[str, Any]:
-    general = payload.get("general", {}) if isinstance(payload.get("general"), dict) else {}
-    spelling = payload.get("spelling", {}) if isinstance(payload.get("spelling"), dict) else {}
+    body = payload.get("body", payload)
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+    body = body if isinstance(body, dict) else {}
+    general = body.get("general", {}) if isinstance(body.get("general"), dict) else {}
+    spelling = body.get("spelling", {}) if isinstance(body.get("spelling"), dict) else {}
     return {
         "submitted_query": submitted_query,
         "effective_query": safe(general.get("query")) or submitted_query,
@@ -2817,7 +2835,9 @@ def _provider_request_once(
             "url": google_url,
             # Bright Data SERP API contract for parsed Light JSON.
             # Hardcoded fail-closed: no Raw HTML / Full JSON / Bing / Markdown fallback.
-            "format": "json",
+            # Docs: raw + parsed_light delivers the structured JSON body directly.
+            # Old config "json" wrapper remains readable by the strict adapter.
+            "format": "raw",
             "data_format": "parsed_light",
         }
         payload = _provider_post_once(provider, url, headers, body, timeout, limiter, budget)
