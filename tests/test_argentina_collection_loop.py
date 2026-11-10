@@ -79,6 +79,52 @@ class CollectionAutoProviderTests(unittest.TestCase):
                 self.assertTrue(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
             self.assertNotIn("_active_search_slot",cfg)
 
+    def test_raw_empty_no_keeps_queue_zero(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = argparse.Namespace(
+                search_provider="tavily", auto_providers=True, input="test.xlsx",
+                cache=str(Path(d)/"cache.sqlite"),db=str(Path(d)/"db.sqlite"),
+                master="",final="",precollection_output=str(Path(d)/"pre.xlsx"),
+                recollect_empty=False,recollect_low_evidence=False,max_tavily_new=20,yes=True)
+            plan = SimpleNamespace(candidates=[],summary={"RAW_EMPTY":1030})
+            cfg = {"files":{"cache":args.cache,"classification_db":args.db}}
+            with patch.object(p,"validate_collection_cost_policy",return_value=[]), \\
+                 patch.object(p,"load_baseline_inventory",return_value={"processed":set()}), \\
+                 patch.object(p,"build_precollection_plan",return_value=plan) as build, \\
+                 patch("builtins.input",return_value="N"):
+                self.assertTrue(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
+                self.assertEqual(build.call_count,1)
+
+    def test_raw_empty_yes_replans_with_20_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = argparse.Namespace(
+                search_provider="tavily", auto_providers=True, input="test.xlsx",
+                cache=str(Path(d)/"cache.sqlite"),db=str(Path(d)/"db.sqlite"),
+                master="",final="",precollection_output=str(Path(d)/"pre.xlsx"),
+                recollect_empty=False,recollect_low_evidence=False,max_tavily_new=20,yes=True)
+            plan_empty = SimpleNamespace(candidates=[],summary={"RAW_EMPTY":1030})
+            plan_selected = SimpleNamespace(
+                candidates=[SimpleNamespace(brand_original="CNH",model_original="47408215",raw_state="RAW_EMPTY")],
+                summary={"RAW_EMPTY":1030})
+            cfg = {"files":{"cache":args.cache,"classification_db":args.db}}
+            slot = Slot("tavily","tavily:1","TAVILY_API_KEY","",20,"t")
+            payload = {"results":[{"title":"test"}], "_collection":{
+                "state":"COLLECTED","curated_results":[],"source_audit":[],
+                "query_audit":[],"usage":{"requests":1}}}
+            with patch.object(p,"validate_collection_cost_policy",return_value=[]), \\
+                 patch.object(p,"load_baseline_inventory",return_value={"processed":set()}), \\
+                 patch.object(p,"build_precollection_plan",side_effect=[plan_empty,plan_selected]) as build, \\
+                 patch.object(p,"configured_slots",return_value=[slot]), \\
+                 patch.object(p,"search_product_once",return_value=payload) as search, \\
+                 patch.object(p,"TavilyWritableStore"), \\
+                 patch.object(p,"_export_collection_quality_report"), \\
+                 patch("builtins.input",return_value="S"):
+                self.assertTrue(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
+                self.assertEqual(build.call_count,2)
+                self.assertTrue(build.call_args.kwargs["recollect_empty"])
+                self.assertEqual(build.call_args.kwargs["max_tavily_new"],20)
+                self.assertEqual(search.call_count,1)
+
     def test_no_explicit_budget_does_not_start_collection(self):
         with tempfile.TemporaryDirectory() as d:
             args = argparse.Namespace(
