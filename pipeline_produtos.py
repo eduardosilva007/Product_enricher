@@ -3307,6 +3307,38 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         cfg=cfg, max_tavily_new=int(args.max_tavily_new or 0),
         preserve_keys=protected_keys,
     )
+    # RAW_EMPTY é um estado sem evidência, NÃO comprovação de Search concluída.
+    # Não transformar 1.030 RAW_EMPTY em consultas pagas sem consentimento explícito.
+    raw_empty_count = int(plan.summary.get("RAW_EMPTY", 0) or 0)
+    if raw_empty_count and not bool(args.recollect_empty):
+        limit = int(args.max_tavily_new or 0)
+        print()
+        print(f"ALERTA RAW_EMPTY: {raw_empty_count} SKU(s) sem resultados Search no cache.")
+        print("Esses registros podem conter consultas antigas, falhas ou ausência de histórico.")
+        print("Não serão pesquisados automaticamente. Uma recoleta pode consumir novos créditos.")
+        print(f"Limite por execução: {limit if limit > 0 else 'SEM LIMITE (NÃO RECOMENDADO)'} request(s).")
+        print("Opções: [S] autorizar uma recoleta limitada | [N] manter cache e não consultar.")
+        while True:
+            decision = input("Autorizar recoleta de RAW_EMPTY nesta execução? (S/N): ").strip().upper()
+            if decision in {"S", "N"}:
+                break
+            print("Informe S ou N.")
+        if decision == "S":
+            if limit <= 0:
+                raise RuntimeError(
+                    "RECOLLECT_EMPTY_LIMIT_REQUIRED: defina --max-search-new N positivo antes de autorizar a recoleta."
+                )
+            # Planejar novamente, mantendo bloqueios de SKUs revisados e limite global.
+            plan = build_precollection_plan(
+                input_path=input_path, cache_path=cache_path, report_path=pre_report,
+                recollect_empty=True,
+                recollect_low_evidence=bool(args.recollect_low_evidence),
+                cfg=cfg, max_tavily_new=limit,
+                preserve_keys=protected_keys,
+            )
+            print(f"RECOLETA AUTORIZADA | RAW_EMPTY={raw_empty_count} | fila limitada={len(plan.candidates)}")
+        else:
+            print("RECOLETA RAW_EMPTY RECUSADA. Nenhuma request por estes registros.")
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
     slots = configured_slots() if auto_route and candidates else []
     if auto_route and candidates and not slots:
