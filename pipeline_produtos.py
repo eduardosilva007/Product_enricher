@@ -3345,19 +3345,20 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     master = Path(args.master or files_cfg.get("master", "")) if (args.master or files_cfg.get("master")) else None
     final = Path(args.final or files_cfg.get("final", "")) if (args.final or files_cfg.get("final")) else None
     protected_keys = load_baseline_inventory(master, final)["processed"]
-    attempted_keys = set()
-    if auto_route and db_path.exists():
-        # Read-only: never repeat a SKU already reserved during a previous run.
-        from contextlib import closing
-        with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as prev:
-            exists = prev.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='collection_attempt_reservations'"
-            ).fetchone()
-            if exists:
-                attempted_keys = {row[0] for row in prev.execute(
-                    "SELECT business_key FROM collection_attempt_reservations"
-                )}
-        LOG.info("ROUTER | tentativas anteriores preservadas=%d", len(attempted_keys))
+    # Separate operational attempt history from the evidence cache, regardless
+    # of auto-routing. Reserve BEFORE HTTP; never requery after a crash.
+    from contextlib import closing
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(db_path, timeout=30)) as attempt_db:
+        attempt_db.execute("PRAGMA busy_timeout=30000")
+        attempt_db.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
+            business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
+            provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        attempt_db.commit()
+        attempted_keys = {row[0] for row in attempt_db.execute(
+            "SELECT business_key FROM collection_attempt_reservations"
+        )}
+    LOG.info("SEARCH ATTEMPT LEDGER | attempts=%d | SQLite=%s", len(attempted_keys), db_path)
     plan = build_precollection_plan(
         input_path=input_path, cache_path=cache_path, report_path=pre_report,
         recollect_empty=bool(args.recollect_empty), recollect_low_evidence=bool(args.recollect_low_evidence),
@@ -3454,6 +3455,20 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         for idx, (brand, model, prior_state) in enumerate(candidates, 1):
             key = business_key(brand, model)
             active_slot = None
+            if not router:
+                # Commit independent of the HTTP transaction. A failed request
+                # stays in SQLite history, NOT in tavily_cache RAW evidence.
+                with closing(sqlite3.connect(db_path, timeout=30)) as attempt_db:
+                    attempt_db.execute("PRAGMA busy_timeout=30000")
+                    reserved = attempt_db.execute(
+                        "INSERT OR IGNORE INTO collection_attempt_reservations "
+                        "(business_key,account,provider) VALUES(?,?,?)",
+                        (key,"single:"+provider,provider)
+                    ).rowcount
+                    attempt_db.commit()
+                if not reserved:
+                    LOG.warning("SEARCH ATTEMPT LEDGER | already attempted; skipping %s", key)
+                    continue
             if router:
                 active_slot = router.reserve(key)
                 if active_slot is None:
@@ -3548,11 +3563,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             except OperationalPause as exc:
                 db.event(run_id, key, exc.code, safe(exc))
                 # Falha depois da tentativa fica auditada, sem apagar cache útil prévio.
-                failure = _failed_collection_payload(brand, model, provider, cfg, exc.code, safe(exc))
-                if prior_state in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
-                    db.event(run_id, key, "RECOLLECTION_ERROR_OLD_CACHE_PRESERVED", safe(exc))
-                else:
-                    writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_HTTP_PAUSE")
+                # API errors are NOT RAW evidence. Durable attempt ledger and
+                # classification DB events prevent retries; preserve cache unchanged.
+                db.event(run_id, key, "SEARCH_ERROR_NOT_CACHED", safe(exc))
                 total_requests += 1
                 product_rows.append({
                     "Marca": brand, "Modelo": model, "Provider": provider,
@@ -3569,14 +3582,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             except Exception as exc:
                 # Fail-closed e sem retry. Persiste tombstone para o mesmo item não voltar
                 # silenciosamente à fila em uma nova execução e potencialmente gastar de novo.
-                failure = _failed_collection_payload(
-                    brand, model, provider, cfg, "REQUEST_ATTEMPTED_NO_AUTO_RETRY", safe(exc)
-                )
-                if prior_state in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
-                    # Uma falha de recoleta não pode substituir material já existente.
-                    db.event(run_id, key, "RECOLLECTION_ERROR_OLD_CACHE_PRESERVED", safe(exc))
-                else:
-                    writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_REQUEST_ERROR_{COLLECTION_LABEL}")
+                # Do not poison the RAW cache with provider errors. The
+                # pre-HTTP reservation survives process exit and blocks retry.
+                db.event(run_id, key, "SEARCH_ERROR_NOT_CACHED", safe(exc))
                 total_requests += 1
                 db.event(run_id, key, f"SEARCH_{COLLECTION_LABEL}_ERROR_NO_RETRY", safe(exc))
                 product_rows.append({
