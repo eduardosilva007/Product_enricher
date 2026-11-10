@@ -28,8 +28,7 @@ class ExcelEvidenceExportRegressions(unittest.TestCase):
 
     def test_consolidado_atomic_write_with_dewalt_control_character(self):
         import pandas as pd
-        dirty = "DEWALT DCD7771D2-AR\\x07 manual evidence"
-        dirty = dirty.replace("\\\\x07", chr(7))
+        dirty = "DEWALT DCD7771D2-AR" + chr(7) + " manual evidence"
         with tempfile.TemporaryDirectory() as folder:
             target = Path(folder) / "Consolidado.xlsx"
             frame = pd.DataFrame([{
@@ -51,7 +50,7 @@ class ExcelEvidenceExportRegressions(unittest.TestCase):
 
     def test_base_final_sheet_with_dirty_evidence_preserves_review_lock(self):
         import pandas as pd
-        dirty = "DEWALT\\x07 [4] manual\\x01 evidence".replace("\\\\x07",chr(7)).replace("\\\\x01",chr(1))
+        dirty = "DEWALT" + chr(7) + " [4] manual" + chr(1) + " evidence"
         frame = pd.DataFrame([{
             "Marca":"DEWALT", "Modelo":"DCD7771D2-AR",
             "Revisão B.I":"OK", "Evidências":dirty
