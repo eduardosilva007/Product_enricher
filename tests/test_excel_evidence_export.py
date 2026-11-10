@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from openpyxl import load_workbook
-from pipeline_produtos import _excel_export_safe_value, export_excel
+from pipeline_argentina_excel_fix import _excel_export_safe_value, export_excel
 
 
 class ExcelEvidenceExportRegressions(unittest.TestCase):
