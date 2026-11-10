@@ -21,7 +21,8 @@ def raw_texts(payload: Mapping[str, Any], max_sources: int = 10,
               max_chars_per_source: int = 3000) -> list[tuple[str,str]]:
     """Return strictly local previously persisted RAW snippets and evidence."""
     results = payload.get("results", []) or []
-    evidence = payload.get("_evidence_cache", []) or []
+    collection = payload.get("_collection", {}) or {}
+    evidence = collection.get("evidence_cache", []) or payload.get("_evidence_cache", []) or []
     out: list[tuple[str,str]] = []
     for ix, row in enumerate(list(results)[:max_sources]):
         if not isinstance(row, dict):
@@ -37,7 +38,7 @@ def raw_texts(payload: Mapping[str, Any], max_sources: int = 10,
             if not isinstance(row, dict):
                 continue
             title = str(row.get("title", "") or "")
-            text = str(row.get("content", row.get("excerpt", "")) or "")
+            text = str(row.get("evidence_excerpt") or row.get("snippet") or row.get("content") or row.get("excerpt") or "")
             combined = re.sub(r"\s+", " ", title + " " + text).strip()
             if combined:
                 out.append((f"evidence_cache:{ix}", combined[:max_chars_per_source]))
