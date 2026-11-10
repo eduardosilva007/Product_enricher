@@ -22,6 +22,7 @@ TESTS = [
     ("Observed-cohort regression", ["-m","unittest","discover","-s","tests","-p","test_observed_failure_cohort.py","-v"]),
     ("Provider quotas/resume (synthetic)",["-m","unittest","discover","-s","tests","-p","test_nightly_provider_router.py","-v"]),
     ("Full queue >100 and resume",["-m","unittest","discover","-s","tests","-p","test_full_queue_no_100_ceiling.py","-v"]),
+    ("Excel control chars and report atomicity",["-m","unittest","discover","-s","tests","-p","test_excel_evidence_export.py","-v"]),
     ("Optional identity fallbacks",["-m","unittest","discover","-s","tests","-p","test_optional_identity_fallbacks.py","-v"]),
     ("Offline identity benchmark regression",["-m","unittest","discover","-s","tests","-p","test_benchmark_identity_offline.py","-v"]),
 ]
