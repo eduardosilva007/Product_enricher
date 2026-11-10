@@ -65,7 +65,18 @@ def create_run(cfg,args):
     for key in ("input","cache","master","final"):
         if not sources[key].is_file():raise FileNotFoundError(f"Missing input: {key}: {sources[key]}")
     result=audit(sources["input"],sources["cache"],sources["master"],sources["final"])
-    eligible=result["candidate_rows"][:args.search_budget]
+    # New rounds must not repeatedly spend on the same frozen SKU from a prior
+    # pilot. Resume that run instead; do not silently re-authorize Search.
+    prior_attempts=set()
+    if OUT.is_dir():
+        for prior_report in OUT.glob("*/run_report.json"):
+            try:
+                history=json.loads(prior_report.read_text(encoding="utf-8"))
+                if history.get("stages",{}).get("collection",{}).get("attempts",0)>0:
+                    prior_attempts.update(history.get("cohort_keys",[]))
+            except (OSError,ValueError,TypeError):
+                raise RuntimeError(f"Unreadable previous campaign report: {prior_report}")
+    eligible=[x for x in result["candidate_rows"] if x["business_key"] not in prior_attempts][:args.search_budget]
     if not eligible:raise RuntimeError("No eligible RAW_EMPTY candidates. Review raw_empty_audit.json")
     run=OUT/(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")+"_"+uuid.uuid4().hex[:8])
     run.mkdir(parents=True,exist_ok=False)
@@ -106,6 +117,8 @@ def create_run(cfg,args):
            "originals":str(run/"original_sources.json"),
            "budget":{"search":args.search_budget,"jev_calls":args.llm_budget,"tokens":args.token_budget},
            "cohort_count":len(eligible),"cohort_skus":[r["model"] for r in eligible],
+           "cohort_keys":[r["business_key"] for r in eligible],
+           "excluded_prior_pilot_cohorts":len(prior_attempts),
            "stages":{},"production_approved":False,"mass_approval":"BLOCKED_REVIEW_REQUIRED"}
     atomic_json(run/"run_report.json",state)
     return run,state,isolated
@@ -247,8 +260,18 @@ def main():
                 "--max-search-new",str(state["budget"]["search"])],
                 args.timeout_minutes)
             if not success:
-                print("Collection stopped. Same cohort may resume; no new input keys allowed.")
-                return 2
+                # Recover only unexpected worker termination/timeout. Do not
+                # restart on pipeline policy failure (2) or provider pause (3).
+                last=state["stages"]["collection"]
+                if last.get("exit_code") not in (2,3) and last["status"] in ("FAIL","TIMEOUT"):
+                    print("[NIGHT] Worker interrupted. One automatic restart with SAME SQLite reservation ledger.",flush=True)
+                    success=run_stage(run,state,"collection",base+[
+                        "--mode","collect","--auto-providers","--recollect-empty",
+                        "--max-search-new",str(state["budget"]["search"])],
+                        args.timeout_minutes)
+                if not success:
+                    print("Collection stopped. Same cohort may resume; no new input keys allowed.")
+                    return 2
         if stages.get("classification",{}).get("status")!="PASS":
             success=run_stage(run,state,"classification",base+[
                 "--mode","classify","--llm-provider","jev",
