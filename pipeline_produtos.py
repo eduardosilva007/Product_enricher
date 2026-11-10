@@ -1360,10 +1360,10 @@ def export_precollection_report(plan: PreCollectionPlan) -> None:
     )
 
     with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
-        pd.DataFrame(resumo).to_excel(writer, sheet_name="Resumo", index=False)
-        pd.DataFrame(normalizacao).to_excel(writer, sheet_name="Normalizacao", index=False)
-        pd.DataFrame(fila).to_excel(writer, sheet_name="Fila_Coleta", index=False)
-        pd.DataFrame(duplicados).to_excel(writer, sheet_name="Duplicidades", index=False)
+        _excel_export_safe_frame(pd.DataFrame(resumo)).to_excel(writer, sheet_name="Resumo", index=False)
+        _excel_export_safe_frame(pd.DataFrame(normalizacao)).to_excel(writer, sheet_name="Normalizacao", index=False)
+        _excel_export_safe_frame(pd.DataFrame(fila)).to_excel(writer, sheet_name="Fila_Coleta", index=False)
+        _excel_export_safe_frame(pd.DataFrame(duplicados)).to_excel(writer, sheet_name="Duplicidades", index=False)
 
     os.replace(tmp, plan.report_path)
 
@@ -3270,10 +3270,10 @@ def _export_collection_quality_report(products: List[Dict[str, Any]], sources: L
     resumo += [{"Indicador": f"STATE::{k}", "Valor": v} for k, v in sorted(state_counts.items()) if k]
     resumo += [{"Indicador": f"SOURCE::{k}", "Valor": v} for k, v in sorted(decision_counts.items()) if k]
     with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
-        pd.DataFrame(resumo).to_excel(writer, sheet_name="Resumo", index=False)
-        pd.DataFrame(products).to_excel(writer, sheet_name="Produtos", index=False)
-        pd.DataFrame(sources).to_excel(writer, sheet_name="Fontes", index=False)
-        pd.DataFrame(queries).to_excel(writer, sheet_name="Queries", index=False)
+        _excel_export_safe_frame(pd.DataFrame(resumo)).to_excel(writer, sheet_name="Resumo", index=False)
+        _excel_export_safe_frame(pd.DataFrame(products)).to_excel(writer, sheet_name="Produtos", index=False)
+        _excel_export_safe_frame(pd.DataFrame(sources)).to_excel(writer, sheet_name="Fontes", index=False)
+        _excel_export_safe_frame(pd.DataFrame(queries)).to_excel(writer, sheet_name="Queries", index=False)
     os.replace(tmp, path)
 
 
@@ -7723,7 +7723,7 @@ def _atomic_write_dataframe(df: Any, path: Path, sheet_name: str) -> None:
     tmp = path.with_name(path.stem + f".tmp_{os.getpid()}" + path.suffix)
     try:
         with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name=sheet_name[:31] or "Consolidado", index=False)
+            _excel_export_safe_frame(df).to_excel(writer, sheet_name=sheet_name[:31] or "Consolidado", index=False)
         os.replace(tmp, path)
     except PermissionError as exc:
         try:
@@ -8314,7 +8314,7 @@ def _export_base_final(
     final_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
-            out.to_excel(writer, sheet_name="Base Final", index=False)
+            _excel_export_safe_frame(out).to_excel(writer, sheet_name="Base Final", index=False)
         os.replace(tmp, final_path)
     except PermissionError as exc:
         try:
@@ -8961,8 +8961,8 @@ def inventory(
     if output:
         import pandas as pd
         with pd.ExcelWriter(output, engine="openpyxl") as w:
-            pd.DataFrame([{"Métrica": k, "Valor": v} for k, v in counts.items()]).to_excel(w, sheet_name="Resumo", index=False)
-            pd.DataFrame(rows).to_excel(w, sheet_name="Catalogo", index=False)
+            _excel_export_safe_frame(pd.DataFrame([{"Métrica": k, "Valor": v} for k, v in counts.items()])).to_excel(w, sheet_name="Resumo", index=False)
+            _excel_export_safe_frame(pd.DataFrame(rows)).to_excel(w, sheet_name="Catalogo", index=False)
     return dict(counts)
 
 def _load_master_rule_metadata(master_path: Optional[Path]) -> Dict[str, Dict[str, str]]:
@@ -9091,7 +9091,7 @@ def _export_recovery_report(rows: List[Dict[str, Any]], path: Path, sheet: str) 
     import pandas as pd
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.stem + f".tmp_{os.getpid()}" + path.suffix)
-    pd.DataFrame(rows).to_excel(tmp, sheet_name=sheet[:31], index=False)
+    _excel_export_safe_frame(pd.DataFrame(rows)).to_excel(tmp, sheet_name=sheet[:31], index=False)
     os.replace(tmp, path)
 
 
