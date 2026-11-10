@@ -3336,7 +3336,8 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     attempted_keys = set()
     if auto_route and db_path.exists():
         # Read-only: never repeat a SKU already reserved during a previous run.
-        with sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True) as prev:
+        from contextlib import closing
+        with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as prev:
             exists = prev.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='collection_attempt_reservations'"
             ).fetchone()
