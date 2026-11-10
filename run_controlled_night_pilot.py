@@ -54,7 +54,8 @@ def gate(cfg,args):
     from pipeline_produtos import load_env_file
     load_env_file(ROOT/".env")
     from nightly_provider_router import configured_slots
-    if not configured_slots():raise ValueError("No explicit positive provider limit configured in .env")
+    slots=[slot for slot in configured_slots() if slot.provider!="serper"]
+    if not slots:raise ValueError("No Tavily/Bright Data account with explicit positive budget; Serper quota-error retry forbidden")
     jev=cfg.get("jev",{})
     key=jev.get("api_key_env") or "TYPESAFE_API_KEY"
     if not os.getenv(key):raise ValueError(f"JEV credential not configured: {key}")
@@ -76,7 +77,14 @@ def create_run(cfg,args):
                     prior_attempts.update(history.get("cohort_keys",[]))
             except (OSError,ValueError,TypeError):
                 raise RuntimeError(f"Unreadable previous campaign report: {prior_report}")
-    eligible=[x for x in result["candidate_rows"] if x["business_key"] not in prior_attempts][:args.search_budget]
+    eligible=[x for x in result["candidate_rows"] if x["business_key"] not in prior_attempts]
+    if args.allow_prior_serper_quota_error:
+        eligible.extend(x for x in result["error_rows"]
+                        if x["business_key"] not in prior_attempts
+                        and x["provider"].lower()=="serper"
+                        and x["prior_state"]=="REQUEST_ATTEMPTED_NO_AUTO_RETRY"
+                        and "not enough credits" in x["previous_error"].lower())
+    eligible=eligible[:args.search_budget]
     if not eligible:raise RuntimeError("No eligible RAW_EMPTY candidates. Review raw_empty_audit.json")
     run=OUT/(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")+"_"+uuid.uuid4().hex[:8])
     run.mkdir(parents=True,exist_ok=False)
@@ -119,6 +127,8 @@ def create_run(cfg,args):
            "cohort_count":len(eligible),"cohort_skus":[r["model"] for r in eligible],
            "cohort_keys":[r["business_key"] for r in eligible],
            "excluded_prior_pilot_cohorts":len(prior_attempts),
+           "prior_serper_quota_error_rescue_authorized":bool(args.allow_prior_serper_quota_error),
+           "search_provider_exclusion":["serper"],
            "stages":{},"production_approved":False,"mass_approval":"BLOCKED_REVIEW_REQUIRED"}
     atomic_json(run/"run_report.json",state)
     return run,state,isolated
@@ -139,6 +149,12 @@ def run_stage(run,state,label,cmd,timeout):
     env=dict(os.environ)
     env.update(HF_HUB_OFFLINE="1",TRANSFORMERS_OFFLINE="1",
                HF_DATASETS_OFFLINE="1",HF_HUB_DISABLE_TELEMETRY="1")
+    # Block Serper in the worker AND suppress repopulation by load_env_file.
+    # All Serper keys (primary and numbered variants) are overridden to empty.
+    if label=="collection":
+        for key in ("SERPER_API_KEY","SERPER_API_KEY1","SERPER_API_KEY_1",
+                    "SERPER_API_KEY_2","SERPER_API_KEY_3","SERPER_API_KEY_4"):
+            env[key]=""
     try:
         with (run/name).open("w",encoding="utf-8") as log:
             with subprocess.Popen(cmd,cwd=ROOT,env=env,stdin=subprocess.DEVNULL,
@@ -241,6 +257,8 @@ def exclusive_campaign_lock():
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--allow-prior-serper-quota-error",action="store_true",
+                   help="Explicitly rescue only prior Serper HTTP 400 Not enough credits, using OTHER provider, capped and isolated")
     p.add_argument("--execute-live",action="store_true",
                    help="Explicit authorization to consume bounded real Search+JEV calls")
     p.add_argument("--search-budget",type=int,default=0)
@@ -265,6 +283,8 @@ def main():
         run=Path(args.resume_dir).resolve()
         if run.parent!=OUT.resolve():raise ValueError("Resume must target a direct controlled_night run directory")
         state=json.loads((run/"run_report.json").read_text(encoding="utf-8"))
+        if state.get("prior_serper_quota_error_rescue_authorized")!=bool(args.allow_prior_serper_quota_error):
+            raise ValueError("Resume must preserve the same prior-error authorization flag")
         if state["budget"]!={"search":args.search_budget,"jev_calls":args.llm_budget,"tokens":args.token_budget}:
             raise ValueError("Resume budgets must match original campaign exactly")
         isolated=json.loads((run/"isolated_config.json").read_text(encoding="utf-8"))
