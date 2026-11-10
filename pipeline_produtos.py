@@ -8689,18 +8689,39 @@ def reconcile_baseline_before_run(
     return stats
 
 
+# Excel XML 1.0 forbids control codepoints even when they are valid Unicode
+# in scraped search snippets. Preserve original source evidence in SQLite;
+# sanitize ONLY exported worksheet string values (not business keys).
+_EXCEL_ILLEGAL_CONTROLS = re.compile(r"[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]")
+
+
+def _excel_export_safe_value(value: Any) -> Any:
+    return _EXCEL_ILLEGAL_CONTROLS.sub("", value) if isinstance(value, str) else value
+
+
+def _excel_export_safe_frame(frame: "pd.DataFrame") -> "pd.DataFrame":
+    # Sanitize summary AND record/review sheets, without stringifying
+    # numerics, timestamps or missing values.
+    return frame.apply(lambda column: column.map(_excel_export_safe_value))
+
+
 def export_excel(rows: List[Dict[str, Any]], out_path: Path, summary: Dict[str, Any]) -> None:
     import pandas as pd
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
     rev = df[df.get("Review Required", pd.Series(dtype=str)).astype(str).str.upper().eq("SIM")].copy() if not df.empty else pd.DataFrame()
     summ = pd.DataFrame([{"Métrica": k, "Valor": v} for k, v in summary.items()])
+    # Never leave a malformed temporary workbook after failed exports.
     tmp = out_path.with_name(out_path.stem + f".tmp_{os.getpid()}" + out_path.suffix)
-    with pd.ExcelWriter(tmp, engine="openpyxl") as w:
-        summ.to_excel(w, sheet_name="Resumo", index=False)
-        df.to_excel(w, sheet_name="Resultados", index=False)
-        rev.to_excel(w, sheet_name="Revisar", index=False)
-    os.replace(tmp, out_path)
+    try:
+        with pd.ExcelWriter(tmp, engine="openpyxl") as w:
+            _excel_export_safe_frame(summ).to_excel(w, sheet_name="Resumo", index=False)
+            _excel_export_safe_frame(df).to_excel(w, sheet_name="Resultados", index=False)
+            _excel_export_safe_frame(rev).to_excel(w, sheet_name="Revisar", index=False)
+        os.replace(tmp, out_path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 # -----------------------------------------------------------------------------
