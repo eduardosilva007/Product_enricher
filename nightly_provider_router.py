@@ -22,7 +22,7 @@ class Slot:
 
 def configured_slots() -> list[Slot]:
     slots = []
-    for provider, prefix in (("tavily","TAVILY"),("brightdata","BRIGHTDATA"),("serper","SERPER")):
+    for provider, prefix in (("serper","SERPER"),("brightdata","BRIGHTDATA"),("tavily","TAVILY"),("searlo","SEARLO")):
         for n in (1, 2, 3, 4):
             suffix = f"_{n}"
             key_env = f"{prefix}_API_KEY{suffix}"
