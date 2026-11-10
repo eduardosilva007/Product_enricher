@@ -1168,6 +1168,7 @@ def build_precollection_plan(
     cfg: Optional[Dict[str, Any]] = None,
     max_tavily_new: int = 0,
     preserve_keys: Optional[set] = None,
+    exclude_attempted_keys: Optional[set] = None,
 ) -> PreCollectionPlan:
     """Normaliza/deduplica/cruza cache sem rede.
 
@@ -1262,6 +1263,13 @@ def build_precollection_plan(
         if store:
             store.close()
 
+    for rep in representatives:
+        if rep.key in (exclude_attempted_keys or set()) and rep.action in {
+            "NOVA_COLETA", "RECOLETAR", "RECOLETAR_LOW_EVIDENCE"
+        }:
+            rep.action = "TENTATIVA_ANTERIOR_PRESERVADA"
+            rep.reason = "Tentativa Search registrada em SQLite; não repetir automaticamente"
+
     candidates_all = [r for r in representatives if r.action in {"NOVA_COLETA", "RECOLETAR", "RECOLETAR_LOW_EVIDENCE"}]
     candidates = candidates_all[:max_tavily_new] if max_tavily_new else list(candidates_all)
 
@@ -1290,6 +1298,7 @@ def build_precollection_plan(
         "Recoleta LOW_TARGET_EVIDENCE": action_counts["RECOLETAR_LOW_EVIDENCE"],
         "RAW vazio pulado": action_counts["RAW_EMPTY_PULADO"],
         "Erros Search pulados": action_counts["RAW_ERROR_PULADO"],
+        "Tentativas Search anteriores preservadas": action_counts["TENTATIVA_ANTERIOR_PRESERVADA"],
         "Fila real Tavily antes do limite": len(candidates_all),
         "Fila Tavily desta execução": len(candidates),
         "Business key": "AGRESSIVA_ESTRUTURAL_SEM_FUZZY",
@@ -3324,11 +3333,23 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     master = Path(args.master or files_cfg.get("master", "")) if (args.master or files_cfg.get("master")) else None
     final = Path(args.final or files_cfg.get("final", "")) if (args.final or files_cfg.get("final")) else None
     protected_keys = load_baseline_inventory(master, final)["processed"]
+    attempted_keys = set()
+    if auto_route and db_path.exists():
+        # Read-only: never repeat a SKU already reserved during a previous run.
+        with sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True) as prev:
+            exists = prev.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='collection_attempt_reservations'"
+            ).fetchone()
+            if exists:
+                attempted_keys = {row[0] for row in prev.execute(
+                    "SELECT business_key FROM collection_attempt_reservations"
+                )}
+        LOG.info("ROUTER | tentativas anteriores preservadas=%d", len(attempted_keys))
     plan = build_precollection_plan(
         input_path=input_path, cache_path=cache_path, report_path=pre_report,
         recollect_empty=bool(args.recollect_empty), recollect_low_evidence=bool(args.recollect_low_evidence),
         cfg=cfg, max_tavily_new=int(args.max_tavily_new or 0),
-        preserve_keys=protected_keys,
+        preserve_keys=protected_keys, exclude_attempted_keys=attempted_keys,
     )
     # RAW_EMPTY é um estado sem evidência, NÃO comprovação de Search concluída.
     # Não transformar 1.030 RAW_EMPTY em consultas pagas sem consentimento explícito.
@@ -3358,6 +3379,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 recollect_low_evidence=bool(args.recollect_low_evidence),
                 cfg=cfg, max_tavily_new=limit,
                 preserve_keys=protected_keys,
+                exclude_attempted_keys=attempted_keys,
             )
             print(f"RECOLETA AUTORIZADA | RAW_EMPTY={raw_empty_count} | fila limitada={len(plan.candidates)}")
         else:
