@@ -30,12 +30,15 @@ class ExcelEvidenceExportRegressions(unittest.TestCase):
             target=Path(path)/"results.xlsx"
             export_excel(rows,target,summary)
             self.assertTrue(target.is_file())
-            with load_workbook(target,read_only=True,data_only=True) as book:
+            book=load_workbook(target,read_only=True,data_only=True)
+            try:
                 self.assertEqual(set(book.sheetnames),{"Resumo","Resultados","Revisar"})
                 self.assertEqual(book["Resultados"]["D2"].value,"SIM")
                 self.assertNotIn("\x07",book["Resultados"]["C2"].value)
                 self.assertNotIn("\x01",book["Revisar"]["C2"].value)
                 self.assertEqual(book["Resultados"]["E2"].value,0.75)
+            finally:
+                book.close()
             self.assertEqual(rows[0]["Raw Search Results"],dirty)
             self.assertEqual(summary["evidence"],dirty)
 
