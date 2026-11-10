@@ -1,12 +1,31 @@
 """Regression: scraped evidence with Excel-forbidden control chars must not crash reports."""
 import tempfile
+import ast
+import inspect
 import unittest
 from pathlib import Path
 from openpyxl import load_workbook
+import pipeline_argentina_excel_fix as pipeline
 from pipeline_argentina_excel_fix import _excel_export_safe_value, export_excel
 
 
 class ExcelEvidenceExportRegressions(unittest.TestCase):
+    def test_every_pipeline_excel_sink_is_sanitized(self):
+        # AST audit catches unsanitized writes in Consolidado, Base Final,
+        # collection/inventory reports and recovery reports.
+        module = ast.parse(inspect.getsource(pipeline))
+        sinks=[]
+        for node in ast.walk(module):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "to_excel"):
+                sinks.append(node)
+                self.assertIsInstance(node.func.value, ast.Call,
+                    f"Unsanitized Excel write at line {node.lineno}")
+                self.assertIsInstance(node.func.value.func, ast.Name)
+                self.assertEqual(node.func.value.func.id, "_excel_export_safe_frame",
+                    f"Unsanitized Excel write at line {node.lineno}")
+        self.assertGreaterEqual(len(sinks), 16)
+
     def test_sanitize_only_forbidden_control_characters(self):
         raw = "DCD7771D2-AR\x07 text\x0b tab\t newline\n accentuação"
         value=_excel_export_safe_value(raw)
