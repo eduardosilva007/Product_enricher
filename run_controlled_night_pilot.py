@@ -180,32 +180,21 @@ def outcome_audit(run,state,isolated):
     cohort=pd.read_excel(isolated["files"]["input"],dtype=object,keep_default_na=False)
     final=pd.read_excel(isolated["files"]["final"],dtype=object,keep_default_na=False)
     original=json.loads(Path(state["originals"]).read_text(encoding="utf-8"))
-    original_final=pd.read_excel(original["final"]["path"],dtype=object,keep_default_na=False)
-    def field(df,aliases):return find_col(df,aliases,required=False)
-    def key_rows(df):
-        b=field(df,["Marca","Fabricante","Brand","Manufacturer"])
-        m=field(df,["Modelo","Model","SKU","Part Number"])
-        return {business_key(safe(row[b]),safe(row[m])):row for _,row in df.iterrows()
-                if safe(row[b]) and safe(row[m])}
-    cohort_rows=key_rows(cohort)
-    original_rows=key_rows(original_final)
-    current_rows=key_rows(final)
-    missing=sorted(set(cohort_rows)-set(current_rows))
-    missing_existing=sorted(set(original_rows)-set(current_rows))
-    protected_changes=[]
-    status=field(original_final,["Status"])
-    review=field(original_final,["Revisão B.I","Revisao B.I"])
-    checked_cols=["Category General","FAMILY","Status","Revisão B.I","Revisão"]
-    for k,old in original_rows.items():
-        human=(status and _is_manual_status(old.get(status))) or (
-            review and _is_bi_ok_value(old.get(review)))
-        if not human:continue
-        current=current_rows.get(k)
-        if current is None:protected_changes.append({"key":k,"reason":"missing"})
-        else:
-            changed=[col for col in checked_cols if col in old.index and col in current.index
-                     and safe(old.get(col))!=safe(current.get(col))]
-            if changed:protected_changes.append({"key":k,"columns":changed})
+    # Compare exact Brand+Model human locks, not the last record sharing
+    # a normalized business_key. Structural aliases can share that key.
+    from forensic_protected_diff import examine
+    protected_details, protected_counts, original_rows_count, final_rows_count = examine(run)
+    cohort_b=find_col(cohort,["Marca","Fabricante","Brand","Manufacturer"])
+    cohort_m=find_col(cohort,["Modelo","Model","SKU","Part Number"])
+    final_b=find_col(final,["Marca","Fabricante","Brand","Manufacturer"])
+    final_m=find_col(final,["Modelo","Model","SKU","Part Number"])
+    cohort_keys={business_key(safe(row[cohort_b]),safe(row[cohort_m])) for _,row in cohort.iterrows()}
+    final_keys={business_key(safe(row[final_b]),safe(row[final_m])) for _,row in final.iterrows()}
+    missing=sorted(cohort_keys-final_keys)
+    missing_existing=[]
+    if final_rows_count < original_rows_count:
+        missing_existing=["ROW_COUNT_DECREASED"]
+    protected_changes=protected_details
     raw_states={}
     with closing(TavilyReadOnlyStore(Path(isolated["files"]["cache"]))) as store:
         for k,row in cohort_rows.items():
@@ -226,6 +215,8 @@ def outcome_audit(run,state,isolated):
     result={"status":"PASS" if passed else "FAIL","cohort":len(cohort_rows),
             "missing_cohort_in_final":missing[:20],"missing_original_in_final":missing_existing[:20],
             "protected_manual_or_bi_changes":protected_changes[:20],
+            "protected_changes_total":len(protected_changes),
+            "protected_changes_by_type":protected_counts,
             "cache_states_after":raw_states,"useful_raw_count":useful_raw,
             "log_contracts":log_checks,
             "original_source_modified":protected_originals(state),
