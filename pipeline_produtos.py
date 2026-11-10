@@ -2841,7 +2841,10 @@ def _provider_request_once(
             "data_format": "parsed_light",
         }
         payload = _provider_post_once(provider, url, headers, body, timeout, limiter, budget)
-        results = _normalize_brightdata_results(payload)
+        try:
+            results = _normalize_brightdata_results(payload)
+        except RuntimeError as exc:
+            raise OperationalPause("BRIGHTDATA_SCHEMA", safe(exc)) from exc
         return results, {
             "requests": budget.used,
             "provider_units": 1,
@@ -3521,7 +3524,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                     "Estado Anterior": prior_state, "Collection State": exc.code,
                     "Provider Requests": 1, "Data": now_iso(),
                 })
-                if router and active_slot and (exc.code.endswith("_LIMIT") or exc.code.endswith("_AUTH")):
+                if router and active_slot and (exc.code.endswith("_LIMIT") or exc.code.endswith("_AUTH") or exc.code.endswith("_SCHEMA")):
                     router.disable(active_slot.account, exc.code)
                     LOG.warning("ROUTER | conta desabilitada=%s; segue no próximo SKU", active_slot.account)
                     continue
