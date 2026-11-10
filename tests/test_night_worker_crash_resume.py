@@ -4,6 +4,7 @@ No HTTP calls, no external APIs. Validates the persisted reservation ledger.
 """
 from __future__ import annotations
 import json,sqlite3,sys,tempfile,textwrap,unittest
+from contextlib import closing
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -38,7 +39,7 @@ class CrashRecoveryTests(unittest.TestCase):
             self.assertEqual(state["stages"]["collection"]["exit_code"],87)
             self.assertTrue(run_stage(d,state,"collection",cmd,1))
             self.assertEqual(state["stages"]["collection"]["attempts"],2)
-            with sqlite3.connect(db) as conn:
+            with closing(sqlite3.connect(db)) as conn:
                 total=conn.execute(
                     "SELECT COUNT(*) FROM collection_attempt_reservations"
                 ).fetchone()[0]
