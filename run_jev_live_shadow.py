@@ -33,8 +33,8 @@ def sqlite_snapshot(source:Path,target:Path):
 def live_jev_probe(args):
     if not (1<=args.max_items<=10 and 1<=args.max_calls<=10 and 1000<=args.max_tokens<=50000):
         raise ValueError("Explicit safety caps: 1-10 items, 1-10 HTTP calls, 1000-50000 tokens")
-    if args.pipeline != "pipeline_argentina_piloto.py":
-        raise ValueError("Only the isolated Argentina pilot script is allowed; never call production pipeline_produtos.py")
+    if args.pipeline not in {"pipeline_argentina_piloto.py", "pipeline_argentina_excel_fix.py"}:
+        raise ValueError("Only isolated Argentina pilot scripts are allowed; never call production pipeline_produtos.py")
     if not (ROOT/args.pipeline).is_file():
         raise FileNotFoundError(f"Pilot script not found: {ROOT/args.pipeline}")
     source_config=(ROOT/"pipeline_config.json").resolve()
@@ -128,7 +128,7 @@ def live_jev_probe(args):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pipeline",default="pipeline_argentina_piloto.py")
+    parser.add_argument("--pipeline",default="pipeline_argentina_excel_fix.py")
     parser.add_argument("--input",default="Base de Produtos.xlsx")
     parser.add_argument("--cache",default="piloto_argentina/cache.sqlite")
     parser.add_argument("--master",default="Consolidado Base de Produtos Enriquecida.xlsx")
