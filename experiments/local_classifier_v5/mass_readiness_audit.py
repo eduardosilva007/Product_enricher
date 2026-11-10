@@ -93,6 +93,24 @@ def audit_gold_cache(gold,cache,output):
                 "top3":bt.candidate_recall(y,classes,r,3),
                 "top5":bt.candidate_recall(y,classes,r,5)}
     recovery_rows,recovery=rank_gold_fallback(df,train,test,test_without_title)
+    # Reporting recovery over generic catchall labels inflates practical utility.
+    # Gold labels are read here ONLY for offline metrics, never as model features.
+    catchalls=bt.catchall_labels(cfg)
+    actionable=[r for r in recovery_rows if r["Gold Pair"] not in catchalls]
+    recovery["actionable_tested"]=len(actionable)
+    recovery["actionable_top1"]=(
+        sum(bool(r["Top1 Correct"]) for r in actionable)/len(actionable)
+        if actionable else None
+    )
+    recovery["actionable_top3"]=(
+        sum(bool(r["Top3 Correct"]) for r in actionable)/len(actionable)
+        if actionable else None
+    )
+    recovery["actionable_top5"]=(
+        sum(bool(r["Top5 Correct"]) for r in actionable)/len(actionable)
+        if actionable else None
+    )
+    recovery["catchall_tested"]=len(recovery_rows)-len(actionable)
     by_title={"with_cache_title":cohort(test_with_title),"without_cache_title":cohort(test_without_title)}
     missing=len(test_without_title)
     status={
@@ -105,6 +123,7 @@ def audit_gold_cache(gold,cache,output):
         "test_cache_title_coverage":len(test_with_title)/len(test),
         "stratified_tfidf":by_title,
         "gold_train_only_recovery_on_missing_title":recovery,
+        "gold_recovery_status":"PROXY_COHORT_NOT_REAL_CLASSIFICATION_FAILURES",
         "fallback_note":"Taxonomy Top-K suggestions are NOT product identity, may be wrong, and MUST pass original rules and JEV/Clef review.",
         "readiness_gates":{
             "offline_group_leakage":"PASS",
