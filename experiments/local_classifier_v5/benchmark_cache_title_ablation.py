@@ -188,7 +188,8 @@ def run(args):
     with pd.ExcelWriter(target,engine="openpyxl") as writer:
         pd.DataFrame(out_metrics).to_excel(writer,sheet_name="Summary",index=False)
         pd.DataFrame(rows).to_excel(writer,sheet_name="Predictions",index=False)
-        pd.DataFrame([summary|{"models":""}]).to_excel(writer,sheet_name="Audit",index=False)
+        audit_flat = {k:(json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v) for k,v in summary.items() if k!="models"}
+        pd.DataFrame([audit_flat]).to_excel(writer,sheet_name="Audit",index=False)
     target.with_suffix(".json").write_text(json.dumps(summary,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
     print("RESULTADO:",target)
     return summary
