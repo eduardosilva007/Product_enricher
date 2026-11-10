@@ -8,7 +8,7 @@ from pipeline_produtos import _excel_export_safe_value, export_excel
 
 class ExcelEvidenceExportRegressions(unittest.TestCase):
     def test_sanitize_only_forbidden_control_characters(self):
-        raw = "DCD7771D2-AR\\x07 text\\x0b tab\\t newline\\n accentuação"
+        raw = "DCD7771D2-AR\x07 text\x0b tab\t newline\n accentuação"
         value=_excel_export_safe_value(raw)
         self.assertNotIn("\x07",value)
         self.assertNotIn("\x0b",value)
