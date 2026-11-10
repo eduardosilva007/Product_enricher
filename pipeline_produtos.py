@@ -90,12 +90,15 @@ def now_iso() -> str:
 
 
 def safe(v: Any) -> str:
+    """Normaliza valores escalares vazios, incluindo pandas.NA, sem criar '<NA>'."""
     if v is None:
         return ""
     try:
-        if isinstance(v, float) and v != v:
+        import pandas as pd
+        missing = pd.isna(v)
+        if missing is pd.NA or (isinstance(missing, bool) and missing):
             return ""
-    except Exception:
+    except (TypeError, ValueError, ImportError):
         pass
     return str(v).strip()
 
@@ -436,21 +439,27 @@ class OperationalPause(RuntimeError):
 
 
 class RateLimiter:
-    """Controla rajadas por requests/minute no processo local."""
+    """Agenda slots globais de requests/minute, inclusive entre threads."""
     def __init__(self, requests_per_minute: float):
+        import threading
         rpm = max(0.0, float(requests_per_minute or 0))
         self.interval = (60.0 / rpm) if rpm > 0 else 0.0
-        self._last = 0.0
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
 
     def wait(self) -> float:
         if self.interval <= 0:
             return 0.0
-        now = time.monotonic()
-        remaining = (self._last + self.interval) - now
-        if self._last and remaining > 0:
+        # Reserva um slot sob lock; não segura o lock enquanto dorme.
+        # Todas as threads compartilham o mesmo calendário de requests.
+        with self._lock:
+            now = time.monotonic()
+            slot = max(now, self._next_slot)
+            self._next_slot = slot + self.interval
+            remaining = max(0.0, slot - now)
+        if remaining:
             time.sleep(remaining)
-        self._last = time.monotonic()
-        return max(0.0, remaining)
+        return remaining
 
 
 def classify_api_error(exc: Exception) -> str:
@@ -1116,7 +1125,7 @@ def read_input_rows(path: Path) -> List[InputProductRow]:
 
     import pandas as pd
     if path.suffix.casefold() in {".xlsx", ".xlsm", ".xls"}:
-        df = pd.read_excel(path, dtype=object)
+        df = pd.read_excel(path, dtype=object, keep_default_na=False)
     elif path.suffix.casefold() == ".csv":
         df = pd.read_csv(path, dtype=object, sep=None, engine="python")
     else:
@@ -1129,7 +1138,7 @@ def read_input_rows(path: Path) -> List[InputProductRow]:
     for idx, row in df.iterrows():
         brand = safe(row[b])
         model = safe(row[m])
-        valid = bool(brand and model)
+        valid = bool(brand and model and model.strip().upper() not in {"N/A", "NA", "NULL", "NONE", "NAN"})
         key = business_key(brand, model) if valid else ""
         out.append(
             InputProductRow(
@@ -1158,8 +1167,13 @@ def build_precollection_plan(
     recollect_low_evidence: bool = False,
     cfg: Optional[Dict[str, Any]] = None,
     max_tavily_new: int = 0,
+    preserve_keys: Optional[set] = None,
 ) -> PreCollectionPlan:
-    """Normaliza/deduplica/cruza cache. NÃO consulta Tavily."""
+    """Normaliza/deduplica/cruza cache sem rede.
+
+    Recoleta somente quando solicitada explicitamente; cada execução mantém
+    o contrato preexistente de uma request por produto e arquivo de entrada.
+    """
     rows = read_input_rows(input_path)
 
     groups: Dict[str, List[InputProductRow]] = defaultdict(list)
@@ -1167,6 +1181,7 @@ def build_precollection_plan(
         if row.valid:
             groups[row.key].append(row)
 
+    protected = set(preserve_keys or ())
     representatives: List[InputProductRow] = []
     for _, grp in groups.items():
         total = len(grp)
@@ -1202,21 +1217,35 @@ def build_precollection_plan(
                     rep.action = "JA_NO_CACHE"
                     rep.reason = raw.reason or "RAW Tavily já disponível"
             elif raw.state == "RAW_EMPTY":
+                collection = (raw.payload or {}).get("_collection") if isinstance(raw.payload, dict) else {}
+                collection = collection if isinstance(collection, dict) else {}
+                prior_status = safe(collection.get("state")).upper()
+                prior_error = safe(collection.get("error"))
+                search_meta = (raw.payload or {}).get("_search_meta") if isinstance(raw.payload, dict) else {}
+                search_meta = search_meta if isinstance(search_meta, dict) else {}
+                is_error = (prior_status in {"REQUEST_ATTEMPTED_NO_AUTO_RETRY", "REQUEST_ERROR"}
+                            or bool(prior_error) or bool(safe(search_meta.get("error"))))
                 if recollect_empty:
                     rep.action = "RECOLETAR"
-                    rep.reason = "RAW vazio e --recollect-empty habilitado"
+                    rep.reason = ("Erro de provider registrado no RAW anterior"
+                                  if is_error else "RAW verdadeiramente sem resultados")
                 else:
-                    rep.action = "RAW_EMPTY_PULADO"
-                    rep.reason = "RAW vazio preservado; use --recollect-empty para nova consulta"
+                    rep.action = "RAW_ERROR_PULADO" if is_error else "RAW_EMPTY_PULADO"
+                    rep.reason = ("Erro operacional de Search; recoleta exige --recollect-empty"
+                                  if is_error else "RAW vazio preservado; use --recollect-empty para nova consulta")
             elif raw.state == "RAW_CORRUPT":
-                rep.action = "RECOLETAR"
-                rep.reason = "RAW corrompido"
+                rep.action = "REVISAR_PRECOLETA"
+                rep.reason = "RAW corrompido; nao gastar nova request sem auditoria"
             elif raw.state == "RAW_MISSING":
                 rep.action = "NOVA_COLETA"
                 rep.reason = "business_key não encontrada no cache"
             else:
                 rep.action = "REVISAR_PRECOLETA"
                 rep.reason = f"Estado RAW inesperado: {raw.state}"
+
+            if rep.key in protected and rep.action in {"RECOLETAR", "RECOLETAR_LOW_EVIDENCE"}:
+                rep.action = "CLASSIFICADO_PRESERVADO"
+                rep.reason = "SKU classificado ou revisado; não sobrescrever a coleta existente"
 
         rep_by_key = {r.key: r for r in representatives}
         for row in rows:
@@ -1257,8 +1286,10 @@ def build_precollection_plan(
         "RAW_CORRUPT": raw_counts["RAW_CORRUPT"],
         "RAW_MISSING": raw_counts["RAW_MISSING"],
         "Já no cache": action_counts["JA_NO_CACHE"],
+        "Classificados preservados na recoleta": action_counts["CLASSIFICADO_PRESERVADO"],
         "Recoleta LOW_TARGET_EVIDENCE": action_counts["RECOLETAR_LOW_EVIDENCE"],
         "RAW vazio pulado": action_counts["RAW_EMPTY_PULADO"],
+        "Erros Search pulados": action_counts["RAW_ERROR_PULADO"],
         "Fila real Tavily antes do limite": len(candidates_all),
         "Fila Tavily desta execução": len(candidates),
         "Business key": "AGRESSIVA_ESTRUTURAL_SEM_FUZZY",
@@ -1883,9 +1914,9 @@ def validate_collection_cost_policy(cfg: Dict[str, Any]) -> List[str]:
 
 def _provider_credentials(provider: str, cfg: Dict[str, Any]) -> Dict[str, str]:
     pcfg = _provider_cfg(cfg, provider)
-    active = cfg.get("_active_search_slot") or {}
-    if active and active.get("provider") == provider:
-        pcfg = {**pcfg, "api_key_env": active["key_env"], "zone_env": active.get("zone_env", "")}
+    active_slot = cfg.get("_active_search_slot") or {}
+    if active_slot.get("provider") == provider:
+        pcfg = {**pcfg, "api_key_env": active_slot["key_env"], "zone_env": active_slot.get("zone_env", "")}
     if provider == "tavily":
         key_env = safe(pcfg.get("api_key_env")) or "TAVILY_API_KEY"
         api_key = os.getenv(key_env, "").strip()
@@ -3264,15 +3295,20 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     pre_report = Path(args.precollection_output or cfg.get("files", {}).get("precollection_report", "Pre_Coleta_R9_6.xlsx"))
     report_path = Path(cfg.get("files", {}).get("collection_report", "Coleta_Search_R9_6.xlsx"))
 
+    files_cfg = cfg.get("files", {}) or {}
+    master = Path(args.master or files_cfg.get("master", "")) if (args.master or files_cfg.get("master")) else None
+    final = Path(args.final or files_cfg.get("final", "")) if (args.final or files_cfg.get("final")) else None
+    protected_keys = load_baseline_inventory(master, final)["processed"]
     plan = build_precollection_plan(
         input_path=input_path, cache_path=cache_path, report_path=pre_report,
         recollect_empty=bool(args.recollect_empty), recollect_low_evidence=bool(args.recollect_low_evidence),
         cfg=cfg, max_tavily_new=int(args.max_tavily_new or 0),
+        preserve_keys=protected_keys,
     )
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
-    router = None
-    if auto_route and candidates:
-        router = DurableRouter(db_path, configured_slots())
+    slots = configured_slots() if auto_route and candidates else []
+    if auto_route and candidates and not slots:
+        raise RuntimeError("AUTO_PROVIDERS: configure ao menos um *_LIMIT_1 positivo e credencial no .env")
 
     print()
     print("=" * 86)
@@ -3312,6 +3348,8 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
 
     pcfg = _provider_cfg(cfg, provider)
     limiter = RateLimiter(float(pcfg.get("requests_per_minute", 30) or 30))
+    limiters = {p: RateLimiter(float(_provider_cfg(cfg,p).get("requests_per_minute",30) or 30)) for p in ("tavily","brightdata","serper")} if auto_route else {}
+    router = DurableRouter(db_path, slots) if auto_route else None
     db = ClassificationDB(db_path)
     run_id = db.start_run("collect", rules.hash, f"SEARCH_{COLLECTION_LABEL}:{provider}")
     writer = TavilyWritableStore(cache_path)  # nome legado; payload agora registra provider explicitamente
@@ -3325,18 +3363,21 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             key = business_key(brand, model)
             active_slot = None
             if router:
-                # Reservation committed before any HTTP call. No automatic retry on failures.
                 active_slot = router.reserve(key)
                 if active_slot is None:
-                    if router.choose(key) is None:
-                        LOG.warning("ROUTER | indisponível/bloqueado para %s | nenhuma nova request", key)
-                    continue
+                    # A SKU já reservada não pode ser solicitada novamente.
+                    if router.already_reserved(key):
+                        LOG.warning("ROUTER | SKU já tentado em execução anterior; sem retry | %s", key)
+                        continue
+                    LOG.error("ROUTER | esgotaram as cotas disponíveis no produto %d/%d", idx, len(candidates))
+                    completed = False
+                    break
                 provider = active_slot.provider
                 cfg["_active_search_slot"] = {
                     "provider": provider, "key_env": active_slot.key_env,
                     "zone_env": active_slot.zone_env,
                 }
-                limiter = RateLimiter(float(_provider_cfg(cfg, provider).get("requests_per_minute", 30) or 30))
+                limiter = limiters[provider]
                 LOG.info("ROUTER | produto=%d/%d provider=%s conta=%s", idx, len(candidates), provider, active_slot.account)
             try:
                 payload = search_product_once(brand, model, cfg, limiter, provider)
@@ -3349,16 +3390,24 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                     )
                 total_requests += req_count
                 state = safe(coll.get("state")) or "NO_TARGET_EVIDENCE"
-                writer.put(
-                    brand, model, payload,
-                    archive_reason=(
-                        f"RECOLLECT_{provider.upper()}_{COLLECTION_LABEL}"
-                        if prior_state in {"RAW_OK", "RAW_OK_MERGED"}
-                        else f"COLLECT_{provider.upper()}_{COLLECTION_LABEL}"
-                    ),
-                )
                 curated = coll.get("curated_results", []) or []
                 raw_n = len(payload.get("results", []) or [])
+                # Nunca substituir RAW com fontes por uma recoleta que retornou zero.
+                preserve_previous = prior_state in {"RAW_OK", "RAW_OK_MERGED"} and raw_n == 0
+                if preserve_previous:
+                    state = "RECOLLECTION_EMPTY_PREVIOUS_PRESERVED"
+                    db.event(run_id, key, "RECOLLECTION_EMPTY_OLD_CACHE_PRESERVED",
+                             f"provider={provider}; new_raw=0; previous={prior_state}")
+                    LOG.warning("RECOLETA VAZIA: preservando cache anterior de %s %s", brand, model)
+                else:
+                    writer.put(
+                        brand, model, payload,
+                        archive_reason=(
+                            f"RECOLLECT_{provider.upper()}_{COLLECTION_LABEL}"
+                            if prior_state in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}
+                            else f"COLLECT_{provider.upper()}_{COLLECTION_LABEL}"
+                        ),
+                    )
                 reported_credits = usage.get("reported_credits")
                 product_rows.append({
                     "Marca": brand, "Modelo": model, "Search Model": safe(coll.get("search_model")),
@@ -3406,8 +3455,12 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 break
             except OperationalPause as exc:
                 db.event(run_id, key, exc.code, safe(exc))
+                # Falha depois da tentativa fica auditada, sem apagar cache útil prévio.
                 failure = _failed_collection_payload(brand, model, provider, cfg, exc.code, safe(exc))
-                writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_HTTP_PAUSE")
+                if prior_state in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
+                    db.event(run_id, key, "RECOLLECTION_ERROR_OLD_CACHE_PRESERVED", safe(exc))
+                else:
+                    writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_HTTP_PAUSE")
                 total_requests += 1
                 product_rows.append({
                     "Marca": brand, "Modelo": model, "Provider": provider,
@@ -3416,7 +3469,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 })
                 if router and active_slot and (exc.code.endswith("_LIMIT") or exc.code.endswith("_AUTH")):
                     router.disable(active_slot.account, exc.code)
-                    LOG.warning("ROUTER | conta=%s desabilitada; próximo produto usará outra conta", active_slot.account)
+                    LOG.warning("ROUTER | conta desabilitada=%s; segue no próximo SKU", active_slot.account)
                     continue
                 LOG.error("%s. Coleta pausada; tudo salvo até aqui permanece persistido.", exc)
                 completed = False
@@ -3427,7 +3480,11 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 failure = _failed_collection_payload(
                     brand, model, provider, cfg, "REQUEST_ATTEMPTED_NO_AUTO_RETRY", safe(exc)
                 )
-                writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_REQUEST_ERROR_{COLLECTION_LABEL}")
+                if prior_state in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
+                    # Uma falha de recoleta não pode substituir material já existente.
+                    db.event(run_id, key, "RECOLLECTION_ERROR_OLD_CACHE_PRESERVED", safe(exc))
+                else:
+                    writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_REQUEST_ERROR_{COLLECTION_LABEL}")
                 total_requests += 1
                 db.event(run_id, key, f"SEARCH_{COLLECTION_LABEL}_ERROR_NO_RETRY", safe(exc))
                 product_rows.append({
@@ -3504,10 +3561,21 @@ def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], r
             if raw.state not in {"RAW_OK", "RAW_OK_MERGED"} or not raw.payload:
                 continue
             existing = raw.payload.get("_collection") if isinstance(raw.payload, dict) else None
-            if isinstance(existing, dict) and safe(existing.get("version")) == safe((_collection_policy(cfg)).get("VERSION")):
+            if (not bool(getattr(args, "force_curate", False)) and isinstance(existing, dict)
+                    and safe(existing.get("version")) == safe((_collection_policy(cfg)).get("VERSION"))):
                 continue
             rebuilt = _curate_existing_payload(brand, model, raw.payload, cfg)
             coll = rebuilt.get("_collection", {}) or {}
+            old_curated = len((existing or {}).get("curated_results", []) or []) if isinstance(existing, dict) else 0
+            new_curated = len(coll.get("curated_results", []) or [])
+            old_quality = (existing or {}).get("evidence_cache_quality", {}) if isinstance(existing, dict) else {}
+            new_quality = coll.get("evidence_cache_quality", {}) or {}
+            old_chars = int((old_quality or {}).get("evidence_chars_total", 0) or 0)
+            new_chars = int((new_quality or {}).get("evidence_chars_total", 0) or 0)
+            if new_curated < old_curated or (new_curated == old_curated and new_chars < old_chars):
+                LOG.warning("CURADORIA SEM GRAVAR | %s %s | fonte(s) %d->%d | evidencia %d->%d caracteres",
+                            brand, model, old_curated, new_curated, old_chars, new_chars)
+                continue
             writer.put(brand, model, rebuilt, archive_reason="CACHE_CURATED_R9_6P7_2_NO_SEARCH")
             products.append({
                 "Marca": brand, "Modelo": model, "Search Model": coll.get("search_model"),
@@ -4312,11 +4380,13 @@ class DeterministicEngine:
         else:
             reasons.append("POWER_UNRESOLVED")
 
-        # Se a taxonomia do TYPE independe de alimentação, UNKNOWN é uma decisão
-        # válida e não motivo para chamar Clef.
+        # Conflito explícito de alimentação exige adjudicação; não aprovar UNKNOWN.
         if product_type and power is None and not self._type_requires_specific_power(product_type):
-            power = "UNKNOWN"
-            reasons.append("POWER_UNKNOWN_ALLOWED_BY_TAXONOMY")
+            if len(power_candidates) > 1:
+                reasons.append("POWER_CONFLICT_REQUIRES_ADJUDICATION")
+            else:
+                power = "UNKNOWN"
+                reasons.append("POWER_UNKNOWN_ALLOWED_BY_TAXONOMY")
 
         if product_type:
             tax_evidence = taxonomy_evidence_text(sources, product_type)
@@ -4326,7 +4396,11 @@ class DeterministicEngine:
         else:
             cg, fam, tax_reason = "", "", ""
 
-        if product_type and power is not None and (cg, fam) in self.rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS"):
+        if (product_type and power is not None and len(power_candidates) <= 1
+                and (cg, fam) in self.rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS")
+                # Generic WATERPUMP fallback proves a broad type, not the commercial FAMILY.
+                # Route to JEV with evidence rather than silently auto-resolving.
+                and not (product_type == "WATERPUMP" and tax_reason == "TYPE_FALLBACK_PAIR")):
             state = "RESOLVED_RULE"
         elif type_candidates:
             state = "AMBIGUOUS"
@@ -4364,53 +4438,74 @@ class DeterministicEngine:
         )
 
 
-def _combo_kit_components(rules: Rules, s1: Stage1Result) -> List[str]:
-    """Retorna componentes de um POWER TOOL COMBO KIT explicitamente comprovado.
+def _collapse_related_primary_types(rules: Rules, types: Sequence[str]) -> List[str]:
+    """Colapsa aliases/específico-genérico para não confundir um produto multifunção com combo."""
+    current = {safe(t) for t in types if safe(t)}
+    if len(current) < 2:
+        return sorted(current)
+    for group in (rules.specificity_groups or []):
+        present = [safe(t) for t in group if safe(t) in current]
+        if len(present) < 2:
+            continue
+        winner = max(present, key=lambda t: rules.specificity_rank.get(t, 0))
+        for t in present:
+            if t != winner:
+                current.discard(t)
+    generic = {"CUTTER", "MULTI-TOOL", "DRILL", "DRILLER", "SCREWDRIVER"}
+    specific = current - generic
+    if specific:
+        current -= {t for t in generic if t in current}
+    return sorted(current)
 
-    Não usa apenas a palavra 'kit': exige sinal de combo no texto target e pelo
-    menos DOIS tipos físicos elegíveis explicitamente sustentados no mesmo alvo.
-    Assim drill+bateria+carregador continua sendo DRILL, não combo kit.
+
+def _combo_kit_components(rules: Rules, s1: Stage1Result) -> List[str]:
+    """Retorna produtos físicos distintos do mesmo SKU que devem virar COMBO KIT.
+
+    Bateria/carregador/acessório/peça não contam como produto principal. Relações
+    específico-genérico e aliases são colapsadas antes da decisão. Se uma fonte
+    STRONG do próprio SKU sustenta dois ou mais produtos principais distintos no
+    TITLE/BODY, o SKU é tratado como combo mesmo sem a palavra literal "kit".
     """
     policy = rules.raw.get("COMBO_KIT_POLICY", {}) or {}
     if not bool(policy.get("enabled", True)):
         return []
     eligible = {safe(x) for x in (policy.get("eligible_primary_types", []) or []) if safe(x)}
-    combo_terms = [safe(x) for x in (policy.get("combo_terms", []) or []) if safe(x)]
+    min_types = int(policy.get("min_distinct_primary_types", 2) or 2)
     rank = DeterministicEngine.IDENTITY_RANK
-    target_sources = [s for s in s1.sources if rank.get(s.relevance, 0) >= rank.get("STRONG", 4)]
+    target_sources = [src for src in s1.sources if rank.get(src.relevance, 0) >= rank.get("STRONG", 4)]
     for src in target_sources:
-        folded = norm_text(f"{src.title}\n{src.content[:1200]}")
-        if not any(contains_alias_prepared(folded, term) for term in combo_terms):
-            continue
         explicit = {
             t for t in s1.type_candidates
             if t in eligible
+            and t not in rules.component_types
             and float(src.type_scores.get(t, 0.0) or 0.0) > 0.0
-            and ("TITLE" in (src.type_evidence_fields.get(t, []) or []) or "BODY" in (src.type_evidence_fields.get(t, []) or []))
+            and ("TITLE" in (src.type_evidence_fields.get(t, []) or [])
+                 or "BODY" in (src.type_evidence_fields.get(t, []) or []))
         }
-        if len(explicit) >= int(policy.get("min_distinct_primary_types", 2) or 2):
-            return sorted(explicit)
+        distinct = _collapse_related_primary_types(rules, explicit)
+        if len(distinct) >= min_types:
+            return distinct
     return []
 
 
 def choose_combo_title(rules: Rules, s1: Stage1Result) -> Tuple[str, str]:
-    """Título da própria fonte STRONG que comprovou o combo multi-tool."""
+    """Título da fonte STRONG que sustenta dois ou mais produtos físicos do mesmo SKU."""
     policy = rules.raw.get("COMBO_KIT_POLICY", {}) or {}
     eligible = {safe(x) for x in (policy.get("eligible_primary_types", []) or []) if safe(x)}
-    combo_terms = [safe(x) for x in (policy.get("combo_terms", []) or []) if safe(x)]
     min_types = int(policy.get("min_distinct_primary_types", 2) or 2)
     candidates: List[Source] = []
     for src in s1.sources:
         if src.relevance != "STRONG":
             continue
-        folded = norm_text(f"{src.title}\n{src.content[:1200]}")
-        if not any(contains_alias_prepared(folded, term) for term in combo_terms):
-            continue
         explicit = {
             t for t in s1.type_candidates
-            if t in eligible and float(src.type_scores.get(t, 0.0) or 0.0) > 0.0
+            if t in eligible
+            and t not in rules.component_types
+            and float(src.type_scores.get(t, 0.0) or 0.0) > 0.0
+            and ("TITLE" in (src.type_evidence_fields.get(t, []) or [])
+                 or "BODY" in (src.type_evidence_fields.get(t, []) or []))
         }
-        if len(explicit) >= min_types:
+        if len(_collapse_related_primary_types(rules, explicit)) >= min_types:
             candidates.append(src)
     if not candidates:
         return "", ""
@@ -4426,7 +4521,7 @@ def choose_combo_title(rules: Rules, s1: Stage1Result) -> Tuple[str, str]:
 
 
 def multi_product_target_detected(rules: Rules, s1: Stage1Result) -> bool:
-    """Detecta múltiplos produtos, exceto combo kit explicitamente modelado."""
+    """Mantido como gate de segurança; combos reais são resolvidos antes deste ponto."""
     if _combo_kit_components(rules, s1):
         return False
     rank = DeterministicEngine.IDENTITY_RANK
@@ -4654,9 +4749,21 @@ class ClassificationDB:
         if not row:
             return None
         try:
-            return json.loads(row[0])
-        except Exception:
+            result = json.loads(row[0])
+        except (TypeError, ValueError):
             return None
+        # Only terminal, complete results may skip classification.
+        # REVIEW and unresolved checkpoints remain stored for audit.
+        if not isinstance(result, dict):
+            return None
+        resolution = safe(result.get("Resolution State")).upper()
+        if resolution not in {"RESOLVED", "CLASSIFIED_CLEF"}:
+            return None
+        if not all(safe(result.get(col)) for col in ("O que é (Tipo)", "Category General", "FAMILY", "Título Real")):
+            return None
+        if safe(result.get("O que é (Tipo)")).upper() in {"REVISAR", "UNKNOWN"}:
+            return None
+        return result
 
 
     def put_checkpoint(self, key: str, brand: str, model: str, raw_hash: str, rules_hash: str, result: Dict[str, Any], llm_model: str) -> None:
@@ -4786,6 +4893,14 @@ def _clef_preflight_rejection_reason(rules: Rules, s1: Stage1Result) -> str:
     return ""
 
 
+def _jev_endpoint(base_url: str) -> str:
+    """Normalize the native TypeSafe endpoint without duplicating its path."""
+    base = safe(base_url).strip().rstrip("/") or "https://api.typesafe.ai"
+    if not base.startswith("https://"):
+        raise ValueError("JEV_BASE_URL_INVALID: HTTPS required")
+    return base if base.endswith("/v1/systemone") else base + "/v1/systemone"
+
+
 class ClefFunnelClassifier:
     """Funil semântico local + decisão estruturada Cloudflare Clef.
 
@@ -4811,13 +4926,15 @@ class ClefFunnelClassifier:
         self.rules = rules
         self.cfg = cfg
         self.db = db
-        self.provider = "clef"
+        self.provider = safe(provider).lower() or "clef"
+        if self.provider not in {"clef", "jev"}:
+            raise ValueError(f"Provedor de classificação inválido: {self.provider}")
         self.model = safe(model) or DEFAULT_CLEF_MODEL
-        self.ccfg = cfg.get("clef", {}) or {}
+        self.ccfg = cfg.get(self.provider, {}) or {}
         self.fcfg = cfg.get("semantic_funnel", {}) or {}
 
         self.account_id_env = safe(self.ccfg.get("account_id_env")) or "CLOUDFLARE_ACCOUNT_ID"
-        self.api_key_env = safe(self.ccfg.get("api_token_env")) or "CLOUDFLARE_API_TOKEN"
+        self.api_key_env = (safe(self.ccfg.get("api_key_env")) or "TYPESAFE_API_KEY") if self.provider == "jev" else (safe(self.ccfg.get("api_token_env")) or "CLOUDFLARE_API_TOKEN")
         self.operational_requests_per_minute = float(
             self.ccfg.get("operational_requests_per_minute", 10.0) or 10.0
         )
@@ -4829,6 +4946,7 @@ class ClefFunnelClassifier:
         ]
         self.max_calls_per_run = max(0, int(self.ccfg.get("max_api_calls_per_run", 0) or 0))
         self.max_total_tokens_per_run = max(0, int(self.ccfg.get("max_total_tokens_per_run", 0) or 0))
+        self.transport_attempts = 0
 
         # Atributos mantidos para compatibilidade com o formato de execução/cache existente.
         self.max_output_tokens = 0
@@ -4891,15 +5009,14 @@ class ClefFunnelClassifier:
 
         account_id = os.getenv(self.account_id_env, "").strip()
         slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
-        self.base_url = (
+        self.base_url = _jev_endpoint(safe(self.ccfg.get("base_url"))) if self.provider == "jev" else (
             f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
-            if account_id else
-            f"https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/{slug}"
+            if account_id else f"https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/{slug}"
         )
 
     def route_identity_fragment(self) -> str:
         return (
-            f"clef:{self.model}+prompt:{PROMPT_VERSION}+embed:{self.embedding_model_name}"
+            f"{self.provider}:{self.model}+prompt:{PROMPT_VERSION}+embed:{self.embedding_model_name}"
             f"+rerank:{self.reranker_model_name}"
             f"+rt:{int(self.rerank_types)}+rx:{self.rerank_max_length}"
             f"+tp:{self.type_pool_k}+xp:{self.taxonomy_pool_k}"
@@ -4917,14 +5034,14 @@ class ClefFunnelClassifier:
                 "CLEF_FUNNEL_DEPENDENCY_MISSING",
                 "Dependências ausentes: " + ", ".join(missing),
             )
-        if not os.getenv(self.account_id_env, "").strip():
+        if self.provider == "clef" and not os.getenv(self.account_id_env, "").strip():
             raise OperationalPause(
                 "CLEF_ACCOUNT_ID_MISSING",
                 f"{self.account_id_env} não configurada no .env.",
             )
         if not os.getenv(self.api_key_env, "").strip():
-            # Compatibilidade com o nome legado já usado nos testes.
-            fallback = os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
+            # Compatibilidade com o nome legado somente para Cloudflare.
+            fallback = os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip() if self.provider == "clef" else ""
             if not fallback:
                 raise OperationalPause(
                     "CLEF_API_TOKEN_MISSING",
@@ -4943,7 +5060,8 @@ class ClefFunnelClassifier:
 
         account_id = os.getenv(self.account_id_env, "").strip()
         slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
-        self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
+        if self.provider == "clef":
+            self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
         return {
             "provider": self.provider,
             "model": self.model,
@@ -5497,15 +5615,22 @@ class ClefFunnelClassifier:
             pass
         import requests
 
-        token = os.getenv(self.api_key_env, "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
-        account_id = os.getenv(self.account_id_env, "").strip()
-        slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
-        url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
+        token = os.getenv(self.api_key_env, "").strip()
+        if self.provider == "jev":
+            url = self.base_url
+        else:
+            token = token or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
+            account_id = os.getenv(self.account_id_env, "").strip()
+            slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
+            url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
         transient = {429, 500, 502, 503, 504}
         body: Dict[str, Any] = {}
         last_detail = ""
         self.api_calls += 1
         for attempt in range(self.retry_attempts):
+            if self.max_calls_per_run and self.transport_attempts >= self.max_calls_per_run:
+                raise OperationalPause("CLEF_HTTP_CAP", "Teto HTTP atingido, inclusive retries/reparos.")
+            self.transport_attempts += 1
             self.limiter.wait()
             try:
                 resp = requests.post(
@@ -5536,7 +5661,7 @@ class ClefFunnelClassifier:
         else:
             raise OperationalPause("CLEF_TRANSIENT", last_detail or "Falha desconhecida Clef")
 
-        result = body.get("result") or {}
+        result = body if self.provider == "jev" else (body.get("result") or {})
         answers = result.get("answers") or {}
         type_ans = self._parse_choice(answers, "product_type")
         power_ans = self._parse_choice(answers, "power_source")
@@ -5560,7 +5685,7 @@ class ClefFunnelClassifier:
             "family": fam if valid_pair else "",
             "evidence_source_ids": sem["refs"],
             "reason_short": (
-                f"Clef structured choice; type={type_choice or 'NONE'}; taxonomy={tax_choice or 'NONE'}"
+                f"{self.provider.upper()} structured choice; type={type_choice or 'NONE'}; taxonomy={tax_choice or 'NONE'}"
             ),
         }
 
@@ -5626,7 +5751,7 @@ class ClefFunnelClassifier:
         recebe somente combinações TYPE + Category|FAMILY que já são válidas no
         regras_negocio.json e escolhe uma opção conjunta coerente.
         """
-        repair_cfg = (self.cfg.get("clef", {}) or {}).get("repair", {}) or {}
+        repair_cfg = (self.cfg.get(self.provider, {}) or {}).get("repair", (self.cfg.get("clef", {}) or {}).get("repair", {})) or {}
         if not bool(repair_cfg.get("enabled", True)):
             return {"decision": "INSUFFICIENT_EVIDENCE"}, False, {"clef_repair": False}
 
@@ -5719,16 +5844,23 @@ class ClefFunnelClassifier:
             pass
         import requests
 
-        token = os.getenv(self.api_key_env, "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
-        account_id = os.getenv(self.account_id_env, "").strip()
-        slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
-        url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
+        token = os.getenv(self.api_key_env, "").strip()
+        if self.provider == "jev":
+            url = self.base_url
+        else:
+            token = token or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
+            account_id = os.getenv(self.account_id_env, "").strip()
+            slug = "@cf/cloudflare/clef-flash" if self.model == "clef-flash" else "@cf/cloudflare/clef"
+            url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{slug}"
         transient = {429, 500, 502, 503, 504}
         body: Dict[str, Any] = {}
         last_detail = ""
         self.api_calls += 1
         self.repair_calls += 1
         for attempt in range(self.retry_attempts):
+            if self.max_calls_per_run and self.transport_attempts >= self.max_calls_per_run:
+                raise OperationalPause("CLEF_HTTP_CAP", "Teto HTTP atingido, inclusive retries/reparos.")
+            self.transport_attempts += 1
             self.limiter.wait()
             try:
                 resp = requests.post(
@@ -5759,7 +5891,7 @@ class ClefFunnelClassifier:
         else:
             raise OperationalPause("CLEF_TRANSIENT", last_detail or "Falha desconhecida Clef repair")
 
-        result = body.get("result") or {}
+        result = body if self.provider == "jev" else (body.get("result") or {})
         answers = result.get("answers") or {}
         joint_ans = self._parse_choice(answers, "joint_classification")
         joint_choice = safe(joint_ans.get("choice"))
@@ -5784,7 +5916,7 @@ class ClefFunnelClassifier:
             "family": fam if resolved else "",
             "evidence_source_ids": refs,
             "reason_short": (
-                f"Clef joint repair; previous={initial_type} + {initial_pair}; choice={joint_choice or 'NONE'}"
+                f"{self.provider.upper()} joint repair; previous={initial_type} + {initial_pair}; choice={joint_choice or 'NONE'}"
             ),
         }
         usage_raw = result.get("usage") or {}
@@ -5952,7 +6084,7 @@ def taxonomy_consensus_for_review(
 def record_for_raw_state(raw: RawEvidence) -> Dict[str, Any]:
     status_map = {
         "RAW_MISSING": ("PENDING_COLLECTION", "Produto ausente do cache Search"),
-        "RAW_EMPTY": ("PENDING_RECOLLECTION", "Consulta Search existe, mas não retornou resultados"),
+        "RAW_EMPTY": ("REVIEW_NO_RESULTS", "Consulta Search realizada sem resultados; revisão sem recoleta automática"),
         "RAW_CORRUPT": ("CACHE_ERROR", "RAW Search corrompido"),
         "RAW_COLLISION": ("CACHE_COLLISION", "Colisão de chave de negócio"),
     }
@@ -6138,9 +6270,9 @@ def finalize_product(
     elif not s1.type_candidates and ref_identity in {"STRONG", "PROBABLE"}:
         next_action = "JSON_GAP_OU_CLEF_GAP"
     elif not s1.type_candidates and raw_result_count:
-        next_action = "RECOLETAR_EVIDENCIA_TARGET"
+        next_action = "REVISAR_EVIDENCIA_CACHE"
     elif not s1.type_candidates:
-        next_action = "NOVA_COLETA"
+        next_action = "REVISAR_EVIDENCIA_CACHE"
     elif consensus_cg and consensus_fam:
         next_action = "TYPE_REVIEW_FAMILY_JA_DEFINIDA"
     else:
@@ -6199,7 +6331,7 @@ def finalize_product(
             "Auto Eligible": "SIM",
             "Double Check Priority": "BAIXA",
             "Reason Code": "POWER_TOOL_COMBO_KIT",
-            "Motivo": f"Combo kit explícito com múltiplas ferramentas principais: {', '.join(combo_components)} | {tax_reason}",
+            "Motivo": f"Mesmo SKU contém múltiplos produtos físicos principais: {', '.join(combo_components)} | {tax_reason}",
             "Clef Provider": "",
             "Clef Model": "",
             "Clef Cache": "",
@@ -6258,13 +6390,13 @@ def finalize_product(
                 "MULTI_PRODUCT_TARGET":
                     "Clef não chamado: evidência target descreve múltiplos produtos físicos sem combo explicitamente modelado.",
                 "NO_TARGET_EVIDENCE":
-                    "Clef/BGE não chamados: cache curado sem evidência target e sem title-rescue seguro; item direcionado à nova coleta.",
+                    "Clef/BGE não chamados: cache curado sem evidência target e sem title-rescue seguro; item direcionado à revisão das fontes existentes.",
             }.get(clef_preflight, "Clef bloqueado pelo gate de identidade.")
             return {
                 **common,
-                "Próxima Ação": "RECOLETA_DIRIGIDA",
-                "Resolution State": "NEEDS_RECOLLECTION",
-                "Classification Outcome": "NEEDS_RECOLLECTION",
+                "Próxima Ação": "REVISAR_EVIDENCIA_CACHE",
+                "Resolution State": "REVIEW_CACHE_EVIDENCE",
+                "Classification Outcome": "REVIEW_CACHE_EVIDENCE",
                 "Stage": "COLLECTION_GATE",
                 "O que é (Tipo)": s1.product_type or "REVISAR",
                 "Alimentação": s1.power or "UNKNOWN",
@@ -6272,9 +6404,9 @@ def finalize_product(
                 "FAMILY": consensus_fam,
                 "Título Real": title,
                 "Fonte URL": url,
-                "Review Required": "NÃO",
+                "Review Required": "SIM",
                 "Auto Eligible": "NÃO",
-                "Double Check Priority": "AGUARDAR_RECOLETA",
+                "Double Check Priority": "ALTA",
                 "Reason Code": clef_preflight,
                 "Motivo": reason_text + " Nenhuma segunda consulta automática foi executada.",
                 "Clef Provider": "",
@@ -6292,9 +6424,9 @@ def finalize_product(
                 title, url = _output_title(*choose_title(s1.sources, []))
                 return {
                     **common,
-                    "Próxima Ação": "RECOLETA_DIRIGIDA",
-                    "Resolution State": "NEEDS_RECOLLECTION",
-                    "Classification Outcome": "NEEDS_RECOLLECTION",
+                    "Próxima Ação": "REVISAR_EVIDENCIA_CACHE",
+                    "Resolution State": "REVIEW_CACHE_EVIDENCE",
+                    "Classification Outcome": "REVIEW_CACHE_EVIDENCE",
                     "Stage": "SEMANTIC_FUNNEL_EMPTY",
                     "O que é (Tipo)": s1.product_type or "REVISAR",
                     "Alimentação": s1.power or "UNKNOWN",
@@ -6302,9 +6434,9 @@ def finalize_product(
                     "FAMILY": consensus_fam,
                     "Título Real": title,
                     "Fonte URL": url,
-                    "Review Required": "NÃO",
+                    "Review Required": "SIM",
                     "Auto Eligible": "NÃO",
-                    "Double Check Priority": "AGUARDAR_RECOLETA",
+                    "Double Check Priority": "ALTA",
                     "Reason Code": exc.code,
                     "Motivo": f"{safe(exc)} Nenhuma segunda consulta automática foi executada.",
                     "Clef Provider": "",
@@ -6411,9 +6543,9 @@ def finalize_product(
                 return {
                     **base_clef,
                     "Raw State": "RAW_OK",
-                    "Próxima Ação": "RECOLETA_DIRIGIDA",
-                    "Resolution State": "NEEDS_RECOLLECTION",
-                    "Classification Outcome": "NEEDS_RECOLLECTION",
+                    "Próxima Ação": "REVISAR_EVIDENCIA_CACHE",
+                    "Resolution State": "REVIEW_CACHE_EVIDENCE",
+                    "Classification Outcome": "REVIEW_CACHE_EVIDENCE",
                     "Stage": "CLEF_REPAIR_INSUFFICIENT",
                     "O que é (Tipo)": "REVISAR",
                     "Alimentação": power if power in rules.allowed_powers else "UNKNOWN",
@@ -6421,9 +6553,9 @@ def finalize_product(
                     "FAMILY": "",
                     "Título Real": title,
                     "Fonte URL": url,
-                    "Review Required": "NÃO",
+                    "Review Required": "SIM",
                     "Auto Eligible": "NÃO",
-                    "Double Check Priority": "AGUARDAR_RECOLETA",
+                    "Double Check Priority": "ALTA",
                     "Reason Code": "CLEF_REPAIR_INSUFFICIENT",
                     "Motivo": (
                         f"Primeira resposta teve TYPE x TAXONOMIA incompatíveis ({typ} + {cg} | {fam}); "
@@ -6468,13 +6600,13 @@ def finalize_product(
 
         # Clef foi consultado, mas não conseguiu produzir TYPE + par taxonômico
         # válidos. Isso é falta de evidência/aderência para esta consulta, não uma
-        # tarefa manual imediata: vai para fila de nova coleta/segunda consulta futura.
+        # solicitação de recoleta: encaminhar as fontes existentes para revisão.
         return {
             **base_clef,
             "Raw State": "RAW_OK",
-            "Próxima Ação": "RECOLETA_DIRIGIDA",
-            "Resolution State": "NEEDS_RECOLLECTION",
-            "Classification Outcome": "NEEDS_RECOLLECTION",
+            "Próxima Ação": "REVISAR_EVIDENCIA_CACHE",
+            "Resolution State": "REVIEW_CACHE_EVIDENCE",
+            "Classification Outcome": "REVIEW_CACHE_EVIDENCE",
             "Stage": "CLEF_INSUFFICIENT",
             "O que é (Tipo)": typ if typ in rules.types else "REVISAR",
             "Alimentação": power if power in rules.allowed_powers else "UNKNOWN",
@@ -6484,7 +6616,7 @@ def finalize_product(
             "Fonte URL": url,
             "Review Required": "NÃO",
             "Auto Eligible": "NÃO",
-            "Double Check Priority": "AGUARDAR_RECOLETA",
+            "Double Check Priority": "ALTA",
             "Reason Code": f"CLEF_{safe(data.get('decision')) or 'INSUFFICIENT'}",
             "Motivo": (
                 f"{safe(data.get('reason_short'))} | Clef não fechou TYPE + taxonomia válidos. "
@@ -6532,6 +6664,25 @@ BASELINE_FINAL_COLUMNS = [
     "Status",
     "Revisão",
     "Revisão B.I",
+    # Campos operacionais aditivos: nunca substituem os campos Gold.
+    "Status Coleta",
+    "Status Identidade",
+    "Status Classificação",
+    "Título Referência",
+    "Fonte URL",
+    "Fonte Referência URL",
+    "Motivo",
+    "Reason Code",
+    "Collection State",
+    "Resolution State",
+    "Classification Identity",
+    "Título Referência Identity",
+    "Sugestão Category General",
+    "Sugestão FAMILY",
+    "Fontes Pesquisa",
+    "Resumo Evidências",
+    "Fontes Encontradas",
+    "Qualidade Referência",
 ]
 
 BASELINE_MASTER_FIELDS = [
@@ -6542,9 +6693,14 @@ BASELINE_MASTER_FIELDS = [
     "Título Real",
     "Título Referência",
     "Próxima Ação",
+    "Sugestão Category General",
+    "Sugestão FAMILY",
     "Fonte URL",
     "Fonte Referência URL",
+    "Raw State",
     "Collection State",
+    "Classification Identity",
+    "Título Referência Identity",
     "Raw Search Results",
     "Curated Sources",
     "Title Rescue Sources",
@@ -6982,7 +7138,10 @@ def _assert_bi_lock_snapshot(df: Any, snapshot: Dict[str, Dict[str, str]], label
     for _, row in df.iterrows():
         brand, model = safe(row.get(b)), safe(row.get(m))
         if brand and model:
-            by_key[business_key(brand, model)] = row
+            key = business_key(brand, model)
+            existing = by_key.get(key)
+            if existing is None or (_row_bi_locked(row, df) and not _row_bi_locked(existing, df)):
+                by_key[key] = row
     errors = []
     for key, expected in snapshot.items():
         row = by_key.get(key)
@@ -7021,7 +7180,10 @@ def _load_review_bi_snapshot(
         brand, model = safe(row.get(b)), safe(row.get(m))
         if not brand or not model:
             continue
-        snapshot[business_key(brand, model)] = row.get(rb) if rb else None
+        key = business_key(brand, model)
+        value = row.get(rb) if rb else None
+        if key not in snapshot or _is_bi_ok_value(value):
+            snapshot[key] = value
     return snapshot, True
 
 
@@ -7031,21 +7193,28 @@ def _apply_review_bi_snapshot(
     model_col: str,
     snapshot: Dict[str, Any],
     source_exists: bool,
+    bi_lock_snapshot: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Any:
-    """Base Final é a fonte de verdade humana de Revisão B.I."""
+    """Reaplica B.I=OK somente ao par original aprovado na Base Final."""
     import pandas as pd
     if "Revisão B.I" not in df.columns:
         df["Revisão B.I"] = pd.NA
     if not source_exists:
         return df
-    # Limpa inclusive valores antigos do Consolidado e reaplica exatamente o snapshot da Base Final.
+    # Nunca replica OK para todas as linhas que compartilham chave normalizada.
+    # Primeiro posiciona cada aprovação no par exato Marca+Modelo da Base Final.
+    locks = bi_lock_snapshot or {}
     df["Revisão B.I"] = pd.NA
     for idx, row in df.iterrows():
         brand, model = safe(row.get(brand_col)), safe(row.get(model_col))
         if not brand or not model:
             continue
         key = business_key(brand, model)
-        if key in snapshot:
+        approved = locks.get(key)
+        if approved:
+            if (brand, model) == (approved["Marca"], approved["Modelo"]):
+                df.at[idx, "Revisão B.I"] = approved["Revisão B.I"]
+        elif key in snapshot:
             df.at[idx, "Revisão B.I"] = snapshot[key]
     return df
 
@@ -7061,6 +7230,14 @@ def _sanitize_legacy_unresolved_taxonomy(df: Any) -> Tuple[Any, int]:
     fam_col = find_col(out, ["FAMILY", "Family"], required=False)
     if not cg_col or not fam_col:
         return out, 0
+    # Candidate columns carry strings even when an entire column starts empty.
+    # pandas 2.x otherwise infers float64 for an all-NA column and raises
+    # TypeError when a taxonomy label is first written.
+    for suggestion_col in ("Sugestão Category General", "Sugestão FAMILY"):
+        if suggestion_col not in out.columns:
+            out[suggestion_col] = pd.Series(pd.NA, index=out.index, dtype="object")
+        else:
+            out[suggestion_col] = out[suggestion_col].astype("object")
     cleaned = 0
     for idx, row in out.iterrows():
         if rbi_col and _is_bi_ok_value(row.get(rbi_col)):
@@ -7075,6 +7252,11 @@ def _sanitize_legacy_unresolved_taxonomy(df: Any) -> Tuple[Any, int]:
         if _baseline_row_accepted(row, out):
             continue
         if safe(row.get(cg_col)) or safe(row.get(fam_col)):
+            # Nunca descartar candidatos: retirar apenas dos campos aprováveis.
+            for source_col, suggestion_col in ((cg_col, "Sugestão Category General"),
+                                               (fam_col, "Sugestão FAMILY")):
+                if safe(row.get(source_col)) and not safe(row.get(suggestion_col)):
+                    out.at[idx, suggestion_col] = row.get(source_col)
             out.at[idx, cg_col] = pd.NA
             out.at[idx, fam_col] = pd.NA
             cleaned += 1
@@ -7201,12 +7383,35 @@ def _sync_final_into_master(
         if key in key_index:
             idx = key_index[key]
 
+            # O registro B.I=OK deve ocupar exatamente o par original aprovado,
+            # mesmo que outra grafia compartilhe a business_key.
+            if src_bi_ok and (safe(master_df.at[idx, brand_col]), safe(master_df.at[idx, model_col])) != (brand, model):
+                exact = [
+                    i for i in master_df.index
+                    if safe(master_df.at[i, brand_col]) == brand
+                    and safe(master_df.at[i, model_col]) == model
+                ]
+                if exact:
+                    idx = exact[-1]
+                else:
+                    new_row = {col: pd.NA for col in master_df.columns}
+                    new_row[brand_col] = brand
+                    new_row[model_col] = model
+                    idx = len(master_df)
+                    master_df.loc[idx] = new_row
+                    stats["final_rows_imported"] += 1
+                key_index[key] = idx
+
             # BI_OK é absoluto: a Base Final vence o Consolidado inclusive nos vazios.
             if src_bi_ok:
                 _copy_bi_locked_row_exact(src, final_df, master_df, idx)
                 stats["final_bi_lock_promoted"] += 1
                 continue
 
+            # Uma variante não aprovada nunca rebaixa campos da linha B.I.
+            master_bi = find_col(master_df, ["Revisão B.I", "Revisao B.I"], required=False)
+            if master_bi and _is_bi_ok_value(master_df.at[idx, master_bi]):
+                continue
             if frbi:
                 master_df.at[idx, "Revisão B.I"] = src.get(frbi)
 
@@ -7220,6 +7425,14 @@ def _sync_final_into_master(
                     master_df.at[idx, "Status"] = "Manual"
                     stats["final_manual_promoted"] += 1
                 else:
+                    # A Base Final e autoridade para uma classificacao tecnicamente
+                    # aceita. Um estado antigo de REVIEW/PENDING no Consolidado
+                    # nao pode rebaixar um registro aceito durante a reconciliacao.
+                    # src_accepted ja passou pelo gate de taxonomia completa,
+                    # excluindo os casos sem classificacao/hard locks humanos.
+                    master_df.at[idx, "Resolution State"] = "RESOLVED"
+                    master_df.at[idx, "Status Processamento"] = "PROCESSADO"
+                    master_df.at[idx, "Review Required"] = "NÃO"
                     stats["final_baseline_preserved"] += 1
             continue
 
@@ -7236,6 +7449,10 @@ def _sync_final_into_master(
             _copy_business_values(src, final_df, master_df, idx)
             if frbi:
                 master_df.at[idx, "Revisão B.I"] = src.get(frbi)
+            if src_accepted and not src_manual:
+                master_df.at[idx, "Resolution State"] = "RESOLVED"
+                master_df.at[idx, "Status Processamento"] = "PROCESSADO"
+                master_df.at[idx, "Review Required"] = "NÃO"
         stats["final_rows_imported"] += 1
 
     return master_df, stats
@@ -7266,14 +7483,12 @@ def _record_process_state(rec: Dict[str, Any]) -> Tuple[str, str]:
     if resolution == "CLASSIFIED_CLEF":
         # Classificação completa produzida pelo Clef; falta apenas double-check humano.
         return "PROCESSADO", "PROVÁVEL"
-    if resolution in {
-        "PENDING_COLLECTION",
-        "PENDING_RECOLLECTION",
-        "NEEDS_RECOLLECTION",
-        "CACHE_ERROR",
-        "CACHE_COLLISION",
-    }:
+    if resolution == "PENDING_COLLECTION":
         return resolution, "PENDENTE_COLETA"
+    if resolution in {"PENDING_RECOLLECTION", "NEEDS_RECOLLECTION",
+                      "CACHE_ERROR", "CACHE_COLLISION", "REVIEW_NO_RESULTS",
+                      "REVIEW_CACHE_EVIDENCE"}:
+        return "REVISAR", "REVISAR"
 
     return "REVISAR", "REVISAR"
 
@@ -7374,8 +7589,26 @@ def _derive_final_review(row: Any, df: Any) -> Any:
     resolution = safe(row.get(resolution_col)).upper() if resolution_col else ""
     if resolution == "CLASSIFIED_CLEF":
         return "PROVÁVEL"
-    if resolution in {"PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "CACHE_ERROR", "CACHE_COLLISION"}:
-        return "PENDENTE_COLETA"
+    if resolution == "PENDING_EVIDENCE_CHECK":
+        return "PENDENTE"
+    if resolution == "PENDING_CLASSIFICATION":
+        return "PENDENTE_CLASSIFICACAO"
+    # Revisão indica próximo trabalho; não deve mascarar evidência RAW_OK.
+    raw_state = safe(row.get("Raw State")).upper()
+    collection_state = safe(row.get("Collection State")).upper()
+    has_cache_raw = raw_state in {"RAW_OK", "RAW_OK_MERGED", "OK"} or collection_state in {
+        "READY_FOR_CLASSIFICATION", "PARTIAL_TARGET_EVIDENCE", "TARGET_EVIDENCE",
+        "LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA",
+    }
+    if has_cache_raw:
+        # RAW existente nunca solicita uma nova busca por falha de taxonomia.
+        return ("REVISAR" if collection_state in {"NO_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE"}
+                else "PENDENTE_CLASSIFICACAO")
+    if raw_state == "RAW_EMPTY" or resolution == "REVIEW_NO_RESULTS":
+        return "REVISAR"
+    if resolution in {"PENDING_COLLECTION", "PENDING_RECOLLECTION",
+                      "NEEDS_RECOLLECTION", "CACHE_ERROR", "CACHE_COLLISION"}:
+        return "PENDENTE_COLETA" if raw_state == "RAW_MISSING" else "REVISAR"
 
     # Linha conhecida, mas ainda nunca enriquecida: fica PENDENTE, não REVISAR.
     type_col = find_col(df, ["O que é (Tipo)", "Tipo", "Product Type"], required=False)
@@ -7417,12 +7650,64 @@ def _atomic_write_dataframe(df: Any, path: Path, sheet_name: str) -> None:
         raise
 
 
+
+def _manual_review_bundle(raw: RawEvidence) -> Dict[str, str]:
+    """Exporta fontes do cache para revisão humana, mesmo rejeitadas; não aprova AUTO."""
+    payload = raw.payload or {}
+    coll = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
+    results = [r for r in (payload.get("results") or []) if isinstance(r, dict)]
+    audits = {_url_key(r.get("url", "")): r for r in (coll.get("source_audit") or [])
+              if isinstance(r, dict) and _url_key(r.get("url", ""))}
+    evidence = [r for r in (coll.get("evidence_cache") or []) if isinstance(r, dict)]
+    evidence_by_url = {_url_key(r.get("url", "")): r for r in evidence if _url_key(r.get("url", ""))}
+    rows = []
+    source = results[:10] if results else evidence[:10]
+    for n, item in enumerate(source, 1):
+        url = safe(item.get("url"))
+        ev = evidence_by_url.get(_url_key(url), item if not results else {})
+        au = audits.get(_url_key(url), {})
+        rows.append({
+            "n": n,
+            "title": (safe(item.get("title")) or safe(ev.get("title")))[:500],
+            "url": url[:1200],
+            "identity": safe(ev.get("identity") or au.get("identity_after")) or "NAO_VERIFICADA",
+            "decision": safe(au.get("decision") or ev.get("decision")) or "NAO_AVALIADA",
+            "tier": safe(ev.get("tier")) or "NAO_CURADA",
+            "snippet": (safe(item.get("content")) or safe(ev.get("snippet")) or safe(ev.get("evidence_excerpt")))[:800],
+        })
+    hard_reject = {"REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY"}
+    rank = {"STRONG": 4, "PROBABLE": 3, "CONTEXTUAL": 2, "WEAK": 1}
+    titled = [r for r in rows if r["title"]]
+    titled.sort(key=lambda r: (
+        r["decision"] not in hard_reject,
+        rank.get(r["identity"], 0),
+        r["tier"] == "PRIMARY",
+        -r["n"],
+    ), reverse=True)
+    best = titled[0] if titled else {}
+    summary = [
+        f'[{r["n"]}] {r["title"] or "(sem titulo)"} | {r["identity"]} | {r["decision"]} | {r["url"]} | {r["snippet"]}'
+        for r in rows
+    ]
+    return {
+        "Título Referência": safe(best.get("title")),
+        "Fonte Referência URL": safe(best.get("url")),
+        "Título Referência Identity": safe(best.get("identity")),
+        "Qualidade Referência": safe(best.get("decision")),
+        "Fontes Pesquisa": json.dumps(rows, ensure_ascii=False)[:32000],
+        "Resumo Evidências": "\n".join(summary)[:32000],
+        "Fontes Encontradas": str(len(rows)),
+    }
+
+
 def _export_base_final(
     master_df: Any,
     final_path: Path,
     review_bi_snapshot: Optional[Dict[str, Any]] = None,
     review_bi_source_exists: bool = False,
     bi_lock_snapshot: Optional[Dict[str, Dict[str, str]]] = None,
+    input_path: Optional[Path] = None,
+    cache_path: Optional[Path] = None,
 ) -> int:
     """Reconstrói Base Final preservando BI_OK byte-semanticamente nos campos humanos."""
     import pandas as pd
@@ -7470,13 +7755,71 @@ def _export_base_final(
     out["Status"] = work.apply(final_status, axis=1)
     out["Revisão"] = work.apply(lambda row: _derive_final_review(row, work), axis=1)
 
+    # Estados ortogonais: metadados auditáveis, jamais aprovam uma taxonomia.
+    def operational_status(row: Any) -> Dict[str, str]:
+        raw_state = safe(row.get("Raw State")).upper()
+        collection_state = safe(row.get("Collection State")).upper()
+        resolution = safe(row.get("Resolution State")).upper()
+        title = safe(row.get("Título Real")) or safe(row.get("Título Referência"))
+        typ = safe(row.get("O que é (Tipo)")).upper()
+        cg = safe(row.get("Category General"))
+        family = safe(row.get("FAMILY"))
+        suggestions = safe(row.get("Sugestão Category General")) or safe(row.get("Sugestão FAMILY"))
+        identity = safe(row.get("Classification Identity")).upper()
+        ref_identity = safe(row.get("Título Referência Identity")).upper()
+        if raw_state in {"RAW_OK", "RAW_OK_MERGED", "OK"} or collection_state in {
+            "TARGET_EVIDENCE", "READY_FOR_CLASSIFICATION", "PARTIAL_TARGET_EVIDENCE",
+            "LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA"
+        }:
+            collected = ("COLETADO_EVIDENCIA_PRONTA" if collection_state in {
+                "READY_FOR_CLASSIFICATION", "TARGET_EVIDENCE"
+            } else "COLETADO_EVIDENCIA_PARCIAL" if collection_state == "PARTIAL_TARGET_EVIDENCE"
+            else "COLETADO_SEM_EVIDENCIA_ALVO" if collection_state in {
+                "LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"
+            } else "COLETADO_RAW_DISPONIVEL")
+        elif raw_state in {"RAW_EMPTY", "EMPTY"}:
+            collected = "COLETA_VAZIA"
+        elif raw_state in {"CACHE_ERROR", "CACHE_COLLISION", "RAW_CORRUPT"}:
+            collected = "ERRO_CACHE"
+        else:
+            collected = "EVIDENCIA_EXISTENTE_SEM_ESTADO" if title else "COLETA_NAO_COMPROVADA"
+        # STRONG da referência só comprova a referência, não a classificação.
+        if ref_identity == "STRONG" or identity == "STRONG":
+            identity_status = "MARCA_MODELO_CONFIRMADOS"
+        elif ref_identity == "PROBABLE" or identity == "PROBABLE":
+            identity_status = "IDENTIDADE_PROVAVEL"
+        elif ref_identity in {"CONFLICT", "WEAK"} or identity in {"CONFLICT", "WEAK"}:
+            identity_status = "IDENTIDADE_NAO_CONFIAVEL"
+        else:
+            identity_status = "IDENTIDADE_NAO_VERIFICADA" if title else "SEM_EVIDENCIA_IDENTIDADE"
+        if typ not in {"", "REVISAR", "UNKNOWN", "N/A"} and cg and family:
+            classification = "COMPLETA_NAO_HOMOLOGADA"
+        elif (typ not in {"", "REVISAR", "UNKNOWN", "N/A"} or cg or family or suggestions):
+            classification = "PARCIAL"
+        elif title or raw_state in {"RAW_OK", "RAW_OK_MERGED"}:
+            classification = "PENDENTE_CLASSIFICACAO"
+        else:
+            classification = "SEM_CLASSIFICACAO"
+        if resolution == "RESOLVED" and safe(row.get("Review Required")).upper() != "SIM":
+            classification = "RESOLVIDA_PELO_PIPELINE"
+        return {"Status Coleta": collected, "Status Identidade": identity_status,
+                "Status Classificação": classification}
+
+    operational = work.apply(operational_status, axis=1)
+    for name in ("Status Coleta", "Status Identidade", "Status Classificação"):
+        out[name] = operational.map(lambda fields: fields[name])
+
     # HF3.1p2: schema-forward baseline export.
     # Diagnostic columns introduced after older baseline files were created may
     # legitimately be absent from ``work``. Copy them when available and
     # create any remaining final-schema column as NA before the strict slice.
     # This keeps old baselines forward-compatible and prevents KeyError when
     # BASELINE_FINAL_COLUMNS evolves.
-    for col in ["Título Referência", "Próxima Ação"]:
+    for col in ["Título Referência", "Próxima Ação", "Fonte URL",
+                "Fonte Referência URL", "Motivo", "Reason Code",
+                "Collection State", "Resolution State", "Classification Identity",
+                "Título Referência Identity", "Sugestão Category General",
+                "Sugestão FAMILY"]:
         src = find_col(work, [col], required=False)
         out[col] = work[src] if src else pd.NA
 
@@ -7486,8 +7829,394 @@ def _export_base_final(
             out[col] = work[src] if src else pd.NA
 
     out = out[BASELINE_FINAL_COLUMNS].reset_index(drop=True)
+    # Quando colunas textuais estao completamente vazias, pandas pode
+    # inferir float64. A reconciliacao cache->Excel precisa escrever strings
+    # (status, titulos, URLs, fontes) sem coercao invalida em pandas recentes.
+    # Estes campos do schema Final sao textuais, inclusive 'Fontes Encontradas'
+    # que armazena a contagem como representacao de texto.
+    out = out.astype("object")
 
     _assert_bi_lock_snapshot(out, bi_lock_snapshot or {}, "Base Final gerada")
+
+    # Contrato de cobertura: cada par exato deve ser persistido, inclusive aliases
+    # de execuções anteriores. Chave compacta só serve para buscar classificação.
+    # O registro B.I. permanece byte-semanticamente protegido no par de origem.
+    def present(value):
+        if value is None:
+            return False
+        try:
+            if bool(pd.isna(value)):
+                return False
+        except (TypeError, ValueError):
+            pass
+        return bool(safe(value))
+
+    taxonomy = ["O que é (Tipo)", "Alimentação", "Category General", "FAMILY", "Título Real",
+                "Título Referência", "Fonte URL", "Fonte Referência URL",
+                "Motivo", "Reason Code", "Collection State", "Resolution State",
+                "Classification Identity", "Título Referência Identity",
+                "Sugestão Category General", "Sugestão FAMILY"]
+    required = ["O que é (Tipo)", "Category General", "FAMILY"]
+    prior_exact = {}
+    if final_path.exists():
+        prior_df, _ = _read_business_sheet(final_path)
+        pb = find_col(prior_df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        pm = find_col(prior_df, ["Modelo", "Model", "SKU", "Part Number"])
+        for _, prev in prior_df.iterrows():
+            pair = (safe(prev.get(pb)), safe(prev.get(pm)))
+            if pair[0] and pair[1]:
+                prior_exact[pair] = prev
+
+    base = {}
+    for _, existing in out.iterrows():
+        pair = (safe(existing["Marca"]), safe(existing["Modelo"]))
+        base[pair] = {col: existing.get(col, pd.NA) for col in BASELINE_FINAL_COLUMNS}
+
+    def classified(rec):
+        return (all(present(rec.get(col)) for col in required)
+                and safe(rec.get("O que é (Tipo)")).upper() not in {"REVISAR", "UNKNOWN", "N/A"}
+                and present(rec.get("Título Real")))
+
+    # Escolhe evidência completa antes de linhas pendentes; B.I. tem autoridade,
+    # mas nunca se converte numa aprovação humana para uma variante.
+    by_key = {}
+    for rec in base.values():
+        key = business_key(safe(rec["Marca"]), safe(rec["Modelo"]))
+        score = (int(classified(rec)), int(_is_bi_ok_value(rec.get("Revisão B.I"))),
+                 int(safe(rec.get("Collection State")) in {
+                     "TARGET_EVIDENCE", "READY_FOR_CLASSIFICATION",
+                     "PARTIAL_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE",
+                     "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA"
+                 }),
+                 sum(bool(present(rec.get(c))) for c in taxonomy))
+        if key not in by_key or score > by_key[key][0]:
+            by_key[key] = (score, rec)
+    for pair, prev in prior_exact.items():
+        key = business_key(*pair)
+        rec = {col: prev.get(col, pd.NA) for col in BASELINE_FINAL_COLUMNS}
+        score = (int(classified(rec)), int(_is_bi_ok_value(rec.get("Revisão B.I"))),
+                 int(safe(rec.get("Collection State")) in {
+                     "TARGET_EVIDENCE", "READY_FOR_CLASSIFICATION",
+                     "PARTIAL_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE",
+                     "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA"
+                 }),
+                 sum(bool(present(rec.get(c))) for c in taxonomy))
+        if key not in by_key or score > by_key[key][0]:
+            by_key[key] = (score, rec)
+
+    requested = set(prior_exact)
+    input_pairs = set()
+    if input_path and input_path.exists():
+        input_pairs = {
+            (item.brand_original, item.model_original)
+            for item in read_input_rows(input_path) if item.valid
+        }
+        requested.update(input_pairs)
+
+    # Detecta conflitos reais de taxonomia em variantes da mesma chave.
+    signatures = {}
+    for rec in list(base.values()) + [
+        {col: prev.get(col, pd.NA) for col in BASELINE_FINAL_COLUMNS}
+        for prev in prior_exact.values()
+    ]:
+        if not classified(rec):
+            continue
+        key = business_key(safe(rec["Marca"]), safe(rec["Modelo"]))
+        signature = tuple(safe(rec.get(col)).upper() for col in required)
+        signatures.setdefault(key, set()).add(signature)
+    conflict_keys = {key for key, values in signatures.items() if len(values) > 1}
+
+    created = 0
+    enriched = 0
+    inherited = 0
+    for pair in sorted(requested | set(base)):
+        rec = base.get(pair)
+        if rec is None:
+            # Preserva exatamente os dados já disponíveis em outra variante
+            # previamente exportada, inclusive correções manuais.
+            prev = prior_exact.get(pair)
+            rec = ({col: prev.get(col, pd.NA) for col in BASELINE_FINAL_COLUMNS}
+                   if prev is not None else {col: pd.NA for col in BASELINE_FINAL_COLUMNS})
+            rec["Marca"], rec["Modelo"] = pair
+            base[pair] = rec
+            created += 1
+        if _is_bi_ok_value(rec.get("Revisão B.I")) or (present(rec.get("Status")) and safe(rec.get("Status")).upper() == "MANUAL"):
+            continue
+        src = by_key.get(business_key(*pair))
+        if src is None:
+            if not present(rec.get("Status")):
+                rec["Status"] = "Script"
+            if not present(rec.get("Revisão")):
+                rec["Revisão"] = "PENDENTE"
+            if not present(rec.get("Próxima Ação")):
+                rec["Próxima Ação"] = "REVISAR_MANUAL_SEM_EVIDENCIA"
+            continue
+        source = src[1]
+        # Uma variante não protegida não pode continuar PENDENTE_COLETA
+        # quando sua business_key possui RAW confirmado no cache.
+        src_collection = safe(source.get("Collection State"))
+        if src_collection in {
+            "TARGET_EVIDENCE", "READY_FOR_CLASSIFICATION",
+            "PARTIAL_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE",
+            "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA"
+        }:
+            rec["Collection State"] = src_collection
+            rec["Status Coleta"] = source.get("Status Coleta")
+            if safe(source.get("Status Identidade")):
+                rec["Status Identidade"] = source["Status Identidade"]
+            if (safe(rec.get("Revisão")).upper() in {
+                "PENDENTE", "PENDENTE_COLETA", "PENDENTE_CLASSIFICACAO",
+                "PENDENTE_RECOLETA"
+            } and safe(source.get("Revisão")).upper() in {
+                "PENDENTE_CLASSIFICACAO", "PENDENTE_RECOLETA"
+            }):
+                rec["Revisão"] = source["Revisão"]
+                rec["Próxima Ação"] = source.get("Próxima Ação")
+                rec["Resolution State"] = source.get("Resolution State")
+        changed = False
+        for col in taxonomy:
+            if not present(rec.get(col)) and present(source.get(col)):
+                rec[col] = source[col]
+                changed = True
+        if changed:
+            enriched += 1
+        if not present(rec.get("Status")):
+            rec["Status"] = "Script"
+        if classified(rec) and pair != (safe(source["Marca"]), safe(source["Modelo"])):
+            key = business_key(*pair)
+            # Herda a classificação validada para grafias equivalentes,
+            # sem copiar o campo humano Revisão B.I.
+            if (_is_bi_ok_value(source.get("Revisão B.I"))
+                    and key not in conflict_keys
+                    and tuple(safe(rec.get(col)).upper() for col in required)
+                        == tuple(safe(source.get(col)).upper() for col in required)):
+                rec["Revisão"] = "AUTO_APROVADO"
+                rec["Próxima Ação"] = "CONCLUIDO_POR_EQUIVALENCIA_BI"
+                inherited += 1
+            elif key in conflict_keys:
+                rec["Revisão"] = "PROVÁVEL"
+                rec["Próxima Ação"] = "REVISAR_CONFLITO_EQUIVALENCIA"
+            elif safe(source.get("Revisão")).upper() == "AUTO_APROVADO":
+                rec["Revisão"] = "AUTO_APROVADO"
+                rec["Próxima Ação"] = "CONCLUIDO_POR_EQUIVALENCIA_TECNICA"
+            else:
+                # Uma única revisão por business_key: a fonte canônica mantém
+                # DOUBLE_CHECK; aliases não abrem novas tarefas de revisão.
+                rec["Revisão"] = "PROVÁVEL"
+                rec["Próxima Ação"] = "AGUARDAR_REVISAO_PRODUTO_CANONICO"
+        elif not present(rec.get("Revisão")):
+            rec["Revisão"] = "PENDENTE"
+            rec["Próxima Ação"] = "REVISAR_MANUAL_SEM_CLASSIFICACAO"
+
+    out = pd.DataFrame(base.values(), columns=BASELINE_FINAL_COLUMNS)
+    # CONTRATO PROCV: toda ocorrência da entrada deve existir fisicamente na
+    # aba Base Final. Deduplicação aplica-se SOMENTE a Search/classificação.
+    # Reconstrução determinística: extras são recriados da entrada a cada run,
+    # jamais acumulados a partir das duplicatas do Excel anterior.
+    from collections import Counter
+    input_rows_all = read_input_rows(input_path) if input_path and input_path.exists() else []
+    input_counts = Counter((item.brand_original, item.model_original) for item in input_rows_all)
+    output_counts = Counter((safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"]))
+    by_exact_output = {(safe(row["Marca"]), safe(row["Modelo"])): row
+                       for _, row in out.iterrows()}
+    supplemental = []
+    for pair, required_count in input_counts.items():
+        missing_occurrences = max(0, required_count - output_counts.get(pair, 0))
+        if not missing_occurrences:
+            continue
+        exemplar = by_exact_output.get(pair)
+        for _ in range(missing_occurrences):
+            if exemplar is not None:
+                copy = exemplar.copy().to_dict()
+            else:
+                copy = {col: pd.NA for col in BASELINE_FINAL_COLUMNS}
+                copy["Marca"], copy["Modelo"] = pair
+                copy["Status"] = "Script"
+                copy["Revisão"] = "PENDENTE"
+                copy["Próxima Ação"] = "CORRIGIR_CADASTRO_SEM_IDENTIDADE"
+            supplemental.append(copy)
+    if supplemental:
+        out = pd.concat([out, pd.DataFrame(supplemental, columns=BASELINE_FINAL_COLUMNS)], ignore_index=True)
+    # A reconstrução acima (pd.DataFrame(base.values())) e a concatenação podem
+    # reinferir colunas inteiramente vazias como float64. O dtype deve ser
+    # garantido neste DataFrame FINAL, imediatamente antes das atribuições
+    # de hipóteses textuais em CLASSIFICATION INTEGRITY.
+    # Preservar strings apos concat de linhas adicionais da entrada.
+    out = out.astype("object")
+    physical_counts = Counter((safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"]))
+    missing_lines = {pair: n - physical_counts.get(pair, 0) for pair, n in input_counts.items()
+                     if physical_counts.get(pair, 0) < n}
+    if missing_lines:
+        raise RuntimeError(f"BASE_FINAL_INPUT_ROW_COVERAGE_FAILED: {len(missing_lines)} pares sem todas as ocorrencias")
+    LOG.info("BASE FINAL INPUT ROW COVERAGE OK | input_rows=%d | extra_rows=%d | missing=0",
+             len(input_rows_all), len(supplemental))
+    # Corrige estados falsamente aprovados em linhas não protegidas por revisão humana.
+    # Nunca altera classificações manuais ou Revisão B.I=OK.
+    repaired_approval = 0
+    stripped_partial = 0
+    for idx, row in out.iterrows():
+        if _is_bi_ok_value(row.get("Revisão B.I")) or safe(row.get("Status")).upper() == "MANUAL":
+            continue
+        complete = classified(row)
+        approved = safe(row.get("Revisão")).upper() == "AUTO_APROVADO"
+        if approved and not complete:
+            out.at[idx, "Revisão"] = "REVISAR"
+            out.at[idx, "Próxima Ação"] = "REVISAR_CLASSIFICACAO_INCOMPLETA"
+            repaired_approval += 1
+        has_pair = present(row.get("Category General")) or present(row.get("FAMILY"))
+        has_type = present(row.get("O que é (Tipo)")) and safe(row.get("O que é (Tipo)")).upper() not in {"REVISAR", "UNKNOWN"}
+        if has_pair and not has_type:
+            # Preserva a hipótese para revisão, sem a tornar classificação.
+            for original, candidate in (("Category General", "Sugestão Category General"),
+                                        ("FAMILY", "Sugestão FAMILY")):
+                if present(row.get(original)) and not present(row.get(candidate)):
+                    out.at[idx, candidate] = row.get(original)
+                out.at[idx, original] = pd.NA
+            out.at[idx, "Status Classificação"] = "PARCIAL"
+            stripped_partial += 1
+    LOG.info("BASE FINAL CLASSIFICATION INTEGRITY | false_approvals_repaired=%d | partial_pairs_cleared=%d",
+             repaired_approval, stripped_partial)
+    # Executa o hard-lock também sobre a base final reconstruída.
+    _assert_bi_lock_snapshot(out, bi_lock_snapshot or {}, "Base Final com variantes")
+    exported_pairs = {(safe(b), safe(m)) for b, m in zip(out["Marca"], out["Modelo"])}
+    missing = input_pairs - exported_pairs
+    if missing:
+        raise RuntimeError(f"BASE_FINAL_INPUT_COVERAGE_FAILED: {len(missing)} pares ausentes")
+    # Duplicatas exatas da entrada são intencionais para PROCV; o contrato
+    # de multiplicidade acima substitui a antiga proibição global.
+    LOG.info(
+        "BASE FINAL PROCV COVERAGE OK | input_pairs=%d | prior_pairs=%d | "
+        "aliases_added=%d | variants_enriched=%d | missing=0",
+        len(input_pairs), len(prior_exact), created, enriched,
+    )
+    LOG.info("BASE FINAL EQUIVALENCIA BI | herdados=%d | conflitos=%d", inherited, len(conflict_keys))
+
+    # Espelha o SQLite em todos os produtos não aceitos da Base Final,
+    # inclusive aliases que não receberam os campos do Consolidado.
+    if cache_path and cache_path.exists():
+        store = TavilyReadOnlyStore(cache_path)
+        try:
+            for idx, rec in out.iterrows():
+                brand, model = safe(rec.get("Marca")), safe(rec.get("Modelo"))
+                if (_is_bi_ok_value(rec.get("Revisão B.I"))
+                        or safe(rec.get("Status")).upper() == "MANUAL"
+                        or _baseline_row_accepted(rec, out)):
+                    continue
+                raw = store.get(brand, model)
+                if raw.state == "RAW_EMPTY":
+                    out.at[idx, "Status Coleta"] = "COLETA_VAZIA"
+                    out.at[idx, "Collection State"] = "RAW_EMPTY"
+                    if not classified(rec):
+                        out.at[idx, "Revisão"] = "REVISAR"
+                        out.at[idx, "Próxima Ação"] = "REVISAR_SEM_RESULTADOS"
+                        out.at[idx, "Resolution State"] = "REVIEW_NO_RESULTS"
+                elif raw.state in {"RAW_OK", "RAW_OK_MERGED"}:
+                    collection = (raw.payload or {}).get("_collection")
+                    collection = collection if isinstance(collection, dict) else {}
+                    state = safe(collection.get("state")) or "CACHE_RAW_SEM_CURADORIA"
+                    out.at[idx, "Collection State"] = state
+                    if state in {"READY_FOR_CLASSIFICATION", "TARGET_EVIDENCE"}:
+                        out.at[idx, "Status Coleta"] = "COLETADO_EVIDENCIA_PRONTA"
+                    elif state == "PARTIAL_TARGET_EVIDENCE":
+                        out.at[idx, "Status Coleta"] = "COLETADO_EVIDENCIA_PARCIAL"
+                    elif state in {"LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"}:
+                        out.at[idx, "Status Coleta"] = "COLETADO_SEM_EVIDENCIA_ALVO"
+                    else:
+                        out.at[idx, "Status Coleta"] = "COLETADO_RAW_DISPONIVEL"
+                    # Materializa todas as fontes consultadas, inclusive rejeitadas:
+                    # exibição de evidência não equivale a aprovação taxonômica.
+                    bundle = _manual_review_bundle(raw)
+                    for field in ("Fontes Pesquisa", "Resumo Evidências",
+                                  "Fontes Encontradas", "Qualidade Referência"):
+                        if bundle.get(field):
+                            out.at[idx, field] = bundle[field]
+                    for field in ("Título Referência", "Fonte Referência URL",
+                                  "Título Referência Identity"):
+                        if not safe(rec.get(field)) and bundle.get(field):
+                            out.at[idx, field] = bundle[field]
+                    # Título Real só recebe referência com identidade comprovada.
+                    # Outros títulos permanecem visíveis em Título Referência/Fontes.
+                    identity = safe(bundle.get("Título Referência Identity")).upper()
+                    decision = safe(bundle.get("Qualidade Referência")).upper()
+                    if (not safe(rec.get("Título Real")) and identity == "STRONG"
+                            and not decision.startswith("REJECT")
+                            and safe(bundle.get("Título Referência"))):
+                        out.at[idx, "Título Real"] = bundle["Título Referência"]
+                        if not safe(rec.get("Fonte URL")):
+                            out.at[idx, "Fonte URL"] = bundle["Fonte Referência URL"]
+                    if not classified(rec):
+                        requires_review = state in {"LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"}
+                        out.at[idx, "Revisão"] = "REVISAR" if requires_review else "PENDENTE_CLASSIFICACAO"
+                        out.at[idx, "Próxima Ação"] = "REVISAR_EVIDENCIA_CACHE" if requires_review else "CLASSIFICAR_CACHE"
+                        out.at[idx, "Resolution State"] = "REVIEW_CACHE_EVIDENCE" if requires_review else "PENDING_CLASSIFICATION"
+        finally:
+            store.close()
+
+    # Métricas de cobertura manual: observam somente registros não aceitos.
+    pending_for_review = out.loc[
+        ~out.apply(lambda r: _baseline_row_accepted(r, out), axis=1)
+    ]
+    manual_reference_titles = sum(
+        bool(safe(r.get("Título Real")) or safe(r.get("Título Referência")))
+        for _, r in pending_for_review.iterrows()
+    )
+    manual_sources = sum(
+        bool(safe(r.get("Fontes Pesquisa")))
+        for _, r in pending_for_review.iterrows()
+    )
+    LOG.info(
+        "BASE FINAL MANUAL EVIDENCE | pendentes=%d | com_titulo=%d | com_fontes=%d | sem_titulo=%d",
+        len(pending_for_review), manual_reference_titles, manual_sources,
+        len(pending_for_review) - manual_reference_titles,
+    )
+
+    # GATE pré-gravação: presença no Excel não comprova estado de coleta.
+    # O SQLite é a fonte oficial e RAW_OK nunca pode sair PENDENTE_COLETA.
+    if cache_path and cache_path.exists() and input_rows_all:
+        store = TavilyReadOnlyStore(cache_path)
+        try:
+            status_index = {}
+            for _, rec in out.iterrows():
+                pair = (safe(rec.get("Marca")), safe(rec.get("Modelo")))
+                status_index.setdefault(pair, []).append(rec)
+            expected = {"raw_ok": 0, "raw_empty": 0, "skipped_human": 0}
+            conflicts = []
+            for item in input_rows_all:
+                if not item.valid:
+                    continue
+                records = status_index.get((item.brand_original, item.model_original), [])
+                if not records:
+                    conflicts.append((item.brand_original, item.model_original, "AUSENTE"))
+                    continue
+                raw = store.get(item.brand_original, item.model_original)
+                if raw.state not in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
+                    continue
+                for record in records:
+                    if _is_bi_ok_value(record.get("Revisão B.I")) or safe(record.get("Status")).upper() == "MANUAL":
+                        expected["skipped_human"] += 1
+                        continue
+                    collection_status = safe(record.get("Status Coleta")).upper()
+                    review_status = safe(record.get("Revisão")).upper()
+                    if raw.state in {"RAW_OK", "RAW_OK_MERGED"}:
+                        expected["raw_ok"] += 1
+                        if not collection_status.startswith("COLETADO_") or review_status == "PENDENTE_COLETA":
+                            conflicts.append((item.brand_original, item.model_original,
+                                              f"RAW_OK x {collection_status} / {review_status}"))
+                    else:
+                        expected["raw_empty"] += 1
+                        if collection_status != "COLETA_VAZIA":
+                            conflicts.append((item.brand_original, item.model_original,
+                                              f"RAW_EMPTY x {collection_status}"))
+            LOG.info("BASE FINAL CACHE CONTRACT | raw_ok=%d | raw_empty=%d | human_skipped=%d | conflicts=%d",
+                     expected["raw_ok"], expected["raw_empty"], expected["skipped_human"], len(conflicts))
+            if conflicts:
+                raise RuntimeError(
+                    "BASE_FINAL_CACHE_CONTRACT_FAILED: "
+                    f"{len(conflicts)} divergencias cache/Excel; primeiros={conflicts[:5]}. "
+                    "Exportacao bloqueada para preservar baseline."
+                )
+        finally:
+            store.close()
 
     tmp = final_path.with_name(final_path.stem + f".tmp_{os.getpid()}" + final_path.suffix)
     final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -7511,6 +8240,164 @@ def _export_base_final(
         raise
     return len(out)
 
+def _register_input_keys_in_master(master_df: Any, input_path: Optional[Path]) -> Tuple[Any, int]:
+    """Cadastro total da entrada; não atribui classificação sem evidência.
+
+    Nunca altera registros existentes, inclusive B.I=OK e classificação manual.
+    """
+    import pandas as pd
+
+    if not input_path or not input_path.exists():
+        return master_df, 0
+    master_df, brand_col, model_col = _ensure_master_columns(master_df)
+    present = set(_master_key_index(master_df, brand_col, model_col))
+    added = 0
+    for item in read_input_rows(input_path):
+        if not item.valid or item.key in present:
+            continue
+        row = {col: pd.NA for col in master_df.columns}
+        row[brand_col] = item.brand_original
+        row[model_col] = item.model_original
+        row["Status"] = "Script"
+        row["Status Processamento"] = "PENDING_EVIDENCE_CHECK"
+        row["Revisão"] = "PENDENTE"
+        row["Resolution State"] = "PENDING_EVIDENCE_CHECK"
+        row["Review Required"] = "SIM"
+        row["Próxima Ação"] = "VERIFICAR_CACHE_ANTES_DE_COLETAR"
+        row["Reason Code"] = "INPUT_PENDING_EVIDENCE_CHECK"
+        row["Motivo"] = "Registro da entrada ainda sem classificação validada."
+        master_df.loc[len(master_df)] = row
+        present.add(item.key)
+        added += 1
+    return master_df, added
+
+
+def _hydrate_input_collection_from_cache(
+    master_df: Any,
+    input_path: Optional[Path],
+    cache_path: Optional[Path],
+    cfg: Optional[Dict[str, Any]] = None,
+) -> Dict[str, int]:
+    """Reconcilia evidência do SQLite com os SKUs da entrada, sem classificar.
+
+    Coleta != identidade != taxonomia. Nunca altera Gold, Manual ou itens aceitos.
+    """
+    stats = {"cache_keys": 0, "cache_raw_ok": 0, "cache_raw_empty": 0,
+             "cache_pending_corrected": 0, "cache_reference_titles": 0}
+    if not input_path or not input_path.exists() or not cache_path or not cache_path.exists():
+        return stats
+    bcol = find_col(master_df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    mcol = find_col(master_df, ["Modelo", "Model", "SKU", "Part Number"])
+    key_index = _master_key_index(master_df, bcol, mcol)
+    status_col = find_col(master_df, ["Status"], required=False)
+    rbi_col = find_col(master_df, ["Revisão B.I", "Revisao B.I"], required=False)
+    review_col = find_col(master_df, ["Revisão", "Revisao"], required=False) or "Revisão"
+    needed = ("Raw State", "Collection State", "Título Referência",
+              "Fonte Referência URL", "Título Referência Identity",
+              "Título Referência Decision", "Status Processamento",
+              "Próxima Ação", "Resolution State", review_col,
+              "Fontes Pesquisa", "Resumo Evidências",
+              "Fontes Encontradas", "Qualidade Referência",
+              "Título Real", "Fonte URL")
+    for col in needed:
+        if col not in master_df.columns:
+            master_df[col] = ""
+        # Colunas antigas inteiramente vazias podem ter dtype float64 no pandas.
+        master_df[col] = master_df[col].astype("object")
+
+    store = TavilyReadOnlyStore(cache_path)
+    try:
+        seen = set()
+        for item in read_input_rows(input_path):
+            if not item.valid or item.key in seen:
+                continue
+            seen.add(item.key)
+            idx = key_index.get(item.key)
+            if idx is None:
+                continue
+            old = master_df.loc[idx]
+            if ((rbi_col and _is_bi_ok_value(old.get(rbi_col)))
+                    or (status_col and _is_manual_status(old.get(status_col)))
+                    or _baseline_row_accepted(old, master_df)):
+                continue
+            raw = store.get(item.brand_original, item.model_original)
+            if raw.state not in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
+                continue
+            stats["cache_keys"] += 1
+            master_df.at[idx, "Raw State"] = raw.state
+            if raw.state == "RAW_EMPTY":
+                stats["cache_raw_empty"] += 1
+                master_df.at[idx, "Collection State"] = "RAW_EMPTY"
+                # Uma consulta vazia é diferente de produto nunca consultado.
+                if safe(old.get("Resolution State")).upper() not in {"RESOLVED", "CLASSIFIED_CLEF"}:
+                    master_df.at[idx, "Resolution State"] = "REVIEW_NO_RESULTS"
+                    master_df.at[idx, "Status Processamento"] = "REVIEW_NO_RESULTS"
+                    master_df.at[idx, "Próxima Ação"] = "REVISAR_SEM_RESULTADOS"
+                    master_df.at[idx, review_col] = "REVISAR"
+                continue
+            stats["cache_raw_ok"] += 1
+            coll = (raw.payload or {}).get("_collection")
+            coll = coll if isinstance(coll, dict) else {}
+            state = safe(coll.get("state")) or "CACHE_RAW_SEM_CURADORIA"
+            master_df.at[idx, "Collection State"] = state
+            old_review = safe(old.get(review_col)).upper()
+            old_process = safe(old.get("Status Processamento")).upper()
+            old_resolution = safe(old.get("Resolution State")).upper()
+            pending = old_review in {"", "PENDENTE", "PENDENTE_COLETA", "PENDENTE_RECOLETA", "PENDENTE_CLASSIFICACAO"}
+            pending = pending or old_process in {"PENDING_COLLECTION", "PENDING_RECOLLECTION", "PENDING_CLASSIFICATION"}
+            pending = pending or old_resolution in {"", "PENDING_EVIDENCE_CHECK", "PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "PENDING_CLASSIFICATION"}
+            if pending and old_resolution not in {"CLASSIFIED_CLEF", "RESOLVED"}:
+                if state in {"NO_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE"}:
+                    master_df.at[idx, review_col] = "REVISAR"
+                    master_df.at[idx, "Resolution State"] = "REVIEW_CACHE_EVIDENCE"
+                    master_df.at[idx, "Status Processamento"] = "REVIEW_CACHE_EVIDENCE"
+                    master_df.at[idx, "Próxima Ação"] = "REVISAR_EVIDENCIA_CACHE"
+                else:
+                    master_df.at[idx, review_col] = "PENDENTE_CLASSIFICACAO"
+                    master_df.at[idx, "Resolution State"] = "PENDING_CLASSIFICATION"
+                    master_df.at[idx, "Status Processamento"] = "PENDING_CLASSIFICATION"
+                    master_df.at[idx, "Próxima Ação"] = "CLASSIFICAR_CACHE"
+                stats["cache_pending_corrected"] += 1
+            # Independente da classificação, todos os títulos e fontes
+            # existentes no SQLite precisam ficar visíveis no Consolidado.
+            bundle = _manual_review_bundle(raw)
+            for field in ("Fontes Pesquisa", "Resumo Evidências",
+                          "Fontes Encontradas", "Qualidade Referência"):
+                if bundle.get(field):
+                    master_df.at[idx, field] = bundle[field]
+            for field in ("Título Referência", "Fonte Referência URL",
+                          "Título Referência Identity"):
+                if not safe(old.get(field)) and bundle.get(field):
+                    master_df.at[idx, field] = bundle[field]
+            title = safe(bundle.get("Título Referência"))
+            identity = safe(bundle.get("Título Referência Identity")).upper()
+            decision = safe(bundle.get("Qualidade Referência")).upper()
+            if cfg is not None and not title:
+                try:
+                    title, url, identity, decision = choose_reference_title(
+                        raw, item.brand_original, item.model_original, cfg
+                    )
+                except (TypeError, ValueError, KeyError) as exc:
+                    LOG.warning("CACHE TITLE REFERENCE SKIPPED | %s %s | %s",
+                                item.brand_original, item.model_original, exc)
+                    title = ""
+                if title and not safe(old.get("Título Referência")):
+                    master_df.at[idx, "Título Referência"] = title
+                    master_df.at[idx, "Fonte Referência URL"] = url
+                    master_df.at[idx, "Título Referência Identity"] = identity
+            if title:
+                stats["cache_reference_titles"] += 1
+                if (identity == "STRONG" and not decision.startswith("REJECT")
+                        and not safe(old.get("Título Real"))):
+                    master_df.at[idx, "Título Real"] = title
+                    if not safe(old.get("Fonte URL")):
+                        master_df.at[idx, "Fonte URL"] = safe(
+                            master_df.at[idx, "Fonte Referência URL"])
+    finally:
+        store.close()
+    return stats
+
+
 def persist_baseline_excels(
     rows: List[Dict[str, Any]],
     master_path: Optional[Path],
@@ -7519,12 +8406,41 @@ def persist_baseline_excels(
     rules: Rules,
     reprocess: bool = False,
     force_reprocess_keys: Optional[set] = None,
+    cache_path: Optional[Path] = None,
+    cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, int]:
     """Grava Consolidado -> Base Final sem jamais alterar linhas Revisão B.I=OK."""
     import pandas as pd
 
     if not master_path and not final_path:
         return {}
+
+    # Fail-closed: jamais reconstruir uma Base Final vazia quando o Consolidado
+    # ainda contém Gold/classificações aceitas. O backup deve ser restaurado antes.
+    if master_path and master_path.exists() and final_path:
+        guard_inventory = load_baseline_inventory(master_path, final_path)
+        master_accepted = len(guard_inventory["master_accepted"])
+        final_accepted = len(guard_inventory["final_accepted"])
+        if master_accepted and (not final_path.exists() or not final_accepted):
+            # OneDrive pode criar uma cópia com sufixo aleatório e retirar o
+            # nome canônico. Não escolher/restaurar automaticamente um conflito.
+            candidates = (
+                sorted(
+                    p.name for p in final_path.parent.glob(final_path.stem + "-*" + final_path.suffix)
+                    if p.is_file()
+                ) if not final_path.exists() else []
+            )
+            hint = (
+                " Possiveis copias conflitantes: " + ", ".join(candidates[:5])
+                + ". Preserve as copias e restaure o nome canonico apos conferir."
+                if candidates else ""
+            )
+            raise RuntimeError(
+                "BASELINE_FINAL_MISSING_OR_EMPTY: Consolidado possui "
+                f"{master_accepted} classificacoes aceitas, mas Base Final possui "
+                f"{final_accepted}. Exportacao BLOQUEADA antes de qualquer escrita. "
+                "Verifique caminho/nome da Base Final antes de restaurar backup." + hint
+            )
 
     review_bi_snapshot, review_bi_source_exists = _load_review_bi_snapshot(final_path)
     bi_lock_snapshot = _load_bi_lock_snapshot(final_path)
@@ -7538,29 +8454,70 @@ def persist_baseline_excels(
     elif final_path and final_path.exists():
         source_path = final_path
 
-    if source_path:
+    if source_path and source_path != input_path:
         master_df, master_sheet = _read_business_sheet(source_path)
     else:
+        # A entrada é lista de SKUs, não uma baseline já classificada.
+        # Partir de um cadastro vazio evita declarar itens como existentes sem status.
         master_df = pd.DataFrame(columns=["Marca", "Modelo"])
 
     master_df, brand_col, model_col = _ensure_master_columns(master_df)
     master_df, sync_stats = _sync_final_into_master(master_df, final_path, brand_col, model_col)
     master_df, brand_col, model_col = _ensure_master_columns(master_df)
+    master_df, input_registered = _register_input_keys_in_master(master_df, input_path)
+    cache_stats = _hydrate_input_collection_from_cache(master_df, input_path, cache_path, cfg)
+    if cache_path is not None:
+        LOG.info("CACHE -> BASELINE | %s", " | ".join(f"{k}={v}" for k, v in cache_stats.items()))
     master_df, merge_stats = _upsert_run_rows_into_master(
         master_df, rows, brand_col, model_col, rules, reprocess, force_reprocess_keys
     )
 
     master_df = _apply_review_bi_snapshot(
-        master_df, brand_col, model_col, review_bi_snapshot, review_bi_source_exists
+        master_df, brand_col, model_col, review_bi_snapshot, review_bi_source_exists,
+        bi_lock_snapshot=bi_lock_snapshot
     )
     master_df, legacy_taxonomy_cleaned = _sanitize_legacy_unresolved_taxonomy(master_df)
 
     # Antes de tocar nos arquivos, prova que o HARD LOCK continua idêntico.
     _assert_bi_lock_snapshot(master_df, bi_lock_snapshot, "Consolidado em memória")
+    # Os aceitos existentes não podem desaparecer durante uma mera sincronização.
+    if not force_reprocess_keys and master_path and final_path:
+        before_accepted = load_baseline_inventory(master_path, final_path)["processed"]
+        mb = find_col(master_df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        mm = find_col(master_df, ["Modelo", "Model", "SKU", "Part Number"])
+        after_accepted = {
+            business_key(safe(row.get(mb)), safe(row.get(mm)))
+            for _, row in master_df.iterrows()
+            if _baseline_row_accepted(row, master_df)
+        }
+        dropped = before_accepted - after_accepted
+        if dropped:
+            raise RuntimeError(
+                "BASELINE_ACCEPTED_PRESERVATION_FAILED: "
+                f"{len(dropped)} classificacoes aceitas seriam removidas. "
+                "Nenhum Excel foi regravado."
+            )
+
+    # Verificar acesso a AMBOS os arquivos antes de gravar o primeiro.
+    # Em Windows, Excel costuma negar abertura para escrita de um workbook aberto.
+    # Falhar antes evita Consolidado atualizado e Base Final desatualizada.
+    for target in (master_path, final_path):
+        if target is None or not target.exists():
+            continue
+        try:
+            with target.open("r+b"):
+                pass
+        except PermissionError as exc:
+            raise PermissionError(
+                f"BASELINE_FILE_LOCKED: feche '{target.name}' no Excel antes da sincronizacao; "
+                "nenhuma exportacao foi iniciada."
+            ) from exc
 
     stats = {
         **sync_stats,
         **merge_stats,
+        **cache_stats,
+        "input_registered": input_registered,
         "legacy_taxonomy_cleaned": legacy_taxonomy_cleaned,
         "review_bi_snapshot_rows": len(review_bi_snapshot),
         "bi_ok_hard_lock_rows": len(bi_lock_snapshot),
@@ -7574,7 +8531,9 @@ def persist_baseline_excels(
 
     if final_path:
         stats["final_rows"] = _export_base_final(
-            master_df, final_path, review_bi_snapshot, review_bi_source_exists, bi_lock_snapshot
+            master_df, final_path, review_bi_snapshot, review_bi_source_exists, bi_lock_snapshot,
+            input_path=input_path,
+            cache_path=cache_path,
         )
 
     inv_after = load_baseline_inventory(master_path, final_path)
@@ -7819,12 +8778,46 @@ def _expected_cohort_accepted_after_run(
         if key not in cohort_keys:
             continue
 
+        # CLASSIFIED_CLEF e classificacao proposta, nao baseline aceito.
+        # O Consolidado persiste esses registros como PROVAVEL/DOUBLE_CHECK;
+        # _baseline_row_accepted exige RESOLVED e rejeita CLASSIFIED_CLEF.
+        # O gate precisa comparar aceitos com aceitos, sem contar candidatos.
         if _record_is_accepted(rec):
             expected.add(key)
         elif key in force_keys:
             expected.discard(key)
 
     return expected
+
+_EQUIVALENCE_ACCEPT_ACTIONS = {
+    "CONCLUIDO_POR_EQUIVALENCIA_BI",
+    "CONCLUIDO_POR_EQUIVALENCIA_TECNICA",
+}
+
+
+def _cohort_equivalence_accepted_keys(final_path: Optional[Path], cohort_keys: set) -> set:
+    """Aceitos extras permitidos somente quando a Base Final registra equivalência auditável."""
+    if not final_path or not final_path.exists() or not cohort_keys:
+        return set()
+
+    final_df, _ = _read_business_sheet(final_path)
+    brand_col = find_col(final_df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    model_col = find_col(final_df, ["Modelo", "Model", "SKU", "Part Number"])
+    action_col = find_col(final_df, ["Próxima Ação", "Proxima Acao"], required=False)
+    if not action_col:
+        return set()
+
+    accepted: set = set()
+    for _, row in final_df.iterrows():
+        key = business_key(safe(row.get(brand_col)), safe(row.get(model_col)))
+        if key not in cohort_keys:
+            continue
+        action = safe(row.get(action_col)).upper()
+        if action not in _EQUIVALENCE_ACCEPT_ACTIONS:
+            continue
+        if _baseline_row_accepted(row, final_df):
+            accepted.add(key)
+    return accepted
 
 
 def inventory(
@@ -7941,13 +8934,25 @@ def _cache_recovery_reason(
     resolution = safe(row.get(resolution_col)).upper() if resolution_col else ""
     pipeline_version = safe(row.get(pipeline_col)) if pipeline_col else ""
     meta = master_meta.get(key, {})
+    # A Base Final nao expoe Pipeline Version: consultar a proveniencia do
+    # Consolidado evita enfileirar novamente propostas ja aguardando double-check.
+    metadata_pipeline_version = safe(meta.get("pipeline_version"))
+    version_current = (
+        pipeline_version == PIPELINE_VERSION
+        or metadata_pipeline_version == PIPELINE_VERSION
+    )
     if (
         resolution == "CLASSIFIED_CLEF"
         and review in {"PROVÁVEL", "PROVAVEL"}
         and _rule_metadata_is_current(meta, rules)
-        and pipeline_version == PIPELINE_VERSION
+        and version_current
     ):
         return ""
+    # REVIEW_CACHE_EVIDENCE precisa permanecer visivel na recuperacao.
+    # Uma revisao nao e uma classificacao concluida. A fila usa elegibilidade
+    # de evidencia + ledger para evitar repeticao paga do mesmo SKU.
+    if resolution == "REVIEW_NO_RESULTS":
+        return "REVISAO_SEM_RESULTADOS"
 
     if accepted:
         if review == "AUTO_APROVADO":
@@ -7986,8 +8991,10 @@ def build_cache_recovery_plan(
     rules: Rules,
     cfg: Dict[str, Any],
     max_items: int = 0,
+    include_stale_auto: bool = False,
+    exclude_keys: Optional[set] = None,
 ) -> Tuple[List[Tuple[str, str, str]], Dict[str, int]]:
-    """Seleciona pendências + AUTO_APROVADO de regra antiga, sem Tavily."""
+    """Pendencias do cache; aprovados tecnicos antigos somente com opt-in."""
     source = final_path if final_path and final_path.exists() else master_path
     if not source or not source.exists():
         raise FileNotFoundError("Cache Recovery exige Base Final ou Consolidado existente.")
@@ -8012,6 +9019,8 @@ def build_cache_recovery_plan(
     target_ranked: List[Tuple[int, str, str, str]] = []
     seen = set()
     locked = good = stale_auto = stale_unknown_meta = 0
+    review_total = review_with_cache = review_without_cache = 0
+    evidence_not_classifiable = 0
     collection_counts: Dict[str, int] = defaultdict(int)
 
     for _, row in df.iterrows():
@@ -8022,6 +9031,10 @@ def build_cache_recovery_plan(
         if key in seen:
             continue
         seen.add(key)
+        review_value = safe(row.get(fields["Revisão"])).upper() if fields["Revisão"] else ""
+        is_review = review_value in {"REVISAR", "PENDENTE_RECOLETA", "PENDENTE_CLASSIFICACAO"}
+        if is_review:
+            review_total += 1
         if _row_bi_locked(row, df):
             locked += 1
             continue
@@ -8029,7 +9042,7 @@ def build_cache_recovery_plan(
         recovery_reason = _cache_recovery_reason(
             row, df, key, master_meta, rules
         )
-        if not recovery_reason:
+        if not recovery_reason or (recovery_reason == "AUTO_APROVADO_REGRA_OBSOLETA" and not include_stale_auto):
             good += 1
             continue
         if recovery_reason == "AUTO_APROVADO_REGRA_OBSOLETA":
@@ -8065,6 +9078,8 @@ def build_cache_recovery_plan(
             "Rules Hash Atual": rules.hash,
         }
         if raw.state in {"RAW_OK", "RAW_OK_MERGED"}:
+            if is_review:
+                review_with_cache += 1
             if recovery_reason == "AUTO_APROVADO_REGRA_OBSOLETA":
                 rec["Ação"] = "REPROCESSAR_REGRA_OBSOLETA"
             elif curated_count:
@@ -8074,17 +9089,38 @@ def build_cache_recovery_plan(
             else:
                 rec["Ação"] = "RECOLETA_NECESSARIA"
             with_cache.append(rec)
-            # Pilotos/recovery priorizam o que pode ser classificado agora. Itens sem
-            # evidência permanecem na mesma fila, mas vêm depois e viram NEEDS_RECOLLECTION
-            # sem BGE/Clef. Nenhuma segunda consulta é disparada automaticamente.
-            state_priority = {
-                "READY_FOR_CLASSIFICATION": 0,
-                "PARTIAL_TARGET_EVIDENCE": 1,
-                "NO_TARGET_EVIDENCE": 2,
-            }.get(coll_state, 1 if curated_count else 2)
-            target_ranked.append((state_priority, brand, model, key))
+            # Títulos e fontes aparecem no relatório para TODOS. A chamada LLM
+            # só é permitida com evidência classficável (curada/auxiliar segura).
+            aux = [x for x in (coll.get("evidence_cache", []) or []) if isinstance(x, dict)]
+            aux_safe = any(
+                safe(x.get("tier")) == "AUXILIARY_REVIEW_ONLY"
+                and safe(x.get("identity")) in {"STRONG", "PROBABLE"}
+                and bool(x.get("eligible_for_llm_rescue", True))
+                and safe(x.get("decision")) not in {
+                    "REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY"
+                }
+                for x in aux
+            )
+            if coll_state == "READY_FOR_CLASSIFICATION":
+                priority = 0
+            elif coll_state == "PARTIAL_TARGET_EVIDENCE":
+                priority = 1
+            elif curated_count > 0:
+                priority = 2
+            elif aux_safe:
+                priority = 3
+            else:
+                priority = None
+            if priority is not None:
+                target_ranked.append((priority, brand, model, key))
+            else:
+                evidence_not_classifiable += 1
+                rec["Ação"] = "REVISAR_EVIDENCIA_CACHE_SEM_CHAMADA_LLM"
         else:
-            rec["Ação"] = "PENDENTE_COLETA"
+            if is_review:
+                review_without_cache += 1
+            rec["Ação"] = ("PENDENTE_COLETA" if raw.state == "RAW_MISSING"
+                           else "REVISAR_CACHE_EXISTENTE")
             without_cache.append(rec)
 
     _export_recovery_report(with_cache, with_cache_path, "Pendentes_Com_Cache")
@@ -8092,8 +9128,18 @@ def build_cache_recovery_plan(
 
     target_ranked.sort(key=lambda x: (x[0], business_key(x[1], x[2])))
     target_all = [(brand, model, key) for _, brand, model, key in target_ranked]
-    targets = target_all[:max_items] if max_items else target_all
+    # Retomada: uma chave tentada neste plano de execucao nao deve
+    # consumir novamente tokens nem ocupar as mesmas primeiras posicoes.
+    excluded = set(exclude_keys or set())
+    available = [item for item in target_all if item[2] not in excluded]
+    targets = available[:max_items] if max_items else available
     stats = {
+        "recovery_ledger_excluded": len(target_all) - len(available),
+        "recovery_remaining": len(available),
+        "review_total_base": review_total,
+        "review_com_cache": review_with_cache,
+        "review_sem_cache": review_without_cache,
+        "cache_sem_evidencia_classificavel": evidence_not_classifiable,
         "linhas_unicas_analisadas": len(seen),
         "bi_ok_hard_lock": locked,
         "baseline_atual_ignorado": good,
@@ -8116,10 +9162,20 @@ def run_cache_recovery(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     with_path = Path(cfg.get("files", {}).get("pending_with_cache", "Pendentes_Com_Cache.xlsx"))
     without_path = Path(cfg.get("files", {}).get("pending_without_cache", "Pendentes_Sem_Cache.xlsx"))
 
+    ledger_path = Path(args.recovery_ledger) if safe(getattr(args, "recovery_ledger", "")) else None
+    attempted_keys = set()
+    if ledger_path and ledger_path.exists():
+        attempted_keys = {
+            line.strip() for line in ledger_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        }
+
     store = TavilyReadOnlyStore(cache_path)
     try:
         targets, plan_stats = build_cache_recovery_plan(
-            final_path, master_path, store, with_path, without_path, rules, cfg, args.max_items
+            final_path, master_path, store, with_path, without_path, rules, cfg, args.max_items,
+            include_stale_auto=bool(getattr(args, "include_stale_auto", False)),
+            exclude_keys=attempted_keys,
         )
     finally:
         store.close()
@@ -8133,6 +9189,13 @@ def run_cache_recovery(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
     # O conjunto contém pendências e AUTO_APROVADO técnico obsoleto.
     # O pipeline revalida HARD LOCK antes do primeiro item.
     run_pipeline(args, cfg, rules, explicit_targets=targets)
+    # Grava ledger SOMENTE depois de salvar baseline e passar pelos gates.
+    # Falhas/interruptoes nao avancam a fila e podem ser retomadas.
+    if ledger_path:
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        with ledger_path.open("a", encoding="utf-8") as ledger:
+            for _, _, key in targets:
+                ledger.write(key + "\n")
 
 
 def run_pipeline(
@@ -8202,7 +9265,8 @@ def run_pipeline(
     # revalidado separadamente e nunca é vencido por esta lista.
     force_reprocess_keys = (
         {x[2] for x in explicit_targets}
-        if explicit_targets is not None
+        if explicit_targets is not None and bool(getattr(args, "reprocess", False))
+        and bool(getattr(args, "include_stale_auto", False))
         else set()
     )
     processed = baseline_inventory["processed"]
@@ -8218,6 +9282,9 @@ def run_pipeline(
             LOG.info("Arquivo: %s", inventory_path)
             return
 
+        llm_provider = safe(getattr(args, "llm_provider", "")).lower() or safe(cfg.get("classification_v42", {}).get("default_provider")).lower() or "clef"
+        if llm_provider not in {"jev", "clef", "local"}:
+            raise RuntimeError(f"CLASSIFICATION_PROVIDER_INVALID: {llm_provider}")
         clef_model = (
             os.getenv("CLOUDFLARE_CLEF_MODEL", "").strip()
             or safe(cfg.get("clef", {}).get("model"))
@@ -8226,12 +9293,26 @@ def run_pipeline(
         if safe(getattr(args, "clef_model", "")):
             clef_model = safe(args.clef_model)
 
-        clef_identity = f"clef:{clef_model}"
+        if llm_provider == "jev":
+            clef_model = safe(cfg.get("jev", {}).get("model")) or "jev-latest"
+        if llm_provider != "local":
+            provider_cfg = dict(cfg.get(llm_provider, {}) or {})
+            # Zero means unrestricted; explicit CLI/config limits are still respected.
+            max_calls = int(getattr(args, "max_api_calls", 0) or provider_cfg.get("max_api_calls_per_run", 0) or 0)
+            max_tokens = int(getattr(args, "max_tokens", 0) or provider_cfg.get("max_total_tokens_per_run", 0) or 0)
+            if max_calls < 0 or max_tokens < 0:
+                raise ValueError("Limites HTTP/tokens nao podem ser negativos.")
+            provider_cfg["max_api_calls_per_run"] = max_calls
+            provider_cfg["max_total_tokens_per_run"] = max_tokens
+            cfg[llm_provider] = provider_cfg
+            LOG.info("LLM BUDGET | provider=%s | http_cap=%s | tokens_cap=%s",
+                     llm_provider, max_calls or "SEM_LIMITE", max_tokens or "SEM_LIMITE")
+        clef_identity = f"{llm_provider}:{clef_model if llm_provider != 'local' else 'rules-only'}"
         db = ClassificationDB(db_path)
         run_id = db.start_run(args.mode, rules.hash, clef_identity)
         engine = DeterministicEngine(rules, cfg)
 
-        use_clef = not bool(getattr(args, "no_clef", False))
+        use_clef = llm_provider != "local" and not bool(getattr(args, "no_clef", False))
         clef: Optional[ClefFunnelClassifier] = None
 
         rows: List[Dict[str, Any]] = []
@@ -8341,17 +9422,17 @@ def run_pipeline(
         if use_clef and targets:
             try:
                 clef = ClefFunnelClassifier(
-                    rules=rules, cfg=cfg, db=db, provider="clef", model=clef_model
+                    rules=rules, cfg=cfg, db=db, provider=llm_provider, model=clef_model
                 )
                 pf = clef.preflight()
                 clef_identity = clef.route_identity_fragment()
                 db.update_run_model(run_id, clef_identity)
                 LOG.info(
-                    "CLEF PRE-FLIGHT OK | model=%s | endpoint=%s | ritmo=%.1f req/min",
-                    clef.model, pf["base_url"], pf["operational_rpm"],
+                    "LLM PRE-FLIGHT OK | provider=%s | model=%s | endpoint=%s | ritmo=%.1f req/min",
+                    llm_provider, clef.model, pf["base_url"], pf["operational_rpm"],
                 )
                 LOG.info(
-                    "ROTA CLEF ATIVA | regra forte fecha; todo AMBIGUOUS/UNRESOLVED com evidência útil segue BGE/reranker -> Clef; falta de evidência vira NEEDS_RECOLLECTION."
+                    "ROTA LLM ATIVA | provider=%s | regra forte fecha; demais usam BGE/reranker -> provedor selecionado.", llm_provider
                 )
             except OperationalPause as exc:
                 db.event(run_id, "", exc.code, safe(exc))
@@ -8501,6 +9582,8 @@ def run_pipeline(
                     rules=rules,
                     reprocess=args.reprocess,
                     force_reprocess_keys=force_reprocess_keys,
+                    cache_path=cache_path,
+                    cfg=cfg,
                 )
                 if baseline_stats:
                     post_inv = load_baseline_inventory(master_path, final_path)
@@ -8513,9 +9596,15 @@ def run_pipeline(
                         rows=rows,
                         force_reprocess_keys=force_reprocess_keys,
                     )
+                    equivalence_accepted_keys = _cohort_equivalence_accepted_keys(
+                        final_path=final_path,
+                        cohort_keys=cohort_keys,
+                    )
+                    expected_cohort_keys |= equivalence_accepted_keys
                     expected_cohort_accepted = len(expected_cohort_keys)
                     stats["cohort_final_accepted_at_end"] = final_cohort_accepted
                     stats["cohort_expected_accepted_at_end"] = expected_cohort_accepted
+                    stats["cohort_equivalence_accepted_at_end"] = len(equivalence_accepted_keys)
 
                     LOG.info(
                         "BASELINE EXCEL ATUALIZADA | %s",
@@ -8524,10 +9613,11 @@ def run_pipeline(
                         ),
                     )
                     LOG.info(
-                        "COHORT BASE FINAL | aceitos=%d/%d | esperado=%d | review=%d",
+                        "COHORT BASE FINAL | aceitos=%d/%d | esperado=%d | equivalencia=%d | review=%d",
                         final_cohort_accepted,
                         len(cohort),
                         expected_cohort_accepted,
+                        len(equivalence_accepted_keys),
                         int(stats.get("final_review", 0) or 0),
                     )
 
@@ -8587,6 +9677,11 @@ def run_pipeline(
                 LOG.warning(
                     "Rode novamente depois; checkpoints e cache Clef evitam repetir itens concluídos."
                 )
+            elif baseline_warning:
+                LOG.error(
+                    "EXECUÇÃO BLOQUEADA: baseline divergente. Resultado parcial: %s | motivo=%s",
+                    output_path, baseline_warning,
+                )
             else:
                 LOG.info("CONCLUÍDO. Resultado: %s", output_path)
 
@@ -8594,6 +9689,14 @@ def run_pipeline(
                 "Resumo: %s",
                 " | ".join(f"{k}={v}" for k, v in stats.items()),
             )
+            # Logs, planilhas e checkpoints podem ter sido gravados, mas a
+            # execução NÃO pode retornar exit code 0 se o baseline divergiu.
+            if baseline_warning:
+                raise RuntimeError("BASELINE_PERSISTENCE_FAILED: " + baseline_warning)
+            # Um cap de API ou pausa operacional pode deixar o lote incompleto.
+            # Nao gravar todas as chaves no ledger de retomada nessa situacao.
+            if paused_reason:
+                raise RuntimeError("RECOVERY_BATCH_PAUSED: " + paused_reason)
 
         except KeyboardInterrupt:
             try:
@@ -8605,6 +9708,8 @@ def run_pipeline(
                     rules=rules,
                     reprocess=args.reprocess,
                     force_reprocess_keys=force_reprocess_keys,
+                    cache_path=cache_path,
+                    cfg=cfg,
                 )
                 if partial_baseline:
                     LOG.warning(
@@ -8892,7 +9997,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -8906,42 +10011,67 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--precollection-output", default="")
     p.add_argument("--evidence-output", default="")
     p.add_argument("--clef-model", dest="clef_model", default="")
+    p.add_argument("--llm-provider", choices=["jev", "clef", "local"], default="")
     p.add_argument("--no-clef", dest="no_clef", action="store_true")
     p.add_argument("--no-checkpoint", action="store_true")
     p.add_argument("--reprocess", action="store_true")
     p.add_argument("--max-items", type=int, default=0)
+    p.add_argument("--max-api-calls", type=int, default=0, help="Limite HTTP LLM incluindo retries e reparos.")
+    p.add_argument("--max-tokens", type=int, default=0, help="Limite de tokens LLM reportados.")
+    p.add_argument("--include-stale-auto", action="store_true", help="Recuperar tambem autoaprovados antigos.")
+    p.add_argument("--recovery-ledger", default="", help="Arquivo de chaves ja tentadas pela recuperacao, para execucao sequencial em lotes.")
     p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
     p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata"], default="")
     p.add_argument("--recollect-empty", action="store_true")
-    p.add_argument("--auto-providers", action="store_true", help="Rotate between configured accounts for distinct products only")
+    p.add_argument("--auto-providers", action="store_true", help="Rotação entre contas/provedores apenas para SKUs distintos")
     p.add_argument("--recollect-low-evidence", action="store_true")
     p.add_argument("--curate-all-cache", action="store_true", help="No modo curate, ignora o arquivo de entrada e percorre todo o cache")
+    p.add_argument("--force-curate", action="store_true", help="Reavaliar a curadoria atual sem repetir Search; preserva historico do SQLite.")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p
 
 
 def _menu_limit(prompt: str) -> int:
-    """Permite piloto sem expor argumentos de linha de comando ao operador."""
-    raw = input(prompt).strip()
-    if not raw:
-        return 0
-    if not raw.isdigit() or int(raw) <= 0:
-        print("Valor inválido. Será considerado TODOS.")
-        return 0
-    return int(raw)
+    """ENTER/TODOS=sem limite de produtos."""
+    while True:
+        raw = input(prompt).strip().upper()
+        if not raw or raw == "TODOS":
+            return 0
+        if raw.isdecimal() and int(raw) > 0:
+            return int(raw)
+        print("Informe inteiro positivo ou pressione ENTER para todos.")
 
 
 def _menu_search_provider() -> str:
-    raw = input("Provider de busca [TAVILY / SERPER / BRIGHTDATA] (ENTER = TAVILY): ").strip().casefold()
-    if not raw:
-        return "tavily"
-    aliases = {"bright data": "brightdata", "bright_data": "brightdata", "bright-data": "brightdata"}
-    raw = aliases.get(raw, raw)
-    if raw not in ALLOWED_SEARCH_PROVIDERS:
-        print("Provider inválido. Será usado TAVILY.")
-        return "tavily"
-    return raw
+    """Seleção numérica explícita; nunca iniciar coleta com provider inválido."""
+    options = {"1": "tavily", "2": "serper", "3": "brightdata"}
+    while True:
+        print("\nAPI DE COLETA / SEARCH")
+        print("1 - TAVILY")
+        print("2 - SERPER")
+        print("3 - BRIGHT DATA")
+        raw = input("Selecione [1/2/3] (ENTER = 1 / TAVILY): ").strip()
+        if not raw:
+            raw = "1"
+        if raw in options:
+            choice = options[raw]
+            print(f"API selecionada: {choice.upper()}")
+            return choice
+        print("Opção inválida. Escolha 1, 2 ou 3.")
+
+
+def _menu_llm_provider() -> str:
+    options = {"1": "jev", "2": "clef", "3": "local"}
+    while True:
+        print("\nCLASSIFICADOR")
+        print("1 - JEV / TypeSafe AI")
+        print("2 - Cloudflare Clef")
+        print("3 - Somente regras locais (sem LLM)")
+        choice = input("Selecione [1/2/3] (ENTER = 1 / JEV): ").strip() or "1"
+        if choice in options:
+            return options[choice]
+        print("Opção inválida: escolha 1, 2 ou 3.")
 
 
 def interactive_menu(base: Path) -> argparse.Namespace:
@@ -8963,17 +10093,21 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
-        limite = _menu_limit("Limite de produtos para coleta (ENTER = todos): ")
+        # Diferente do piloto de classificacao (ENTER=100), coleta em branco
+        # significa SEM LIMITE. A lista exata de requests e confirmada antes
+        # de qualquer chamada; RAW ja consultado nunca entra automaticamente.
+        raw_limit = input("Limite de produtos para coleta (ENTER = todos; 0 buscas para itens ja consultados): ").strip().upper()
+        if raw_limit and raw_limit != "TODOS" and (not raw_limit.isdecimal() or int(raw_limit) <= 0):
+            raise ValueError("Limite de coleta deve ser inteiro positivo ou TODOS/ENTER")
+        limite = int(raw_limit) if raw_limit and raw_limit != "TODOS" else 0
         argv = ["--mode", "collect", "--search-provider", provider]
-        low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
-        if low == "S":
-            argv += ["--recollect-low-evidence"]
         if limite:
             argv += ["--max-search-new", str(limite)]
         return parser.parse_args(argv)
     if op == "2":
         limite = _menu_limit("Limite de produtos para piloto (ENTER = todos): ")
-        argv = ["--mode", "classify"]
+        llm = _menu_llm_provider()
+        argv = ["--mode", "classify", "--llm-provider", llm]
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
@@ -8981,7 +10115,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         provider = _menu_search_provider()
         limite_search = _menu_limit("Limite de produtos na coleta (ENTER = todos): ")
         limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
-        argv = ["--mode", "full", "--search-provider", provider]
+        llm = _menu_llm_provider()
+        argv = ["--mode", "full", "--search-provider", provider, "--llm-provider", llm]
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
             argv += ["--recollect-low-evidence"]
@@ -8992,7 +10127,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(argv)
     if op == "4":
         limite = _menu_limit("Limite de pendências COM CACHE para reprocessar (ENTER = todas): ")
-        argv = ["--mode", "recover"]
+        llm = _menu_llm_provider()
+        argv = ["--mode", "recover", "--llm-provider", llm]
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
@@ -9208,6 +10344,8 @@ def run_baseline_repair(args: argparse.Namespace, cfg: Dict[str, Any], rules: Ru
         input_path=input_path,
         rules=rules,
         reprocess=False,
+        cache_path=Path(args.cache or cfg["files"]["cache"]),
+        cfg=cfg,
     )
     LOG.info(
         "REPARO BASE CONCLUÍDO SEM CLEF | %s",
@@ -9295,6 +10433,35 @@ def main() -> int:
             "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
             "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
         )
+    # A existência do SKU nas bases finais não depende de Search nem de classificação.
+    # Executa uma única sincronização segura antes de coletar/classificar.
+    if args.mode in {"collect", "full", "sync-input"}:
+        files_cfg = cfg.get("files", {}) or {}
+        input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
+        master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
+        final_sync = Path(files_cfg.get("final", "Base Final Produtos Enriquecida.xlsx"))
+        if not input_sync.exists():
+            LOG.error("Sincronização não iniciada: Base de entrada ausente: %s", input_sync)
+            return 2
+        try:
+            _backup_baseline_files(
+                master_sync, final_sync,
+                Path(files_cfg.get("baseline_backup_dir", "Backups_Baseline")),
+            )
+            sync_stats = persist_baseline_excels(
+                rows=[], master_path=master_sync, final_path=final_sync,
+                input_path=input_sync, rules=rules,
+                cache_path=Path(args.cache or files_cfg.get("cache", "cache_tavily.sqlite")),
+                cfg=cfg,
+            )
+            LOG.info("INPUT BASELINE SYNC OK | inserted=%s | final_rows=%s",
+                     sync_stats.get("input_registered", 0), sync_stats.get("final_rows", 0))
+        except Exception as exc:
+            LOG.error("INPUT BASELINE SYNC FAILED; interrompendo para preservar os dados: %s", exc)
+            return 2
+
+    if args.mode == "sync-input":
+        return 0
     if args.mode == "inventory":
         run_pipeline(args, cfg, rules)
         return 0
@@ -9302,8 +10469,19 @@ def main() -> int:
         provider = _resolve_search_provider(args, cfg)
         if not args.auto_providers:
             _provider_credentials(provider, cfg)
-        collect_products(args, cfg, rules)
-        return 0
+        completed = collect_products(args, cfg, rules)
+        if completed:
+            files_cfg = cfg.get("files", {}) or {}
+            persist_baseline_excels(
+                rows=[],
+                master_path=Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx")),
+                final_path=Path(files_cfg.get("final", "Base Final Produtos Enriquecida.xlsx")),
+                input_path=Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx")),
+                rules=rules,
+                cache_path=Path(args.cache or files_cfg.get("cache", "cache_tavily.sqlite")),
+                cfg=cfg,
+            )
+        return 0 if completed else 3
     if args.mode == "curate":
         curate_cache_without_tavily(args, cfg, rules)
         return 0
