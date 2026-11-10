@@ -7,10 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import os
+import sys
 import importlib.util
 if os.getenv("ARGENTINA_PILOT_SCRIPT"):
     spec = importlib.util.spec_from_file_location("argentina_pilot_pipeline", os.environ["ARGENTINA_PILOT_SCRIPT"])
     p = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = p
     spec.loader.exec_module(p)
 else:
     import pipeline_produtos as p
