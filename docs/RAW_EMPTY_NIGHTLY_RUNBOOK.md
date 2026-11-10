@@ -74,3 +74,51 @@ and NO automatic progression to the remaining 18K. After a human validates
 the results, promotion/sync requires a separate, audited procedure.
 
 Production mass authorization: **BLOCKED**, even on all PASS reports.
+
+
+## 2026-11-10 forensic finding / mandatory operational-error separation
+
+The actual offline audit of configured input has **1,030 unique keys**, all
+\`RAW_EMPTY\` due to Serper HTTP 400 \`Not enough credits\`, with
+\`REQUEST_ATTEMPTED_NO_AUTO_RETRY\`. Consequently normal eligible count is **0**.
+This is NOT search quality. The original ~1,130 was an estimate, not the
+observed count of this input.
+
+Never run the previous live command without authorization for prior errors:
+it will correctly find no eligible SKUs.
+
+The pipeline now records operational errors ONLY in the separate SQLite
+attempt history, not in \`tavily_cache\`. Future \`RAW_MISSING\` keys with a prior
+attempt ledger record are also excluded from automatic collection.
+
+To explicitly pilot up to 20 of the previously failed Serper cases using
+a DIFFERENT provider, add \`--allow-prior-serper-quota-error\` to the original
+bounded \`--execute-live\` command. The pilot clears Serper API keys in the
+worker and requires positive budgeted Tavily or Bright Data credentials.
+Review account billing and cross-provider charges before consenting.
+
+The legacy error-only tombstones remain untouched until optional audited
+migration. Do NOT migrate before selecting the pilot if the goal is to
+pilot previously failed Serper records, because migration will register
+all previous attempts in the normal ledger and deliberately block automatic
+requeries.
+
+After the explicitly reviewed pilot, use the following **dry-run first**
+migration to remove *only* error-only legacy payloads from the RAW cache and
+persist every failed attempt in the classification SQLite ledger:
+
+\`\`\`powershell
+& C:\p\venv\Scripts\python.exe .\migrate_legacy_search_errors.py
+\`\`\`
+
+After checking the counts and choosing to retain the historical no-retry lock:
+
+\`\`\`powershell
+& C:\p\venv\Scripts\python.exe .\migrate_legacy_search_errors.py --apply
+\`\`\`
+
+\`--apply\` creates SQLite backup snapshots and **does not send any Search
+requests**. This migration makes previous errors become \`RAW_MISSING\` in
+the evidence cache, but the separate ledger ensures they do **not** become
+eligible for automatic collection. Future rescue requires a separately
+audited and approved operation.
