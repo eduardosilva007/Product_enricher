@@ -8692,7 +8692,7 @@ def reconcile_baseline_before_run(
 # Excel XML 1.0 forbids control codepoints even when they are valid Unicode
 # in scraped search snippets. Preserve original source evidence in SQLite;
 # sanitize ONLY exported worksheet string values (not business keys).
-_EXCEL_ILLEGAL_CONTROLS = re.compile(r"[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]")
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE as _EXCEL_ILLEGAL_CONTROLS
 
 
 def _excel_export_safe_value(value: Any) -> Any:
