@@ -4,10 +4,12 @@
 No Search/JEV/Clef. Extraction is evidence hints, NOT classification accuracy.
 """
 from __future__ import annotations
-import argparse,json,sqlite3,time
+import argparse,json,sqlite3,time,sys
 from contextlib import closing
 from pathlib import Path
 
+ROOT=Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(ROOT))
 from gliner_raw_fallback import raw_texts
 
 LABELS=("brand","model","product type","power source","product family")
@@ -43,6 +45,9 @@ def main():
     if not 1<=a.max_items<=200:p.error("max-items must be 1..200")
     model_path=Path(a.model)
     if not model_path.is_dir():raise FileNotFoundError(f"Local model directory missing: {model_path}")
+    required=["config.json","model.safetensors","tokenizer.json"]
+    absent=[name for name in required if not (model_path/name).is_file()]
+    if absent:raise FileNotFoundError(f"Incomplete GLiNER2.5 local checkpoint {model_path}; missing: {absent}")
     # GLiNER2.5 boundary checkpoints require gliner2 AutoExtractor, not gliner.GLiNER.
     try:
         from gliner2 import AutoExtractor
