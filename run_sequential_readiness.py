@@ -21,6 +21,7 @@ TESTS = [
     ("Mass readiness regression", ["-m","unittest","discover","-s","tests","-p","test_mass_readiness_audit.py","-v"]),
     ("Observed-cohort regression", ["-m","unittest","discover","-s","tests","-p","test_observed_failure_cohort.py","-v"]),
     ("Provider quotas/resume (synthetic)",["-m","unittest","discover","-s","tests","-p","test_nightly_provider_router.py","-v"]),
+    ("Full queue >100 and resume",["-m","unittest","discover","-s","tests","-p","test_full_queue_no_100_ceiling.py","-v"]),
     ("Optional identity fallbacks",["-m","unittest","discover","-s","tests","-p","test_optional_identity_fallbacks.py","-v"]),
     ("Offline identity benchmark regression",["-m","unittest","discover","-s","tests","-p","test_benchmark_identity_offline.py","-v"]),
 ]
