@@ -204,11 +204,14 @@ def outcome_audit(run,state,isolated):
         log=run/state["stages"]["classification"]["log"]
     logtext=log.read_text(encoding="utf-8",errors="replace") if log.is_file() else ""
     log_checks={label:label in logtext for label in labels}
-    passed=not missing and not missing_existing and not protected_changes and not protected_originals(state)
+    useful_raw=sum(raw_states.get(x,0) for x in ("RAW_OK","RAW_OK_MERGED"))
+    passed=(not missing and not missing_existing and not protected_changes
+            and not protected_originals(state) and useful_raw>0 and all(log_checks.values()))
     result={"status":"PASS" if passed else "FAIL","cohort":len(cohort_rows),
             "missing_cohort_in_final":missing[:20],"missing_original_in_final":missing_existing[:20],
             "protected_manual_or_bi_changes":protected_changes[:20],
-            "cache_states_after":raw_states,"log_contracts":log_checks,
+            "cache_states_after":raw_states,"useful_raw_count":useful_raw,
+            "log_contracts":log_checks,
             "original_source_modified":protected_originals(state),
             "quality_decision":"REVIEW_REQUIRED","taxonomy_accuracy_measured":False}
     state["quality_audit"]=result
