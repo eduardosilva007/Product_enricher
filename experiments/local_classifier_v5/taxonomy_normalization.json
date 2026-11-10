@@ -1,0 +1,188 @@
+{
+  "version": "2026-10-29-reviewed-gold-v1",
+  "purpose": "Canonicalização conservadora usada somente no benchmark V5. Não altera o Excel original nem o pipeline V4.2.",
+  "catchall_pairs": [
+    [
+      "OTHERS",
+      "OTHERS"
+    ]
+  ],
+  "pair_aliases": [
+    {
+      "from": [
+        "WATERPUMPS",
+        "WATER PUMP"
+      ],
+      "to": [
+        "WATERPUMPS",
+        "WATERPUMP"
+      ],
+      "reason": "mesma taxonomia; variante de espaçamento"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "WATERPUMP"
+      ],
+      "to": [
+        "OTHERS",
+        "WATER PUMP"
+      ],
+      "reason": "mesma taxonomia; variante de espaçamento"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "SELF-PRIMING PUMP"
+      ],
+      "to": [
+        "OTHERS",
+        "PRIMING PUMP"
+      ],
+      "reason": "SELF-PRIMING já é alias da família PRIMING PUMP"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "POWER TOOL COMBO KIT"
+      ],
+      "to": [
+        "OTHERS",
+        "COMBO KIT"
+      ],
+      "reason": "Gold manual e regra atual usam COMBO KIT"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "AIRFRYER"
+      ],
+      "to": [
+        "OTHERS",
+        "AIR FRYER"
+      ],
+      "reason": "normalização ortográfica"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "BLADE FAN"
+      ],
+      "to": [
+        "OTHERS",
+        "FAN BLADE"
+      ],
+      "reason": "mesmo componente; ordem lexical divergente"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "PLAINA"
+      ],
+      "to": [
+        "OTHERS",
+        "PLANER"
+      ],
+      "reason": "mesmo produto; PT/EN"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "MIXER PAINT"
+      ],
+      "to": [
+        "OTHERS",
+        "PAINT MIXER"
+      ],
+      "reason": "mesmo produto; ordem lexical divergente"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "MODULE FAN"
+      ],
+      "to": [
+        "OTHERS",
+        "FAN MODULE"
+      ],
+      "reason": "mesmo produto; ordem lexical divergente"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "MINI CHAIN SAW"
+      ],
+      "to": [
+        "OTHERS",
+        "MINI CHAINSAW"
+      ],
+      "reason": "normalização ortográfica"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "DRAING PUMP"
+      ],
+      "to": [
+        "OTHERS",
+        "DRAIN PUMP"
+      ],
+      "reason": "typo"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "GENERATORS"
+      ],
+      "to": [
+        "OTHERS",
+        "GENERATOR"
+      ],
+      "reason": "singular/plural"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "ENGINES"
+      ],
+      "to": [
+        "OTHERS",
+        "ENGINE"
+      ],
+      "reason": "singular/plural"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "FAN BALDE"
+      ],
+      "to": [
+        "OTHERS",
+        "FAN BLADE"
+      ],
+      "reason": "typo"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "TANGENCIAL FAN"
+      ],
+      "to": [
+        "OTHERS",
+        "TANGENTIAL FAN"
+      ],
+      "reason": "typo"
+    },
+    {
+      "from": [
+        "OTHERS",
+        "ROTARTY TILLER"
+      ],
+      "to": [
+        "OTHERS",
+        "ROTARY TILLER"
+      ],
+      "reason": "typo"
+    }
+  ]
+}
