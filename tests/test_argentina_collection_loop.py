@@ -19,6 +19,18 @@ else:
 from nightly_provider_router import Slot, DurableRouter
 
 class ProviderResponseContractTests(unittest.TestCase):
+    def test_precollection_skips_attempted_before_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "input.csv"
+            src.write_text("Marca,Modelo\\nCNH,111\\nCNH,222\\nCNH,333\\n", encoding="utf-8")
+            plan = p.build_precollection_plan(
+                input_path=src, cache_path=Path(d)/"none.sqlite",
+                report_path=Path(d)/"report.xlsx",max_tavily_new=2,
+                exclude_attempted_keys={p.business_key("CNH","111")},
+            )
+            self.assertEqual([x.model_original for x in plan.candidates],["222","333"])
+            self.assertEqual(plan.summary["Tentativas Search anteriores preservadas"],1)
+
     def test_bright_direct_light_organic(self):
         payload = {"organic":[{"title":"CNH original","link":"https://example.com/part","description":"Part",
                                "global_rank":1}]}
