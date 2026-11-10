@@ -88,9 +88,9 @@ class CollectionAutoProviderTests(unittest.TestCase):
                 recollect_empty=False,recollect_low_evidence=False,max_tavily_new=20,yes=True)
             plan = SimpleNamespace(candidates=[],summary={"RAW_EMPTY":1030})
             cfg = {"files":{"cache":args.cache,"classification_db":args.db}}
-            with patch.object(p,"validate_collection_cost_policy",return_value=[]), \\
-                 patch.object(p,"load_baseline_inventory",return_value={"processed":set()}), \\
-                 patch.object(p,"build_precollection_plan",return_value=plan) as build, \\
+            with patch.object(p,"validate_collection_cost_policy",return_value=[]), \
+                 patch.object(p,"load_baseline_inventory",return_value={"processed":set()}), \
+                 patch.object(p,"build_precollection_plan",return_value=plan) as build, \
                  patch("builtins.input",return_value="N"):
                 self.assertTrue(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
                 self.assertEqual(build.call_count,1)
@@ -111,13 +111,13 @@ class CollectionAutoProviderTests(unittest.TestCase):
             payload = {"results":[{"title":"test"}], "_collection":{
                 "state":"COLLECTED","curated_results":[],"source_audit":[],
                 "query_audit":[],"usage":{"requests":1}}}
-            with patch.object(p,"validate_collection_cost_policy",return_value=[]), \\
-                 patch.object(p,"load_baseline_inventory",return_value={"processed":set()}), \\
-                 patch.object(p,"build_precollection_plan",side_effect=[plan_empty,plan_selected]) as build, \\
-                 patch.object(p,"configured_slots",return_value=[slot]), \\
-                 patch.object(p,"search_product_once",return_value=payload) as search, \\
-                 patch.object(p,"TavilyWritableStore"), \\
-                 patch.object(p,"_export_collection_quality_report"), \\
+            with patch.object(p,"validate_collection_cost_policy",return_value=[]), \
+                 patch.object(p,"load_baseline_inventory",return_value={"processed":set()}), \
+                 patch.object(p,"build_precollection_plan",side_effect=[plan_empty,plan_selected]) as build, \
+                 patch.object(p,"configured_slots",return_value=[slot]), \
+                 patch.object(p,"search_product_once",return_value=payload) as search, \
+                 patch.object(p,"TavilyWritableStore"), \
+                 patch.object(p,"_export_collection_quality_report"), \
                  patch("builtins.input",return_value="S"):
                 self.assertTrue(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
                 self.assertEqual(build.call_count,2)
