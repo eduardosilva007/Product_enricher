@@ -22,7 +22,7 @@ class ProviderResponseContractTests(unittest.TestCase):
     def test_precollection_skips_attempted_before_limit(self):
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / "input.csv"
-            src.write_text("Marca,Modelo\\nCNH,111\\nCNH,222\\nCNH,333\\n", encoding="utf-8")
+            src.write_text("Marca,Modelo\nCNH,111\nCNH,222\nCNH,333\n", encoding="utf-8")
             plan = p.build_precollection_plan(
                 input_path=src, cache_path=Path(d)/"none.sqlite",
                 report_path=Path(d)/"report.xlsx",max_tavily_new=2,
