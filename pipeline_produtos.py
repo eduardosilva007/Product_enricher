@@ -10122,7 +10122,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-promote"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -10545,6 +10545,13 @@ def main() -> int:
         for e in errors[:50]:
             LOG.error(e)
         return 2
+    if args.mode == "overnight-promote":
+        if not args.campaign_resume_dir:
+            raise ValueError("overnight-promote requires --campaign-resume-dir")
+        with exclusive_campaign_lock():
+            result = overnight_promote_campaign(Path(args.campaign_resume_dir), cfg, rules)
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+            return 0
     if args.mode == "overnight":
         with exclusive_campaign_lock():
             return overnight_campaign(args, cfg)
@@ -11252,6 +11259,202 @@ def overnight_run_one(args, cfg, on_run_created=None):
         atomic_json(run/"run_report.json",state)
         print(f"Report: {run/'run_report.json'}",flush=True)
 
+
+
+
+def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: Rules) -> Dict[str, Any]:
+    """Commit verified isolated RAW + classifications into canonical cache/Excel.
+
+    Fail-closed, offline-only; immutable backup snapshots enable manual recovery
+    after an OS crash. Idempotent: a successfully promoted campaign is not replayed.
+    This is persistence of unreviewed proposals, NOT human taxonomy approval.
+    """
+    import pandas as pd
+
+    campaign_dir = Path(campaign_dir).resolve()
+    manifest_path = campaign_dir / "campaign.json"
+    state = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if state.get("promotion", {}).get("status") == "COMMITTED":
+        return state["promotion"]
+    if state.get("promotion", {}).get("status") in {"PROMOTING", "RECOVERY_REQUIRED"}:
+        raise RuntimeError("PROMOTION_RECOVERY_REQUIRED: inspect immutable backup before trying again")
+    if state.get("status") != "COMPLETE" or not state.get("batches"):
+        raise RuntimeError("PROMOTION_BLOCKED: requires COMPLETE audited campaign")
+    if state.get("active_run") or state.get("pending_run_creation"):
+        raise RuntimeError("PROMOTION_BLOCKED: incomplete sublot")
+    files = cfg["files"]
+    canonical = {k: (ROOT / str(files[k])).resolve() for k in
+                 ("cache", "master", "final", "classification_db", "input")}
+    for k, p in canonical.items():
+        if not p.is_file():
+            raise RuntimeError(f"PROMOTION_SOURCE_MISSING: {k}: {p}")
+
+    # Read authoritative cohort identities and all available classification
+    # rows. Every input classification must belong to exactly one pilot SKU.
+    keys = set()
+    records = []
+    raw_items = []
+    for batch in state["batches"]:
+        run = Path(batch["run_dir"]).resolve()
+        if run.parent != OUT.resolve():
+            raise RuntimeError("PROMOTION_INVALID_RUN_PATH")
+        report = json.loads((run / "run_report.json").read_text(encoding="utf-8"))
+        audit_result = json.loads((run / "quality_audit.json").read_text(encoding="utf-8"))
+        cohort_keys = list(batch["cohort_keys"])
+        if (batch.get("status") != "AUDIT_PASS" or audit_result.get("status") != "PASS"
+                or report.get("cohort_keys") != cohort_keys
+                or batch.get("raw_ok") != len(cohort_keys)
+                or audit_result.get("protected_changes_total") != 0
+                or audit_result.get("original_source_modified")
+                or report.get("stages", {}).get("collection", {}).get("status") != "PASS"
+                or report.get("stages", {}).get("classification", {}).get("status") != "PASS"
+                or len(cohort_keys) != len(set(cohort_keys))):
+            raise RuntimeError(f"PROMOTION_AUDIT_INVALID: {run}")
+        if keys.intersection(cohort_keys):
+            raise RuntimeError("PROMOTION_DUPLICATE_COHORT")
+        keys.update(cohort_keys)
+        isolated = json.loads((run / "isolated_config.json").read_text(encoding="utf-8"))
+        output = Path(isolated["files"]["output"])
+        if not output.is_file():
+            raise RuntimeError(f"PROMOTION_CLASSIFICATION_FILE_MISSING: {output}")
+        frame = pd.read_excel(output, sheet_name="Resultados",
+                              dtype=object, keep_default_na=False)
+        if not {"Marca", "Modelo"}.issubset(frame.columns):
+            raise RuntimeError("PROMOTION_CLASSIFICATION_COLUMNS_MISSING")
+        seen_output = set()
+        for record in frame.to_dict(orient="records"):
+            brand, model = safe(record["Marca"]), safe(record["Modelo"])
+            key = business_key(brand, model)
+            if key not in cohort_keys or key in seen_output:
+                raise RuntimeError(f"PROMOTION_UNEXPECTED_OR_DUPLICATE_RESULT: {key}")
+            seen_output.add(key)
+            # A review proposal stays a proposal, never a human approval.
+            record.pop("Revisão B.I", None)
+            if safe(record.get("Resolution State")).upper() == "REVIEW_CACHE_EVIDENCE":
+                record["Review Required"] = "SIM"
+                record["Auto Eligible"] = "NÃO"
+            records.append(record)
+        cohort_frame = pd.read_excel(isolated["files"]["input"],
+                                      dtype=object, keep_default_na=False)
+        key_to_pair = {business_key(safe(row["Marca"]), safe(row["Modelo"])):
+                       (safe(row["Marca"]), safe(row["Modelo"]))
+                       for _, row in cohort_frame.iterrows()}
+        if set(key_to_pair) != set(cohort_keys):
+            raise RuntimeError("PROMOTION_INPUT_COHORT_MISMATCH")
+        with closing(TavilyReadOnlyStore(Path(isolated["files"]["cache"]))) as cache:
+            for key in cohort_keys:
+                brand, model = key_to_pair[key]
+                raw = cache.get(brand, model)
+                if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+                    raise RuntimeError(f"PROMOTION_RAW_NOT_OK: {key}: {raw.state}")
+                raw_items.append((brand, model, raw.payload))
+    if len(keys) != state.get("audited_products"):
+        raise RuntimeError("PROMOTION_COHORT_COUNT_MISMATCH")
+
+    backup_dir = campaign_dir / "promotion_backup"
+    if backup_dir.exists():
+        raise RuntimeError("PROMOTION_BACKUP_ALREADY_EXISTS: manual inspection required")
+    backup_dir.mkdir(parents=False)
+    # Back up canonical artifacts before creating any staging files. Never
+    # rewrite the original files until all independent staging gates pass.
+    originals = {}
+    staged = {}
+    for k in ("cache", "master", "final", "classification_db"):
+        src = canonical[k]
+        backup = backup_dir / (k + src.suffix)
+        stage = backup_dir / ("staged_" + k + src.suffix)
+        if src.suffix.lower() in (".sqlite", ".db"):
+            snapshot(src, backup)
+            snapshot(src, stage)
+        else:
+            shutil.copy2(src, backup)
+            shutil.copy2(src, stage)
+        originals[k] = {"path": str(src), "sha256": digest(src),
+                        "backup": str(backup)}
+        staged[k] = stage
+    atomic_json(backup_dir / "source_manifest.json", originals)
+    try:
+        # Merge only audited target evidence. The writer maintains history of
+        # replaced RAW_EMPTY rows in the staged cache.
+        writer = TavilyWritableStore(staged["cache"])
+        try:
+            for brand, model, payload in raw_items:
+                writer.put(brand, model, payload, archive_reason="OVERNIGHT_PROMOTION")
+        finally:
+            writer.close()
+
+        # Existing vetted/up-to-date official rows dominate historical proposals.
+        # The canonical master routine contains locks for Manual and BI_OK.
+        stats = persist_baseline_excels(
+            rows=records, master_path=staged["master"],
+            final_path=staged["final"], input_path=canonical["input"],
+            rules=rules, cache_path=staged["cache"], cfg=cfg,
+        )
+        final, _ = _read_business_sheet(staged["final"])
+        fb = find_col(final, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        fm = find_col(final, ["Modelo", "Model", "SKU", "Part Number"])
+        final_keys = {business_key(safe(row[fb]), safe(row[fm]))
+                      for _, row in final.iterrows() if safe(row[fb]) and safe(row[fm])}
+        missing = keys - final_keys
+        if missing:
+            raise RuntimeError(f"PROMOTION_FINAL_MISSING: {len(missing)} keys")
+        with closing(TavilyReadOnlyStore(staged["cache"])) as store:
+            for brand, model, _ in raw_items:
+                if store.get(brand, model).state not in {"RAW_OK", "RAW_OK_MERGED"}:
+                    raise RuntimeError(f"PROMOTION_CACHE_VERIFICATION_FAILED: {brand}/{model}")
+
+        # No human-reviewed row may change, even its review/status metadata.
+        before = _load_bi_lock_snapshot(canonical["final"])
+        _assert_bi_lock_snapshot(final, before, "PROMOTION STAGED FINAL")
+        # The original campaign's full protected human diff checks exact pairs.
+        compare = backup_dir / "protected_check"
+        compare.mkdir()
+        atomic_json(compare / "original_sources.json", {
+            "final": {"path": str(canonical["final"])}})
+        atomic_json(compare / "isolated_config.json", {
+            "files": {"final": str(staged["final"])}})
+        changes, _, _, _ = overnight_examine(compare)
+        if changes:
+            raise RuntimeError(f"PROMOTION_PROTECTED_MANUAL_DIFF: {len(changes)}")
+        for k, meta in originals.items():
+            if digest(Path(meta["path"])) != meta["sha256"]:
+                raise RuntimeError(f"PROMOTION_SOURCE_CHANGED: {k}")
+
+        # Fail closed if the run was interrupted here. Backups and manifest
+        # persist; the user must reconcile manually, no silent replay.
+        state["promotion"] = {"status": "PROMOTING",
+                              "records_imported": len(records),
+                              "cohort_count": len(keys),
+                              "backups": str(backup_dir)}
+        atomic_json(manifest_path, state)
+        replaced = []
+        try:
+            for k in ("cache", "master", "final"):
+                os.replace(staged[k], canonical[k])
+                replaced.append(k)
+        except BaseException:
+            for k in reversed(replaced):
+                backup = Path(originals[k]["backup"])
+                if backup.is_file():
+                    shutil.copy2(backup, canonical[k])
+            state["promotion"]["status"] = "RECOVERY_REQUIRED"
+            atomic_json(manifest_path, state)
+            raise
+        state["promotion"] = {
+            "status": "COMMITTED", "cohort_count": len(keys),
+            "classification_rows": len(records),
+            "without_classification_output": len(keys) - len(records),
+            "backups": str(backup_dir),
+            "baseline_stats": stats,
+            "human_taxonomy_approved": False,
+        }
+        atomic_json(manifest_path, state)
+        LOG.info("OVERNIGHT PROMOTED TO CANONICAL CACHE+MASTER+FINAL | cohort=%d | results=%d",
+                 len(keys), len(records))
+        return state["promotion"]
+    except BaseException:
+        # Existing backups remain available; never auto-delete on failure.
+        raise
 
 
 def overnight_campaign(args, cfg):
