@@ -457,12 +457,44 @@ class RawEmptyNightTests(unittest.TestCase):
                 {"Marca":"ANNOVI REVERBERI","Modelo":"52180","FAMILY":"WRONG","Status":"Script"}
             ]).to_excel(generated,index=False)
             stats=master._overnight_scoped_excel_overlay(
-                original,generated,{"cnh|123456"})
+                original,generated,{"cnh|123456":("CNH","123456")})
             actual=pd.read_excel(generated,dtype=object,keep_default_na=False)
             self.assertEqual(len(actual),3)
             self.assertEqual(actual["FAMILY"].tolist(),["OLD1","OLD2","ENGINE"])
             self.assertEqual(stats["updated"],1)
             self.assertEqual(stats["original_rows_preserved"],3)
+
+    def test_overlay_uses_audited_exact_comet_variant_not_normalized_rank(self):
+        import pipeline_produtos as master
+        import pandas as pd
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            original=root/"canonical.xlsx"
+            generated=root/"staged.xlsx"
+            frame=pd.DataFrame([
+                {"Marca":"COMET","Modelo":"K250TSR13190T",
+                 "FAMILY":"OLD_TARGET","Status":"Script"},
+                {"Marca":"COMET","Modelo":"K250 TSR 13190T",
+                 "FAMILY":"OTHER_VARIANT","Status":"Script"},
+                {"Marca":"COMET","Modelo":"K250TSR13190T",
+                 "FAMILY":"MANUAL_VARIANT","Status":"Manual"},
+            ])
+            # A repeated exact pair is genuinely ambiguous and must block.
+            frame.iloc[:2].to_excel(original,index=False)
+            pd.DataFrame([
+                {"Marca":"COMET","Modelo":"K250TSR13190T",
+                 "FAMILY":"POWER WASHER","Status":"Script"},
+                {"Marca":"COMET","Modelo":"K250 TSR 13190T",
+                 "FAMILY":"WRONG","Status":"Script"}
+            ]).to_excel(generated,index=False)
+            exact={"comet|k250tsr13190t":("COMET","K250TSR13190T")}
+            stats=master._overnight_scoped_excel_overlay(original,generated,exact)
+            result=pd.read_excel(generated,dtype=object,keep_default_na=False)
+            self.assertEqual(result["FAMILY"].tolist(),["POWER WASHER","OTHER_VARIANT"])
+            self.assertEqual(stats["updated"],1)
+            frame.to_excel(original,index=False)
+            with self.assertRaisesRegex(RuntimeError,"PROMOTION_DUPLICATE_EXACT_COHORT_PAIR"):
+                master._overnight_scoped_excel_overlay(original,generated,exact)
 
     def test_legacy_two_twenty_sku_pilots_register_offline_with_verified_manifest(self):
         import pipeline_produtos as master
