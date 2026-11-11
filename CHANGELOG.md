@@ -9,6 +9,7 @@
 - Source files are backed up before staged cache/Excel generation; source hashes, protected manual cells, final cohort coverage and cache persistence are checked before swapping canonical artifacts.
 - The campaign manifest records `promotion.status=COMMITTED` and imported/missing classification counts, or fail-closed recovery state. Backups remain under the campaign for disaster recovery.
 - Adds a real offline regression fixture covering canonical Final+cache persistence, protection of a BI-reviewed record and idempotent promotion.
+- Synchronization is cohort-scoped and blocks any change to an unrelated Base Final record, including unreviewed rows; classifications and LLM checkpoints are also merged into the official SQLite.
 
 ## 2026-11-11 — Master overnight stabilization (branch: feature/overnight-master-stabilization-20261111)
 
