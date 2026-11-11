@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-11-11 — Canonical promotion: exact human-lock validation
+
+- Corrected false `BI_OK_HARD_LOCK_VIOLATION` in a completed 50-SKU offline promotion. The erroneous comparison matched human-reviewed records solely by normalized `business_key`, conflating historic ANNOVI/BOSCH Brand+Model variants and comparing their different `Status` / `Revisão` values.
+- Promotion now checks each protected physical row in its original position, including exact Brand+Model, type, power, Category General, FAMILY, title, Status, Revisão and Revisão B.I. Historic duplicate exact pairs are compared separately. Any real protected-field alteration remains blocking.
+- Removed redundant promotion-only forensic diff grouped by normalized key. Original non-cohort rows remain checked individually and untouched by the input-scoped overlay.
+- Added real negative tests for human revision mutation, exact-pair mutation and end-to-end promotion with colliding BI-approved variants, including immutable pre-commit backup recovery. No Search or JEV calls.
+
 ## 2026-11-11 — Canonical Base Final persistence for overnight campaigns
 
 - Introduces offline `--mode overnight-promote --campaign-resume-dir <ID>` to import the previous completed 50-SKU campaign into the official Search cache, Consolidado and Base Final without new API calls.
