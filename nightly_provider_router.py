@@ -53,6 +53,17 @@ class DurableRouter:
     def __init__(self, path: Path, slots: list[Slot]):
         if not slots:
             raise ValueError("No accounts with positive explicitly configured budget")
+        group_limits = {}
+        accounts = set()
+        for slot in slots:
+            if slot.account in accounts:
+                raise ValueError(f"Duplicate provider account: {slot.account}")
+            accounts.add(slot.account)
+            if slot.limit <= 0:
+                raise ValueError(f"Invalid non-positive limit for {slot.account}")
+            prior = group_limits.setdefault(slot.group, slot.limit)
+            if prior != slot.limit:
+                raise ValueError(f"Conflicting limits for billing group {slot.group}")
         self.conn = sqlite3.connect(path, timeout=30)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
@@ -75,7 +86,7 @@ class DurableRouter:
                 continue
             # A shared billing group requires *the same total cap* configured on each key.
             group_slots = [s for s in self.slots if s.group == slot.group]
-            group_limit = min(s.limit for s in group_slots)
+            group_limit = group_slots[0].limit
             group_used = self.conn.execute(
                 "SELECT COUNT(*) FROM collection_attempt_reservations WHERE account IN (" +
                 ",".join("?" for _ in group_slots) + ")",
