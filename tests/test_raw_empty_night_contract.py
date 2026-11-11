@@ -461,6 +461,37 @@ class RawEmptyNightTests(unittest.TestCase):
                 self.assertEqual(len(processed),2)
                 promote.assert_called_once()
 
+    def test_master_resumption_after_jev_started_never_retries_http(self):
+        import pipeline_produtos as master
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/"controlled_night"
+            run=root/"interrupted_jev"
+            run.mkdir(parents=True)
+            args=SimpleNamespace(
+                execute_live=True,resume_dir=str(run),
+                search_budget=5,llm_budget=15,token_budget=30000,
+                timeout_minutes=120,allow_prior_serper_quota_error=True)
+            (run/"run_report.json").write_text(json.dumps({
+                "budget":{"search":5,"jev_calls":15,"tokens":30000},
+                "cohort_count":5,
+                "prior_serper_quota_error_rescue_authorized":True,
+                "originals":str(run/"original_sources.json"),
+                "stages":{"collection":{"status":"PASS","attempts":1},
+                          "classification":{"status":"FAIL","attempts":1}}
+            }),encoding="utf-8")
+            (run/"isolated_config.json").write_text(
+                json.dumps({"files":{}}),encoding="utf-8")
+            (run/"original_sources.json").write_text("{}",encoding="utf-8")
+            with patch.object(master,"OUT",root),patch.object(master,"gate"),\
+                 patch.object(master,"protected_originals",return_value=[]),\
+                 patch.object(master,"run_stage") as run_stage:
+                with self.assertRaisesRegex(
+                        RuntimeError,"JEV_INCOMPLETE_REQUIRES_AUDIT"):
+                    master.overnight_run_one(args,{})
+                run_stage.assert_not_called()
+
     def test_master_campaign_resume_reuses_reserved_budget(self):
         import pipeline_produtos as master
         from types import SimpleNamespace
