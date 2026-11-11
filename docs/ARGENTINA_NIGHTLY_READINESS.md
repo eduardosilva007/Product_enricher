@@ -82,7 +82,7 @@ auditadas. Nao confundir 50 SKUs processados com 50 taxonomias corretas.
 canônico guarda a evidência RAW e os estados de classificação ficam nos
 Excels oficiais, incluindo propostas ainda pendentes de double check.
 
-O master agora grava o cache canônico, o Consolidado e a Base Final
+O master agora grava o cache canônico, o banco SQLite oficial de checkpoints/LLM, o Consolidado e a Base Final
 **somente após auditoria de campanha COMPLETE**. A gravação reutiliza
 `persist_baseline_excels` e suas travas Manual / Revisão B.I=OK.
 Registros que precisam de revisão são persistidos como pendentes,
