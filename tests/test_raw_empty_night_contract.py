@@ -296,6 +296,18 @@ class RawEmptyNightTests(unittest.TestCase):
                 (backup_dir/("staged_"+name+source.suffix)).write_bytes(b"old partial")
             (backup_dir/"source_manifest.json").write_text(
                 json.dumps(originals),encoding="utf-8")
+            canonical_hashes={name:master.digest(path) for name,path in (
+                ("cache",official_cache),("master",consolidated),
+                ("final",final),("classification_db",official_db))}
+            with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
+                dry=master.overnight_promote_campaign(campaign,cfg,rules,dry_run=True)
+            self.assertEqual(dry["status"],"DRY_RUN_PASS")
+            self.assertTrue(dry["canonical_files_unchanged"])
+            self.assertFalse(json.loads((campaign/"campaign.json").read_text(
+                encoding="utf-8")).get("promotion"))
+            for name,path in (("cache",official_cache),("master",consolidated),
+                              ("final",final),("classification_db",official_db)):
+                self.assertEqual(master.digest(path),canonical_hashes[name])
             with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
                 promoted=master.overnight_promote_campaign(campaign,cfg,rules)
             self.assertEqual(promoted["status"],"COMMITTED")
