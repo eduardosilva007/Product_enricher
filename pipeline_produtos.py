@@ -10164,6 +10164,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--campaign-token-budget", type=int, default=0)
     p.add_argument("--campaign-resume-dir", default="", help="Existing campaign manifest directory; never starts new unaudited work")
     p.add_argument("--legacy-run-dir", action="append", default=[], help="Two historical audited run folders for offline-only 40-SKU promotion")
+    p.add_argument("--promotion-dry-run", action="store_true", help="Build and verify staging without replacing any canonical data")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p
@@ -10552,7 +10553,7 @@ def main() -> int:
         with exclusive_campaign_lock():
             root = (overnight_register_legacy_runs(args.legacy_run_dir)
                     if args.legacy_run_dir else Path(args.campaign_resume_dir))
-            result = overnight_promote_campaign(root, cfg, rules)
+            result = overnight_promote_campaign(root, cfg, rules, dry_run=args.promotion_dry_run)
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
             return 0
     if args.mode == "overnight":
@@ -11479,7 +11480,7 @@ def _overnight_scoped_excel_overlay(original_path: Path, generated_path: Path,
             "original_rows_preserved":len(old)}
 
 
-def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: Rules) -> Dict[str, Any]:
+def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: Rules, dry_run: bool = False) -> Dict[str, Any]:
     """Commit verified isolated RAW + classifications into canonical cache/Excel.
 
     Fail-closed, offline-only; immutable backup snapshots enable manual recovery
@@ -11749,6 +11750,21 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             if digest(Path(meta["path"])) != meta["sha256"]:
                 raise RuntimeError(f"PROMOTION_SOURCE_CHANGED: {k}")
 
+        if dry_run:
+            # This is an actual full-size pre-commit on staged copies, not a
+            # synthetic audit. Official files remain byte-identical and the
+            # stage can be safely rebuilt when the commit is requested.
+            report = {"status": "DRY_RUN_PASS",
+                      "cohort_count": len(keys),
+                      "classification_rows": len(records),
+                      "without_classification_output": len(keys)-len(records),
+                      "backups": str(backup_dir),
+                      "baseline_stats": stats,
+                      "canonical_files_unchanged": True,
+                      "http_calls": 0,
+                      "human_taxonomy_approved": False}
+            atomic_json(backup_dir / "dry_run_report.json", report)
+            return report
         # Fail closed if the run was interrupted here. Backups and manifest
         # persist; the user must reconcile manually, no silent replay.
         state["promotion"] = {"status": "PROMOTING",
