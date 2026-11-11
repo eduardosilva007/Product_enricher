@@ -437,7 +437,7 @@ class RawEmptyNightTests(unittest.TestCase):
                  patch.object(master,"overnight_run_one",side_effect=fake_one),\
                  patch.object(master,"overnight_promote_campaign",
                               return_value={"status":"COMMITTED"}) as promote:
-                self.assertEqual(master.overnight_campaign(args,{}),0)
+                self.assertEqual(master.overnight_campaign(args,{},rules=SimpleNamespace(version="x",hash="h")),0)
                 manifest=next((target/"campaigns").glob("*/campaign.json"))
                 partial=json.loads(manifest.read_text(encoding="utf-8"))
                 self.assertEqual(partial["status"],"PAUSED_FOR_RESUME_TEST")
@@ -448,7 +448,7 @@ class RawEmptyNightTests(unittest.TestCase):
                 promote.assert_not_called()
                 args.campaign_resume_dir=str(manifest.parent)
                 args.campaign_pause_after_sublots=0
-                self.assertEqual(master.overnight_campaign(args,{}),0)
+                self.assertEqual(master.overnight_campaign(args,{},rules=SimpleNamespace(version="x",hash="h")),0)
                 final=json.loads(manifest.read_text(encoding="utf-8"))
                 self.assertEqual(final["status"],"COMPLETE")
                 self.assertEqual(final["audited_products"],10)
@@ -482,7 +482,15 @@ class RawEmptyNightTests(unittest.TestCase):
                           "classification":{"status":"FAIL","attempts":1}}
             }),encoding="utf-8")
             (run/"isolated_config.json").write_text(
-                json.dumps({"files":{}}),encoding="utf-8")
+                json.dumps({"files":{
+                    "input":str(run/"cohort.xlsx"),
+                    "cache":str(run/"cache.sqlite"),
+                    "master":str(run/"master.xlsx"),
+                    "final":str(run/"final.xlsx"),
+                    "classification_db":str(run/"classification.sqlite"),
+                    "output":str(run/"out.xlsx"),
+                    "inventory_output":str(run/"inventory.xlsx")
+                }}),encoding="utf-8")
             (run/"original_sources.json").write_text("{}",encoding="utf-8")
             with patch.object(master,"OUT",root),patch.object(master,"gate"),\
                  patch.object(master,"protected_originals",return_value=[]),\
