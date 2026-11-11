@@ -11333,6 +11333,62 @@ def overnight_register_legacy_runs(run_dirs: Sequence[str]) -> Path:
 
 
 
+
+def _overnight_assert_exact_human_locks(original: Any, proposed: Any) -> Dict[str, int]:
+    """Verify every BI_OK and Manual row by exact Brand/Model pair.
+
+    A compact business key is useful for finding candidates, but must never
+    identify an approved row: different display variants share that key.
+    If multiple physical rows have the SAME exact pair, refuse to guess.
+    """
+    aliases = {
+        "O que é (Tipo)": ["O que é (Tipo)", "Tipo", "Product Type"],
+        "Alimentação": ["Alimentação"],
+        "Category General": ["Category General"],
+        "FAMILY": ["FAMILY", "Family"],
+        "Título Real": ["Título Real"],
+        "Status": ["Status"],
+        "Revisão": ["Revisão", "Revisao"],
+        "Revisão B.I": ["Revisão B.I", "Revisao B.I"],
+    }
+    def index(frame):
+        b = find_col(frame, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        m = find_col(frame, ["Modelo", "Model", "SKU", "Part Number"])
+        found = {}
+        for _, row in frame.iterrows():
+            pair = (safe(row.get(b)), safe(row.get(m)))
+            if all(pair):
+                found.setdefault(pair, []).append(row)
+        return found
+    original_idx=index(original)
+    staged_idx=index(proposed)
+    rbi=find_col(original,aliases["Revisão B.I"],required=False)
+    status=find_col(original,aliases["Status"],required=False)
+    checked=0
+    for pair, old_rows in original_idx.items():
+        for old in old_rows:
+            bi = bool(rbi and _is_bi_ok_value(old.get(rbi)))
+            manual = bool(status and _is_manual_status(old.get(status)))
+            if not (bi or manual): continue
+            proposed_rows=staged_idx.get(pair,[])
+            if len(old_rows)!=1 or len(proposed_rows)!=1:
+                raise RuntimeError(
+                    f"PROMOTION_PROTECTED_EXACT_PAIR_AMBIGUOUS: {pair} "
+                    f"before={len(old_rows)} after={len(proposed_rows)}")
+            new=proposed_rows[0]
+            for field,names in aliases.items():
+                left_col=find_col(original,names,required=False)
+                right_col=find_col(proposed,names,required=False)
+                left=safe(old.get(left_col)) if left_col else ""
+                right=safe(new.get(right_col)) if right_col else ""
+                if left!=right:
+                    raise RuntimeError(
+                        f"PROMOTION_PROTECTED_FIELD_CHANGED: {pair} "
+                        f"{field}: {left!r} -> {right!r}")
+            checked+=1
+    return {"protected_exact_rows":checked}
+
+
 def _overnight_scoped_excel_overlay(original_path: Path, generated_path: Path,
                                     cohort_pairs: Dict[str, Tuple[str, str]]) -> Dict[str, int]:
     """Overlay ONLY cohort rows after legacy baseline exporter has completed.
@@ -11684,8 +11740,12 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             if business_key(safe(new_row.get(fb)),safe(new_row.get(fm))) != key or any(
                  safe(old_row.get(col))!=safe(new_row.get(col)) for col in common_fields):
                 raise RuntimeError(f"PROMOTION_UNRELATED_ROW_CHANGED: {key} row={pos}")
-        before = _load_bi_lock_snapshot(canonical["final"])
-        _assert_bi_lock_snapshot(final, before, "PROMOTION STAGED FINAL")
+        # The generic BI snapshot is indexed only by normalized business_key
+        # and conflates historical exact pairs (e.g. ANNOVI variants).
+        # For promotion, compare EVERY original BI_OK row by its exact pair;
+        # never relax the eight protected human fields.
+        _overnight_assert_exact_human_locks(original_final, final)
+
         # The original campaign's full protected human diff checks exact pairs.
         compare = backup_dir / "protected_check"
         compare.mkdir()
