@@ -186,6 +186,7 @@ class RawEmptyNightTests(unittest.TestCase):
             official_cache=root/"official_cache.sqlite"
             pilot_cache=run/"cache.sqlite"
             official_db=root/"official_classification.sqlite"
+            pilot_db=run/"source_classification.sqlite"
             for database in (official_cache,pilot_cache,official_db):
                 with sqlite3.connect(database) as cx:
                     cx.execute("CREATE TABLE IF NOT EXISTS tavily_cache "
@@ -198,6 +199,20 @@ class RawEmptyNightTests(unittest.TestCase):
                                            "content":"CNH product"}],
                                 "_collection":{"state":"READY_FOR_CLASSIFICATION"}}),
                     "2026-11-11T10:00:00"))
+            cls_db=master.ClassificationDB(pilot_db)
+            cls_db.conn.execute(
+                "INSERT INTO classification_results "
+                "(checkpoint_id,business_key,brand,model,raw_hash,rules_hash,"
+                "pipeline_version,result_json,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                ("check-123456","cnh|123456","CNH","123456","raw","rules",
+                 "v4",json.dumps({"Resolution State":"CLASSIFIED_CLEF",
+                                  "Category General":"OTHERS","FAMILY":"ENGINE"}),
+                 "2026-11-11T10:00:00"))
+            cls_db.conn.execute("CREATE TABLE collection_attempt_reservations "
+                                "(business_key TEXT PRIMARY KEY,account TEXT,provider TEXT)")
+            cls_db.conn.execute("INSERT INTO collection_attempt_reservations VALUES (?,?,?)",
+                                ("cnh|123456","tavily:1","tavily"))
+            cls_db.close()
             original=pd.DataFrame([{"Marca":"CNH","Modelo":"123456",
                                     "Category General":"","FAMILY":"",
                                     "Revisão B.I":""}])
@@ -223,7 +238,8 @@ class RawEmptyNightTests(unittest.TestCase):
             }]).to_excel(result_file,sheet_name="Resultados",index=False)
             (run/"raw_empty_cohort.xlsx").write_bytes(inp.read_bytes())
             config={"files":{"input":str(run/"raw_empty_cohort.xlsx"),
-                              "cache":str(pilot_cache),"output":str(result_file)}}
+                              "cache":str(pilot_cache),"output":str(result_file),
+                              "classification_db":str(pilot_db)}}
             (run/"isolated_config.json").write_text(json.dumps(config),encoding="utf-8")
             (run/"run_report.json").write_text(json.dumps({
                 "cohort_keys":["cnh|123456"],"cohort_count":1,
@@ -257,6 +273,15 @@ class RawEmptyNightTests(unittest.TestCase):
                 self.assertEqual(store.get("CNH","123456").state,"RAW_OK")
             finally:
                 store.close()
+            with sqlite3.connect(official_db) as conn:
+                migrated=conn.execute(
+                    "SELECT result_json FROM classification_results WHERE checkpoint_id=?",
+                    ("check-123456",)).fetchone()
+                reservation=conn.execute(
+                    "SELECT provider FROM collection_attempt_reservations WHERE business_key=?",
+                    ("cnh|123456",)).fetchone()
+                self.assertIsNotNone(migrated)
+                self.assertEqual(reservation[0],"tavily")
             with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
                 again=master.overnight_promote_campaign(campaign,cfg,rules)
             self.assertEqual(again["status"],"COMMITTED")
