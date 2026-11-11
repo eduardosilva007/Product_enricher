@@ -10868,7 +10868,8 @@ def overnight_examine(run:Path):
                                 "field":name,"before":lv,"after":rv,"severity":severity})
     return details,dict(sorted(counts.items())),len(left),len(right)
 
-OUT=Path(__file__).resolve().parent/"piloto_argentina"/"controlled_night"
+ROOT=Path(__file__).resolve().parent
+OUT=ROOT/"piloto_argentina"/"controlled_night"
 
 def digest(p):
     h=hashlib.sha256()
