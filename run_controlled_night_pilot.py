@@ -102,7 +102,7 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
         conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
             business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
             provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        for key, account, provider in actual.items():
+        for key, (account, provider) in actual.items():
             prior = conn.execute(
                 "SELECT account, provider FROM collection_attempt_reservations WHERE business_key=?",
                 (key,),
