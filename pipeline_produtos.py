@@ -11335,11 +11335,12 @@ def overnight_register_legacy_runs(run_dirs: Sequence[str]) -> Path:
 
 
 def _overnight_assert_exact_human_locks(original: Any, proposed: Any) -> Dict[str, int]:
-    """Verify every BI_OK and Manual row by exact Brand/Model pair.
+    """Fail closed on any protected original physical row changing.
 
-    A compact business key is useful for finding candidates, but must never
-    identify an approved row: different display variants share that key.
-    If multiple physical rows have the SAME exact pair, refuse to guess.
+    The scoped overlay retains every original row at the same position.
+    Comparing exact Brand/Model AND each human field by original row position
+    covers normalized collisions and repeated exact pairs without selecting
+    or conflating any historic variant.
     """
     aliases = {
         "O que é (Tipo)": ["O que é (Tipo)", "Tipo", "Product Type"],
@@ -11351,42 +11352,37 @@ def _overnight_assert_exact_human_locks(original: Any, proposed: Any) -> Dict[st
         "Revisão": ["Revisão", "Revisao"],
         "Revisão B.I": ["Revisão B.I", "Revisao B.I"],
     }
-    def index(frame):
-        b = find_col(frame, ["Marca", "Fabricante", "Brand", "Manufacturer"])
-        m = find_col(frame, ["Modelo", "Model", "SKU", "Part Number"])
-        found = {}
-        for _, row in frame.iterrows():
-            pair = (safe(row.get(b)), safe(row.get(m)))
-            if all(pair):
-                found.setdefault(pair, []).append(row)
-        return found
-    original_idx=index(original)
-    staged_idx=index(proposed)
-    rbi=find_col(original,aliases["Revisão B.I"],required=False)
-    status=find_col(original,aliases["Status"],required=False)
+    if len(proposed)<len(original):
+        raise RuntimeError("PROMOTION_PROTECTED_ORIGINAL_ROWS_DROPPED")
+    ob=find_col(original, ["Marca","Fabricante","Brand","Manufacturer"])
+    om=find_col(original, ["Modelo","Model","SKU","Part Number"])
+    pb=find_col(proposed, ["Marca","Fabricante","Brand","Manufacturer"])
+    pm=find_col(proposed, ["Modelo","Model","SKU","Part Number"])
+    rbi=find_col(original, aliases["Revisão B.I"],required=False)
+    status=find_col(original, aliases["Status"],required=False)
+    fields = [(field, find_col(original,names,required=False),
+               find_col(proposed,names,required=False))
+              for field,names in aliases.items()]
     checked=0
-    for pair, old_rows in original_idx.items():
-        for old in old_rows:
-            bi = bool(rbi and _is_bi_ok_value(old.get(rbi)))
-            manual = bool(status and _is_manual_status(old.get(status)))
-            if not (bi or manual): continue
-            proposed_rows=staged_idx.get(pair,[])
-            if len(old_rows)!=1 or len(proposed_rows)!=1:
+    for pos,(_,old) in enumerate(original.iterrows()):
+        if not ((rbi and _is_bi_ok_value(old.get(rbi))) or
+                (status and _is_manual_status(old.get(status)))):
+            continue
+        new=proposed.iloc[pos]
+        exact=(safe(old.get(ob)),safe(old.get(om)))
+        staged=(safe(new.get(pb)),safe(new.get(pm)))
+        if exact!=staged:
+            raise RuntimeError(
+                f"PROMOTION_PROTECTED_PAIR_CHANGED: row={pos+2} {exact} -> {staged}")
+        for field,left_col,right_col in fields:
+            before=safe(old.get(left_col)) if left_col else ""
+            after=safe(new.get(right_col)) if right_col else ""
+            if before!=after:
                 raise RuntimeError(
-                    f"PROMOTION_PROTECTED_EXACT_PAIR_AMBIGUOUS: {pair} "
-                    f"before={len(old_rows)} after={len(proposed_rows)}")
-            new=proposed_rows[0]
-            for field,names in aliases.items():
-                left_col=find_col(original,names,required=False)
-                right_col=find_col(proposed,names,required=False)
-                left=safe(old.get(left_col)) if left_col else ""
-                right=safe(new.get(right_col)) if right_col else ""
-                if left!=right:
-                    raise RuntimeError(
-                        f"PROMOTION_PROTECTED_FIELD_CHANGED: {pair} "
-                        f"{field}: {left!r} -> {right!r}")
-            checked+=1
-    return {"protected_exact_rows":checked}
+                    f"PROMOTION_PROTECTED_FIELD_CHANGED: row={pos+2} "
+                    f"{exact} {field}: {before!r} -> {after!r}")
+        checked+=1
+    return {"protected_original_rows_verified":checked}
 
 
 def _overnight_scoped_excel_overlay(original_path: Path, generated_path: Path,
