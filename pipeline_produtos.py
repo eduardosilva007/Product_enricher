@@ -11311,8 +11311,12 @@ def overnight_campaign(args, cfg):
                      "token_limit": args.campaign_token_budget},
                  "serper_rescue": args.allow_prior_serper_quota_error,
                  "reserved_jev_calls": 0, "reserved_tokens": 0,
-                 "audited_products": 0, "batches": [], "active_run": ""}
+                 "audited_products": 0, "batches": [], "active_run": "",
+                 "pending_run_creation": False}
         atomic_json(manifest_path, state)
+
+    if state.get("pending_run_creation") and not state.get("active_run"):
+        raise RuntimeError("UNCERTAIN_SUBLOT_START: reserved budget but missing sublot checkpoint; manual reconciliation required before resume")
 
     while state["audited_products"] < args.campaign_total:
         remaining = args.campaign_total - state["audited_products"]
@@ -11346,11 +11350,13 @@ def overnight_campaign(args, cfg):
             # On crash/restart we never reallocate these reserved amounts.
             state["reserved_jev_calls"] += allotted_jev
             state["reserved_tokens"] += allotted_tokens
+            state["pending_run_creation"] = True
             state["status"] = "RUNNING"
             atomic_json(manifest_path, state)
 
         def created(sublot):
             state["active_run"] = str(sublot)
+            state["pending_run_creation"] = False
             atomic_json(manifest_path, state)
 
         try:
