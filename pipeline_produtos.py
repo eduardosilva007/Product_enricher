@@ -11472,6 +11472,33 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
                     raise RuntimeError(f"PROMOTION_CACHE_VERIFICATION_FAILED: {brand}/{model}")
 
         # No human-reviewed row may change, even its review/status metadata.
+        # Production promotion must be input-scoped: unrelated products are
+        # immutable, even without a human hard lock. Baseline normalization
+        # must not silently rewrite an unrelated 23K-row population.
+        original_final, _ = _read_business_sheet(canonical["final"])
+        ob = find_col(original_final, ["Marca","Fabricante","Brand","Manufacturer"])
+        om = find_col(original_final, ["Modelo","Model","SKU","Part Number"])
+        def outside_by_key(frame, brand_col, model_col):
+            rows = {}
+            for _, row in frame.iterrows():
+                brand, model = safe(row.get(brand_col)), safe(row.get(model_col))
+                if not brand or not model: continue
+                key = business_key(brand, model)
+                if key in keys: continue
+                if key in rows:
+                    raise RuntimeError(f"PROMOTION_UNRELATED_DUPLICATE: {key}")
+                rows[key] = row
+            return rows
+        original_outside = outside_by_key(original_final, ob, om)
+        final_outside = outside_by_key(final, fb, fm)
+        if set(original_outside) - set(final_outside):
+            raise RuntimeError("PROMOTION_UNRELATED_ROWS_MISSING")
+        common_fields = [col for col in original_final.columns if col in final.columns]
+        for key, old_row in original_outside.items():
+            new_row = final_outside[key]
+            if any(safe(old_row.get(col)) != safe(new_row.get(col))
+                   for col in common_fields):
+                raise RuntimeError(f"PROMOTION_UNRELATED_ROW_CHANGED: {key}")
         before = _load_bi_lock_snapshot(canonical["final"])
         _assert_bi_lock_snapshot(final, before, "PROMOTION STAGED FINAL")
         # The original campaign's full protected human diff checks exact pairs.
