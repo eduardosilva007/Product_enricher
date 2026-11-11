@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 2026-11-11 — Master overnight stabilization (branch: feature/overnight-master-stabilization-20261111)
+
+- Centralizes the runnable overnight pipeline, provider account router, RAW_EMPTY cohort audit, protected-human-record forensic diff and campaign orchestration inside `pipeline_produtos.py`.
+- Adds `--mode overnight` with `--campaign-total` (50, 100, 250, 500 or remaining SKU count), independent Search sublots capped at 20 SKUs, and explicit cumulative JEV-request/token budgets.
+- Persists campaign progress and exact active-sublot resume in `campaign.json`; reserves upper-bound JEV usage before a new sublot, so failures cannot reissue a new budget for the same sublot.
+- Carries forward prior SQLite Search reservations and disabled provider accounts across isolated sublots; duplicate SKUs, conflicting ledgers, quota exhausted and inconsistent RAW coverage block subsequent sublots.
+- Runs `collect -> classify -> protected-source/coverage audit` for every sublot; never promotes unreviewed results to production.
+- Retains `nightly_provider_router.py` and `run_controlled_night_pilot.py` solely as compatibility import/CLI shims; business rules and campaign logic reside in the master.
+- Adds offline regression tests for cumulative quotas, disabled providers, master 50-SKU campaign budgeting and checkpoint/resume.
+- The master migration is verified by GitHub Actions; first live 50-SKU assisted run remains a separate release gate.
+
 ## 2026-11-11 — Controlled nightly readiness and review safety
 
 - Fixed `CLEF_INSUFFICIENT` returning `Review Required = NÃO` even when `Classification Outcome = REVIEW_CACHE_EVIDENCE`; now requires human review and blocks automatic approval.
