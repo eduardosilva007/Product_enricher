@@ -10924,6 +10924,7 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
     reports = sorted(history_root.glob("*/run_report.json"))
     expected = set()
     actual = {}
+    disabled_accounts = {}
     for report_path in reports:
         state = json.loads(report_path.read_text(encoding="utf-8"))
         if not state.get("stages", {}).get("collection", {}).get("attempts", 0):
@@ -10939,10 +10940,19 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
         ledger_path = Path(previous_config["files"]["classification_db"])
         if not ledger_path.is_file():
             raise RuntimeError(f"Missing previous reservation ledger: {ledger_path}")
-        with closing(sqlite3.connect(f"file:{ledger_path.as_posix()}?mode=ro", uri=True)) as source:
+        with closing(sqlite3.connect(ledger_path.resolve().as_uri()+"?mode=ro", uri=True)) as source:
             rows = source.execute(
                 "SELECT business_key, account, provider FROM collection_attempt_reservations"
             ).fetchall()
+            has_disabled = source.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='collection_disabled_accounts'"
+            ).fetchone()
+            if has_disabled:
+                for account, reason in source.execute(
+                    "SELECT account, reason FROM collection_disabled_accounts"
+                ):
+                    disabled_accounts[account] = reason
         for key, account, provider in rows:
             if key in actual and actual[key] != (account, provider):
                 raise RuntimeError(f"Conflicting historical reservation for SKU: {key}")
@@ -10967,9 +10977,18 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
                     "INSERT INTO collection_attempt_reservations(business_key, account, provider) VALUES (?, ?, ?)",
                     (key, account, provider),
                 )
+        conn.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
+            account TEXT PRIMARY KEY, reason TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        for account, reason in disabled_accounts.items():
+            conn.execute(
+                "INSERT INTO collection_disabled_accounts(account, reason) VALUES (?, ?) "
+                "ON CONFLICT(account) DO UPDATE SET reason=excluded.reason",
+                (account, reason))
         conn.commit()
     return {"historical_cohort_keys": len(expected),
-            "historical_reservation_keys": len(actual)}
+            "historical_reservation_keys": len(actual),
+            "historical_disabled_accounts": len(disabled_accounts)}
 
 
 def create_run(cfg,args):
@@ -11354,6 +11373,7 @@ def overnight_campaign(args, cfg):
         keys = report.get("cohort_keys", [])
         if (quality.get("status") != "PASS"
                 or quality.get("protected_changes_total") != 0
+                or quality.get("useful_raw_count") != len(keys)
                 or quality.get("original_source_modified")
                 or len(keys) != report.get("cohort_count")
                 or len(keys) != len(set(keys))):
