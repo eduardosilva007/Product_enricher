@@ -6929,6 +6929,14 @@ def _baseline_row_accepted(row: Any, df: Any) -> bool:
     if resolution and resolution != "RESOLVED":
         return False
 
+    # Keep the canonical final acceptance contract identical to the live
+    # classifier: RESOLVED alone must NEVER approve a WEAK/CONFLICT identity.
+    # BI_OK and Manual locks have already returned above and stay authoritative.
+    identity_col = find_col(df, ["Classification Identity"], required=False)
+    identity = safe(row.get(identity_col)).upper() if identity_col else ""
+    if identity and identity != "STRONG":
+        return False
+
     proc_col = find_col(df, ["Status Processamento"], required=False)
     proc = safe(row.get(proc_col)).upper() if proc_col else ""
     if proc and proc not in {"PROCESSADO", "COMPLETED"}:
