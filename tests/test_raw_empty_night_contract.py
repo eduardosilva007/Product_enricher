@@ -99,7 +99,7 @@ class RawEmptyNightTests(unittest.TestCase):
             with self.assertRaises(ValueError):pilot.gate(cfg,args)
 
     def test_pilot_isolated_resume_and_no_mass_promotion(self):
-        text=(ROOT/"run_controlled_night_pilot.py").read_text(encoding="utf-8")
+        text=(ROOT/"pipeline_produtos.py").read_text(encoding="utf-8")
         self.assertIn('"cohort_keys":[r["business_key"] for r in eligible]',text)
         self.assertIn('"production_approved":False',text)
         self.assertIn('prior_attempts.update(history.get("cohort_keys",[]))',text)
