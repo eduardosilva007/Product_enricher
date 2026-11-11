@@ -95,6 +95,33 @@ JEV, execute após atualizar o master e **fechar ambos os Excels**:
 & C:\p\venv\Scripts\python.exe .\pipeline_produtos.py --mode overnight-promote --campaign-resume-dir "C:\p\Product_enricher\piloto_argentina\controlled_night\campaigns\20261111T140632Z_abf63101"
 ```
 
+### Recuperação dos dois pilotos históricos de 20 SKUs
+
+Depois que a campanha dos 50 terminar a promoção e exibir
+`promotion.status=COMMITTED`, é possível recuperar também os 40 SKUs
+históricos sem executar Search/JEV:
+
+```powershell
+& C:\p\venv\Scripts\python.exe .\pipeline_produtos.py --mode overnight-promote `
+  --legacy-run-dir "C:\p\Product_enricher\piloto_argentina\controlled_night\20261110T230416Z_48864869" `
+  --legacy-run-dir "C:\p\Product_enricher\piloto_argentina\controlled_night\20261111T124902Z_e5dea5cd"
+```
+
+A execução exige dois relatórios auditados de 20 chaves distintas,
+`RAW_OK=20` em cada, classificação executada e planilhas/SQLite
+preservados. Produz um manifesto recuperável sob
+`campaigns/legacy40_<hash>/` e realiza a mesma promoção canônica.
+O piloto inicial produziu 17 linhas de classificação para 20 SKUs:
+os três sem saída permanecem pendentes, não se inventa taxonomia. Casos
+históricos `REVIEW_CACHE_EVIDENCE` recebem `Review Required=SIM`
+e `Auto Eligible=NÃO` durante a importação, sem alterar o arquivo
+original e sem aprovação humana. Caso a auditoria antiga não atenda aos
+critérios de segurança, o processo será bloqueado antes da gravação.
+
+**Não executar duas promoções simultâneas nem abrir Excel durante a
+atualização.** Se uma promoção falhar, verificar seu backup/manifesto
+antes de uma nova tentativa.
+
 O comando importa os 50 RAW_OK, aplica as classificações disponíveis,
 verifica chaves, audit PASS e registros protegidos; só então substitui
 os arquivos canônicos. Um snapshot prévio dos arquivos fica sob
