@@ -1,6 +1,6 @@
 """Contract tests for capped 1,130 RAW_EMPTY pilot. No network or model inference."""
 from __future__ import annotations
-import sys,tempfile,types,unittest
+import json,sqlite3,sys,tempfile,types,unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -39,6 +39,54 @@ class RawEmptyNightTests(unittest.TestCase):
         self.assertEqual(rep["summary"]["raw_empty_processed"],1)
         self.assertEqual(rep["summary"]["state_RAW_MISSING"],1)
         self.assertEqual(rep["candidate_rows"][0]["model"],"0")
+
+    def test_cumulative_quota_from_prior_isolated_campaigns(self):
+        from nightly_provider_router import DurableRouter,Slot
+        with tempfile.TemporaryDirectory() as folder:
+            base=Path(folder); old=base/"history"/"run1"
+            old.mkdir(parents=True)
+            db=old/"prior.sqlite"
+            with sqlite3.connect(db) as cx:
+                cx.execute("CREATE TABLE collection_attempt_reservations "
+                           "(business_key TEXT PRIMARY KEY,account TEXT,provider TEXT)")
+                cx.executemany("INSERT INTO collection_attempt_reservations VALUES (?,?,?)",
+                    [("cnh|one","tavily:1","tavily"),("cnh|two","tavily:1","tavily")])
+            (old/"isolated_config.json").write_text(
+                json.dumps({"files":{"classification_db":str(db)}}),encoding="utf-8")
+            (old/"run_report.json").write_text(
+                json.dumps({"cohort_keys":["cnh|one","cnh|two"],
+                            "stages":{"collection":{"attempts":1,"status":"PASS"}}}),
+                encoding="utf-8")
+            next_db=base/"next.sqlite"
+            result=pilot.import_prior_reservations(next_db,base/"history")
+            self.assertEqual(result["historical_cohort_keys"],2)
+            self.assertEqual(result["historical_reservation_keys"],2)
+            router=DurableRouter(next_db,[
+                Slot("tavily","tavily:1","TAVILY_API_KEY","",2,"tavily:1")])
+            try:
+                self.assertIsNone(router.reserve("cnh|three"))
+                self.assertIsNone(router.reserve("cnh|one"))
+            finally:router.close()
+
+    def test_missing_prior_attempt_blocks_campaign(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base=Path(folder); old=base/"history"/"run1"
+            old.mkdir(parents=True)
+            db=old/"prior.sqlite"
+            with sqlite3.connect(db) as cx:
+                cx.execute("CREATE TABLE collection_attempt_reservations "
+                           "(business_key TEXT PRIMARY KEY,account TEXT,provider TEXT)")
+                cx.execute("INSERT INTO collection_attempt_reservations VALUES (?,?,?)",
+                           ("cnh|one","tavily:1","tavily"))
+            (old/"isolated_config.json").write_text(
+                json.dumps({"files":{"classification_db":str(db)}}),encoding="utf-8")
+            (old/"run_report.json").write_text(
+                json.dumps({"cohort_keys":["cnh|one","cnh|two"],
+                            "stages":{"collection":{"attempts":1}}}),encoding="utf-8")
+            target=base/"new.sqlite"
+            with self.assertRaisesRegex(RuntimeError,"Unaccounted previous"):
+                pilot.import_prior_reservations(target,base/"history")
+            self.assertFalse(target.exists())
 
     def test_live_requires_positive_bounded_budgets(self):
         cfg={"collection":{"hard_limits":{"max_requests_per_product":1}},
