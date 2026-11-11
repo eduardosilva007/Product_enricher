@@ -68,6 +68,38 @@ class RawEmptyNightTests(unittest.TestCase):
                 self.assertIsNone(router.reserve("cnh|one"))
             finally:router.close()
 
+    def test_disabled_provider_account_survives_sublot_rotation(self):
+        from nightly_provider_router import DurableRouter,Slot
+        with tempfile.TemporaryDirectory() as folder:
+            base=Path(folder)
+            old=base/"history"/"run1"
+            old.mkdir(parents=True)
+            db=old/"prior.sqlite"
+            with sqlite3.connect(db) as cx:
+                cx.execute("CREATE TABLE collection_attempt_reservations "
+                           "(business_key TEXT PRIMARY KEY,account TEXT,provider TEXT)")
+                cx.execute("INSERT INTO collection_attempt_reservations VALUES (?,?,?)",
+                           ("cnh|old","tavily:1","tavily"))
+                cx.execute("CREATE TABLE collection_disabled_accounts "
+                           "(account TEXT PRIMARY KEY, reason TEXT)")
+                cx.execute("INSERT INTO collection_disabled_accounts VALUES (?,?)",
+                           ("tavily:1","PROVIDER_EXHAUSTED"))
+            (old/"isolated_config.json").write_text(
+                json.dumps({"files":{"classification_db":str(db)}}),encoding="utf-8")
+            (old/"run_report.json").write_text(
+                json.dumps({"cohort_keys":["cnh|old"],
+                            "stages":{"collection":{"attempts":1}}}),encoding="utf-8")
+            next_db=base/"next.sqlite"
+            info=pilot.import_prior_reservations(next_db,base/"history")
+            self.assertEqual(info["historical_disabled_accounts"],1)
+            router=DurableRouter(next_db,[
+                Slot("tavily","tavily:1","TAVILY_API_KEY","",5,"tavily:1"),
+                Slot("brightdata","brightdata:1","BRIGHTDATA_API_KEY","BRIGHTDATA_ZONE",5,"brightdata:1"),
+            ])
+            try:
+                self.assertEqual(router.reserve("cnh|new").account,"brightdata:1")
+            finally:router.close()
+
     def test_missing_prior_attempt_blocks_campaign(self):
         with tempfile.TemporaryDirectory() as folder:
             base=Path(folder); old=base/"history"/"run1"
