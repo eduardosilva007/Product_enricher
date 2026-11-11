@@ -89,7 +89,21 @@ Registros que precisam de revisão são persistidos como pendentes,
 **sem promoção para aprovação humana**.
 
 Para incorporar a campanha de 50 SKUs já finalizada, sem HTTP / Search /
-JEV, execute após atualizar o master e **fechar ambos os Excels**:
+JEV, execute após atualizar o master e **fechar ambos os Excels**.
+Primeiro faça o pré-commit em cópias com as bases reais:
+
+```powershell
+& C:\p\venv\Scripts\python.exe .\pipeline_produtos.py --mode overnight-promote --promotion-dry-run --campaign-resume-dir "C:\p\Product_enricher\piloto_argentina\controlled_night\campaigns\20261111T140632Z_abf63101"
+```
+
+Exigir `"status": "DRY_RUN_PASS"` e
+`"canonical_files_unchanged": true` antes da promoção. O pré-commit
+também verifica todos os registros humanos por linha física, sem
+conflar variantes ANNOVI/BOSCH pela mesma business_key. Cópias antigas
+de promoção interrompida são reconstruídas somente se os arquivos
+oficiais permanecerem idênticos ao backup original.
+
+Depois do pré-commit aprovado, execute a promoção real:
 
 ```powershell
 & C:\p\venv\Scripts\python.exe .\pipeline_produtos.py --mode overnight-promote --campaign-resume-dir "C:\p\Product_enricher\piloto_argentina\controlled_night\campaigns\20261111T140632Z_abf63101"
