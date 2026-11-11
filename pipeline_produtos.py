@@ -11451,11 +11451,17 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
                                 "(account,reason) VALUES (?,?)",(account,reason))
             target_db.commit()
 
+        # Input-scoped baseline synchronization: do not hydrate or register the
+        # entire source population while promoting only this campaign.
+        promotion_input = backup_dir / "promotion_cohort.xlsx"
+        _excel_export_safe_frame(pd.DataFrame([
+            {"Marca": brand, "Modelo": model} for brand, model, _ in raw_items
+        ])).to_excel(promotion_input, index=False)
         # Existing vetted/up-to-date official rows dominate historical proposals.
         # The canonical master routine contains locks for Manual and BI_OK.
         stats = persist_baseline_excels(
             rows=records, master_path=staged["master"],
-            final_path=staged["final"], input_path=canonical["input"],
+            final_path=staged["final"], input_path=promotion_input,
             rules=rules, cache_path=staged["cache"], cfg=cfg,
         )
         final, _ = _read_business_sheet(staged["final"])
