@@ -258,6 +258,26 @@ class RawEmptyNightTests(unittest.TestCase):
                           "master":str(consolidated),"final":str(final),
                           "classification_db":str(official_db)}}
             rules=SimpleNamespace(version="test",hash="abc")
+            # Simulate a prior pre-commit failure: immutable backups already
+            # exist and staged files may be half-written. Retrying is safe
+            # only when the official originals still match their hashes.
+            backup_dir=campaign/"promotion_backup"
+            backup_dir.mkdir()
+            originals={}
+            for name,source in (
+                ("cache",official_cache),("master",consolidated),
+                ("final",final),("classification_db",official_db)):
+                b=backup_dir/(name+source.suffix)
+                if source.suffix==".sqlite":
+                    master.snapshot(source,b)
+                else:
+                    import shutil
+                    shutil.copy2(source,b)
+                originals[name]={"path":str(source),"sha256":master.digest(source),
+                                 "backup":str(b)}
+                (backup_dir/("staged_"+name+source.suffix)).write_bytes(b"old partial")
+            (backup_dir/"source_manifest.json").write_text(
+                json.dumps(originals),encoding="utf-8")
             with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
                 promoted=master.overnight_promote_campaign(campaign,cfg,rules)
             self.assertEqual(promoted["status"],"COMMITTED")
