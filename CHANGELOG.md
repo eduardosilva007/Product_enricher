@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2026-11-11 — Canonical Base Final persistence for overnight campaigns
+
+- Introduces offline `--mode overnight-promote --campaign-resume-dir <ID>` to import the previous completed 50-SKU campaign into the official Search cache, Consolidado and Base Final without new API calls.
+- New `--mode overnight` campaigns automatically promote audited `COMPLETE` outputs into the same canonical files before returning success. A failed promotion makes overnight fail rather than silently reporting complete and persisted.
+- Canonical `persist_baseline_excels` remains responsible for status, `Category General`, `FAMILY`, revision metadata and the absolute Manual / Revisão B.I=OK protection. The promotion routine does not designate proposals as human-approved.
+- Promotions require matching sublot cohorts, PASS collection/classification/audits, all RAW_OK, and only in-cohort classification outputs. Missing classification rows remain measurable as pending rather than being invented.
+- Source files are backed up before staged cache/Excel generation; source hashes, protected manual cells, final cohort coverage and cache persistence are checked before swapping canonical artifacts.
+- The campaign manifest records `promotion.status=COMMITTED` and imported/missing classification counts, or fail-closed recovery state. Backups remain under the campaign for disaster recovery.
+- Adds a real offline regression fixture covering canonical Final+cache persistence, protection of a BI-reviewed record and idempotent promotion.
+
 ## 2026-11-11 — Master overnight stabilization (branch: feature/overnight-master-stabilization-20261111)
 
 - Centralizes the runnable overnight pipeline, provider account router, RAW_EMPTY cohort audit, protected-human-record forensic diff and campaign orchestration inside `pipeline_produtos.py`.
