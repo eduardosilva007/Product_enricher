@@ -48,6 +48,19 @@ class RouterIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(r.reserve("b"))
         self.assertIsNone(r.reserve("c"))
         r.close()
+    def test_shared_group_with_conflicting_caps_fails_before_sqlite(self):
+        slots = [
+            Slot("brightdata", "brightdata:1", "BRIGHTDATA_API_KEY", "BRIGHTDATA_ZONE", 2, "shared"),
+            Slot("brightdata", "brightdata:2", "BRIGHTDATA_API_KEY_2", "BRIGHTDATA_ZONE", 3, "shared"),
+        ]
+        with self.assertRaisesRegex(ValueError, "Conflicting limits"):
+            DurableRouter(self.path, slots)
+        self.assertFalse(self.path.exists())
+
+    def test_duplicate_accounts_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Duplicate provider account"):
+            DurableRouter(self.path, [self.slots[0], self.slots[0]])
+
     def test_requires_explicit_budget(self):
         with patch.dict(os.environ, {"TAVILY_API_KEY":"test-key", "TAVILY_LIMIT_1":""},clear=True):
             self.assertEqual(configured_slots(),[])
