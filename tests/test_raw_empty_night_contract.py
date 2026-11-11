@@ -406,6 +406,61 @@ class RawEmptyNightTests(unittest.TestCase):
             self.assertEqual(state["reserved_tokens"],3000)
             self.assertEqual(len(state["batches"]),3)
 
+    def test_master_pause_after_first_audited_five_then_resume_five(self):
+        import pipeline_produtos as master
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder:
+            target=Path(folder)/"controlled_night"
+            args=SimpleNamespace(
+                execute_live=True,campaign_total=10,campaign_jev_budget=30,
+                campaign_token_budget=60000,campaign_resume_dir="",
+                campaign_pause_after_sublots=1,resume_dir="",
+                search_budget=5,llm_budget=15,token_budget=30000,
+                timeout_minutes=120,allow_prior_serper_quota_error=True)
+            processed=[]
+            def fake_one(local_args, cfg, on_run_created=None):
+                n=len(processed)
+                run=target/("batch%d"%n)
+                run.mkdir(parents=True)
+                on_run_created(run)
+                keys=["test|%d"%i for i in range(n*5,(n+1)*5)]
+                (run/"run_report.json").write_text(json.dumps({
+                    "budget":{"search":5,"jev_calls":15,"tokens":30000},
+                    "cohort_keys":keys,"cohort_count":5}),encoding="utf-8")
+                (run/"quality_audit.json").write_text(json.dumps({
+                    "status":"PASS","protected_changes_total":0,
+                    "original_source_modified":[],"useful_raw_count":5}),encoding="utf-8")
+                processed.append((keys,local_args.resume_dir))
+                return 0
+            with patch.object(master,"OUT",target),patch.object(master,"gate"),\
+                 patch.object(master,"overnight_run_one",side_effect=fake_one),\
+                 patch.object(master,"overnight_promote_campaign",
+                              return_value={"status":"COMMITTED"}) as promote:
+                self.assertEqual(master.overnight_campaign(args,{}),0)
+                manifest=next((target/"campaigns").glob("*/campaign.json"))
+                partial=json.loads(manifest.read_text(encoding="utf-8"))
+                self.assertEqual(partial["status"],"PAUSED_FOR_RESUME_TEST")
+                self.assertEqual(partial["audited_products"],5)
+                self.assertEqual(partial["reserved_jev_calls"],15)
+                self.assertEqual(partial["reserved_tokens"],30000)
+                self.assertEqual(len(partial["batches"]),1)
+                promote.assert_not_called()
+                args.campaign_resume_dir=str(manifest.parent)
+                args.campaign_pause_after_sublots=0
+                self.assertEqual(master.overnight_campaign(args,{}),0)
+                final=json.loads(manifest.read_text(encoding="utf-8"))
+                self.assertEqual(final["status"],"COMPLETE")
+                self.assertEqual(final["audited_products"],10)
+                self.assertEqual(final["reserved_jev_calls"],30)
+                self.assertEqual(final["reserved_tokens"],60000)
+                self.assertEqual(len(final["batches"]),2)
+                self.assertEqual(len({k for batch in final["batches"]
+                                      for k in batch["cohort_keys"]}),10)
+                self.assertTrue(all(not resumed for _,resumed in processed))
+                self.assertEqual(len(processed),2)
+                promote.assert_called_once()
+
     def test_master_campaign_resume_reuses_reserved_budget(self):
         import pipeline_produtos as master
         from types import SimpleNamespace
