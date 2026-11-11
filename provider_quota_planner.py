@@ -52,6 +52,8 @@ class QuotaPlanner:
         return a
 
     def record_attempt(self, business_key: str) -> None:
+        if business_key not in self._reserved:
+            raise ValueError("No active reservation for business_key; cannot record attempt")
         account_id = self._reserved.pop(business_key)
         self.attempted_products.add(business_key)
         self.accounts = [
