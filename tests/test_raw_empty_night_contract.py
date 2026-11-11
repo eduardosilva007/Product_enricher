@@ -88,6 +88,62 @@ class RawEmptyNightTests(unittest.TestCase):
                 pilot.import_prior_reservations(target,base/"history")
             self.assertFalse(target.exists())
 
+    def test_master_campaign_50_products_batches_and_cumulative_reservations(self):
+        import pipeline_produtos as master
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder:
+            target=Path(folder)/"controlled_night"
+            args=SimpleNamespace(
+                execute_live=True, campaign_total=50,
+                campaign_jev_budget=60, campaign_token_budget=3000,
+                campaign_resume_dir="",resume_dir="",search_budget=20,
+                llm_budget=20,token_budget=1000,timeout_minutes=120,
+                allow_prior_serper_quota_error=True)
+            seen=[]
+            def fake_one(local_args, cfg, on_run_created=None):
+                n=len(seen)
+                run=target/f"batch{n}"
+                run.mkdir(parents=True)
+                on_run_created(run)
+                keys=[f"test|{i}" for i in range(n*20,n*20+local_args.search_budget)]
+                (run/"run_report.json").write_text(
+                    json.dumps({"budget":{"search":local_args.search_budget,
+                                          "jev_calls":local_args.llm_budget,
+                                          "tokens":local_args.token_budget},
+                                "cohort_keys":keys,"cohort_count":len(keys)}), encoding="utf-8")
+                (run/"quality_audit.json").write_text(
+                    json.dumps({"status":"PASS","protected_changes_total":0,
+                                "original_source_modified":[],
+                                "useful_raw_count":len(keys)}),encoding="utf-8")
+                seen.append((local_args.search_budget,local_args.llm_budget,
+                             local_args.token_budget))
+                return 0
+            with patch.object(master,"OUT",target),patch.object(master,"gate"),\
+                 patch.object(master,"overnight_run_one",side_effect=fake_one):
+                rc=master.overnight_campaign(args,{})
+            self.assertEqual(rc,0)
+            self.assertEqual(seen,[(20,20,1000),(20,20,1000),(10,20,1000)])
+            manifests=list((target/"campaigns").glob("*/campaign.json"))
+            self.assertEqual(len(manifests),1)
+            state=json.loads(manifests[0].read_text(encoding="utf-8"))
+            self.assertEqual(state["status"],"COMPLETE")
+            self.assertEqual(state["audited_products"],50)
+            self.assertEqual(state["reserved_jev_calls"],60)
+            self.assertEqual(state["reserved_tokens"],3000)
+            self.assertEqual(len(state["batches"]),3)
+
+    def test_master_campaign_blocks_without_total_llm_budget(self):
+        import pipeline_produtos as master
+        from types import SimpleNamespace
+        args=SimpleNamespace(
+            execute_live=True,campaign_total=50,campaign_jev_budget=0,
+            campaign_token_budget=0,campaign_resume_dir="",resume_dir="",
+            search_budget=20,llm_budget=20,token_budget=1000,
+            allow_prior_serper_quota_error=True)
+        with self.assertRaisesRegex(ValueError,"cumulative"):
+            master.overnight_campaign(args,{})
+
     def test_live_requires_positive_bounded_budgets(self):
         cfg={"collection":{"hard_limits":{"max_requests_per_product":1}},
              "recovery":{"hard_lock_review_bi_value":"OK"},
