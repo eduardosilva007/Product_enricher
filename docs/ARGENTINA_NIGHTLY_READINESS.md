@@ -76,6 +76,37 @@ reservas, cobertura RAW_OK ou limite JEV/token interrompe o encadeamento.
 Os resultados permanecem segregados por sublote ate revisao e reconciliacao
 auditadas. Nao confundir 50 SKUs processados com 50 taxonomias corretas.
 
+## Persistência canônica de resultados overnight (11/11/2026)
+
+**A Base Final e o Consolidado são as fontes oficiais.** O cache SQLite
+canônico guarda a evidência RAW e os estados de classificação ficam nos
+Excels oficiais, incluindo propostas ainda pendentes de double check.
+
+O master agora grava o cache canônico, o Consolidado e a Base Final
+**somente após auditoria de campanha COMPLETE**. A gravação reutiliza
+`persist_baseline_excels` e suas travas Manual / Revisão B.I=OK.
+Registros que precisam de revisão são persistidos como pendentes,
+**sem promoção para aprovação humana**.
+
+Para incorporar a campanha de 50 SKUs já finalizada, sem HTTP / Search /
+JEV, execute após atualizar o master e **fechar ambos os Excels**:
+
+```powershell
+& C:\p\venv\Scripts\python.exe .\pipeline_produtos.py --mode overnight-promote --campaign-resume-dir "C:\p\Product_enricher\piloto_argentina\controlled_night\campaigns\20261111T140632Z_abf63101"
+```
+
+O comando importa os 50 RAW_OK, aplica as classificações disponíveis,
+verifica chaves, audit PASS e registros protegidos; só então substitui
+os arquivos canônicos. Um snapshot prévio dos arquivos fica sob
+`campaigns/<ID>/promotion_backup/`, exclusivamente para recuperação
+e prova de integridade. Se uma etapa falhar, a promoção é bloqueada;
+**não repetir** sem avaliar o relatório/backup. O relatório final da
+campanha traz `promotion.status = COMMITTED` quando a gravação terminou.
+
+Campanhas futuras usando `--mode overnight --execute-live` fazem a mesma
+consolidação automaticamente ao encerrar com `COMPLETE`; nenhuma promoção
+parcial é autorizada. Não existe gasto adicional de APIs na promoção.
+
 ## Gatilhos para a coleta noturna
 - Comparar a versão local com main; resolver discrepância do menu.
 - Inventariar 1.030 RAW_EMPTY, histórico de tentativas e contratos do cache.
