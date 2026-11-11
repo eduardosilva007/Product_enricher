@@ -11372,6 +11372,7 @@ def _overnight_scoped_excel_overlay(original_path: Path, generated_path: Path,
         choices=indexes.get(key,[])
         if not choices:
             raise RuntimeError(f"PROMOTION_GENERATED_COHORT_MISSING: {key}")
+        existing=[i for i,k in enumerate(before_keys) if k==key]
         # Select the authoritative original input pair, not an arbitrary
         # existing variant that happens to share a normalized business key.
         authoritative = cohort_pairs[key]
