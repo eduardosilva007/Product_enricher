@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 2026-11-11 — Controlled nightly readiness and review safety
+
+- Fixed `CLEF_INSUFFICIENT` returning `Review Required = NÃO` even when `Classification Outcome = REVIEW_CACHE_EVIDENCE`; now requires human review and blocks automatic approval.
+- Historical impact: three rows in the first isolated 20-SKU pilot (CNH 47507106, 47945518 and 48137950) were flagged incorrectly. Their original Excel files remain unchanged as audit evidence; no automatic taxonomy or production-data backfill is authorized.
+- The full `tests/` suite now runs in GitHub Actions with offline dependencies, including regression guards for the review states, Excel sanitization and account quotas.
+- The multiprovider router is integrated into `collect_products` with SQLite reservations before HTTP. `billing_group` conflicting limits now fail closed.
+- Isolated pilots now import preceding reservation ledgers into each new copied SQLite before collection so account usage does not reset between pilot runs; missing/conflicting prior reservations block new execution.
+- Operational limits remain 20 Search SKUs per run, with no automatic promotion to production; taxonomy and historical-data remediation require separate audited approval.
+
 ## R9.6p7 — Import Noise Taxonomy + Strong Identity (2026-09-29)
 - Requires STRONG Brand+Model identity for deterministic, funnel, combo-kit, and LLM final approval.
 - Keeps PROBABLE sources available for evidence/review but blocks them from `AUTO_APROVADO`.
