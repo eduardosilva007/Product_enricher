@@ -10554,7 +10554,7 @@ def main() -> int:
             return 0
     if args.mode == "overnight":
         with exclusive_campaign_lock():
-            return overnight_campaign(args, cfg)
+            return overnight_campaign(args, cfg, rules=rules)
     if args.mode == "validate":
         validate_all(rules, cfg, args.cache)
         return 0
@@ -11457,7 +11457,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         raise
 
 
-def overnight_campaign(args, cfg):
+def overnight_campaign(args, cfg, rules=None):
     """One master entrypoint: collect -> classify -> audit in <=20 SKU sublots.
 
     Reserve the *maximum* possible calls/tokens before every batch. This
@@ -11611,6 +11611,10 @@ def overnight_campaign(args, cfg):
 
     state["status"] = "COMPLETE" if state["audited_products"] == args.campaign_total else "PARTIAL"
     atomic_json(manifest_path, state)
+    if state["status"] == "COMPLETE" and rules is not None:
+        # Persist each fully audited campaign into the official source of truth.
+        # A failed promotion is an operational failure, not a successful overnight.
+        overnight_promote_campaign(root, cfg, rules)
     print(json.dumps({"campaign": str(manifest_path), "status": state["status"],
                       "audited": state["audited_products"], "target": args.campaign_total,
                       "jev_reserved": state["reserved_jev_calls"],
