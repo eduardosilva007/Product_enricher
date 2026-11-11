@@ -464,6 +464,43 @@ class RawEmptyNightTests(unittest.TestCase):
             self.assertEqual(stats["updated"],1)
             self.assertEqual(stats["original_rows_preserved"],3)
 
+    def test_promotion_human_lock_does_not_confuse_normalized_variants(self):
+        import pipeline_produtos as master
+        import pandas as pd
+        original=pd.DataFrame([
+            {"Marca":"ANNOVI REVERBERI","Modelo":"52180",
+             "FAMILY":"PUMP","Status":"Script",
+             "Revisão":"AUTO_APROVADO","Revisão B.I":"OK"},
+            {"Marca":"Annovi-Reverberi","Modelo":"52180",
+             "FAMILY":"PUMP","Status":"Manual",
+             "Revisão":"MANUAL","Revisão B.I":"OK"},
+            {"Marca":"BOSCH","Modelo":"GWS2200180",
+             "FAMILY":"ANGLE GRINDER","Status":"Script",
+             "Revisão":"AUTO_APROVADO","Revisão B.I":"OK"},
+            {"Marca":"BOSCH","Modelo":"GWS 2200 180",
+             "FAMILY":"ANGLE GRINDER","Status":"Manual",
+             "Revisão":"VALIDADO_MANUAL","Revisão B.I":"OK"},
+            {"Marca":"CNH","Modelo":"123456",
+             "FAMILY":"","Status":"Script",
+             "Revisão":"","Revisão B.I":""},
+        ])
+        staged=original.copy()
+        staged.loc[4,"FAMILY"]="ENGINE"
+        result=master._overnight_assert_exact_human_locks(original,staged)
+        self.assertEqual(result["protected_original_rows_verified"],4)
+        # Genuine change to a human-reviewed cell still fails.
+        staged.loc[1,"Revisão"]="AUTO_APROVADO"
+        with self.assertRaisesRegex(RuntimeError,"PROMOTION_PROTECTED_FIELD_CHANGED"):
+            master._overnight_assert_exact_human_locks(original,staged)
+        staged=original.copy()
+        staged.loc[1,"Modelo"]="OTHER"
+        with self.assertRaisesRegex(RuntimeError,"PROMOTION_PROTECTED_PAIR_CHANGED"):
+            master._overnight_assert_exact_human_locks(original,staged)
+        # Repeated exact approved rows are verified independently.
+        duplicates=pd.concat([original,original.iloc[[0]]],ignore_index=True)
+        verified=master._overnight_assert_exact_human_locks(duplicates,duplicates.copy())
+        self.assertEqual(verified["protected_original_rows_verified"],5)
+
     def test_overlay_uses_audited_exact_comet_variant_not_normalized_rank(self):
         import pipeline_produtos as master
         import pandas as pd
