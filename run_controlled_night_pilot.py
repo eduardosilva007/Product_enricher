@@ -197,10 +197,8 @@ def outcome_audit(run,state,isolated):
     protected_changes=protected_details
     raw_states={}
     with closing(TavilyReadOnlyStore(Path(isolated["files"]["cache"]))) as store:
-        for k,row in cohort_rows.items():
-            b=field(cohort,["Marca","Fabricante","Brand","Manufacturer"])
-            m=field(cohort,["Modelo","Model","SKU","Part Number"])
-            ev=store.get(safe(row[b]),safe(row[m]))
+        for _, row in cohort.iterrows():
+            ev=store.get(safe(row[cohort_b]),safe(row[cohort_m]))
             raw_states[ev.state]=raw_states.get(ev.state,0)+1
     labels=["BASE FINAL INPUT ROW COVERAGE OK","BASE FINAL PROCV COVERAGE OK",
             "BASE FINAL CLASSIFICATION INTEGRITY"]
