@@ -10163,6 +10163,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--campaign-jev-budget", type=int, default=0)
     p.add_argument("--campaign-token-budget", type=int, default=0)
     p.add_argument("--campaign-resume-dir", default="", help="Existing campaign manifest directory; never starts new unaudited work")
+    p.add_argument("--legacy-run-dir", action="append", default=[], help="Two historical audited run folders for offline-only 40-SKU promotion")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p
@@ -10546,10 +10547,12 @@ def main() -> int:
             LOG.error(e)
         return 2
     if args.mode == "overnight-promote":
-        if not args.campaign_resume_dir:
-            raise ValueError("overnight-promote requires --campaign-resume-dir")
+        if bool(args.campaign_resume_dir) == bool(args.legacy_run_dir):
+            raise ValueError("Provide exactly one: --campaign-resume-dir OR two --legacy-run-dir")
         with exclusive_campaign_lock():
-            result = overnight_promote_campaign(Path(args.campaign_resume_dir), cfg, rules)
+            root = (overnight_register_legacy_runs(args.legacy_run_dir)
+                    if args.legacy_run_dir else Path(args.campaign_resume_dir))
+            result = overnight_promote_campaign(root, cfg, rules)
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
             return 0
     if args.mode == "overnight":
@@ -11260,6 +11263,73 @@ def overnight_run_one(args, cfg, on_run_created=None):
         print(f"Report: {run/'run_report.json'}",flush=True)
 
 
+
+
+
+def overnight_register_legacy_runs(run_dirs: Sequence[str]) -> Path:
+    """Register historical audited 20-SKU runs for offline-only promotion.
+
+    The old pilots have no campaign.json; only a verifiable manifest is
+    synthesized. The raw/classification files remain untouched. Never create
+    an unverified COMPLETE manifest from arbitrary filenames.
+    """
+    if len(run_dirs) != 2:
+        raise ValueError("LEGACY_REQUIRES_EXACTLY_TWO_RUNS")
+    summaries = []
+    seen = set()
+    for supplied in run_dirs:
+        run = Path(supplied).resolve()
+        if run.parent != OUT.resolve() or not run.is_dir():
+            raise RuntimeError(f"LEGACY_RUN_PATH_NOT_ISOLATED: {run}")
+        report_path = run / "run_report.json"
+        quality_path = run / "quality_audit.json"
+        isolated_path = run / "isolated_config.json"
+        if not all(p.is_file() for p in (report_path, quality_path, isolated_path)):
+            raise RuntimeError(f"LEGACY_REQUIRED_REPORT_MISSING: {run}")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        isolated = json.loads(isolated_path.read_text(encoding="utf-8"))
+        keys = report.get("cohort_keys", [])
+        stages = report.get("stages", {})
+        if (len(keys) != 20 or len(set(keys)) != 20 or
+                int(report.get("cohort_count", -1)) != 20 or
+                seen.intersection(keys) or
+                stages.get("collection", {}).get("status") != "PASS" or
+                stages.get("classification", {}).get("status") != "PASS" or
+                quality.get("status") != "PASS" or
+                quality.get("protected_changes_total") != 0 or
+                quality.get("original_source_modified") or
+                quality.get("useful_raw_count") != 20):
+            raise RuntimeError(f"LEGACY_RUN_NOT_AUDITABLE: {run}")
+        for name in ("cache", "input", "output", "classification_db"):
+            if not Path(isolated.get("files", {}).get(name, "")).is_file():
+                raise RuntimeError(f"LEGACY_SOURCE_MISSING: {name}: {run}")
+        seen.update(keys)
+        summaries.append({"run_dir": str(run), "cohort_keys": keys,
+                          "cohort_count": 20, "raw_ok": 20,
+                          "status": "AUDIT_PASS"})
+    if len(seen) != 40:
+        raise RuntimeError("LEGACY_COHORT_NOT_40_UNIQUE")
+    root = OUT / "campaigns" / (
+        "legacy40_" + hashlib.sha256(
+            "|".join(sorted(str(Path(p).resolve()) for p in run_dirs)).encode()
+        ).hexdigest()[:16]
+    )
+    manifest = root / "campaign.json"
+    if root.exists():
+        prior = json.loads(manifest.read_text(encoding="utf-8"))
+        if (prior.get("status") != "COMPLETE" or
+                prior.get("audited_products") != 40 or
+                prior.get("batches") != summaries):
+            raise RuntimeError("LEGACY_MANIFEST_CONFLICT")
+        return root
+    root.mkdir(parents=True, exist_ok=False)
+    atomic_json(manifest, {
+        "schema": 1, "status": "COMPLETE", "source": "LEGACY_AUDITED_TWO_RUNS",
+        "audited_products": 40, "batches": summaries,
+        "active_run": "", "pending_run_creation": False,
+    })
+    return root
 
 
 def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: Rules) -> Dict[str, Any]:
