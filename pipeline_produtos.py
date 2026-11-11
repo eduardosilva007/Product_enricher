@@ -11014,7 +11014,7 @@ def create_run(cfg,args):
     # collection. No 18K files are ever used as collection input in this campaign.
     import pandas as pd
     cohort=run/"raw_empty_cohort.xlsx"
-    pd.DataFrame([{"Marca":r["brand"],"Modelo":r["model"]} for r in eligible]).to_excel(cohort,index=False)
+    _excel_export_safe_frame(pd.DataFrame([{"Marca":r["brand"],"Modelo":r["model"]} for r in eligible])).to_excel(cohort,index=False)
     files["input"]=str(cohort)
     for k,v in {
         "output":"classification_output.xlsx",
