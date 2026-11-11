@@ -60,6 +60,65 @@ def gate(cfg,args):
     key=jev.get("api_key_env") or "TYPESAFE_API_KEY"
     if not os.getenv(key):raise ValueError(f"JEV credential not configured: {key}")
 
+def import_prior_reservations(destination: Path, history_root: Path = OUT) -> dict:
+    """Seed the NEW isolated SQLite with earlier real reservation attempts.
+
+    Every sampled key from a previously-started pilot must exist in its
+    SQLite ledger, including errors/ambiguous requests. Missing or corrupt
+    history blocks further collection instead of silently resetting quota.
+    Never writes to old ledgers or the production SQLite.
+    """
+    reports = sorted(history_root.glob("*/run_report.json"))
+    expected = set()
+    actual = {}
+    for report_path in reports:
+        state = json.loads(report_path.read_text(encoding="utf-8"))
+        if not state.get("stages", {}).get("collection", {}).get("attempts", 0):
+            continue
+        cohort = state.get("cohort_keys", [])
+        if len(cohort) != len(set(cohort)) or not cohort:
+            raise RuntimeError(f"Invalid earlier campaign cohort: {report_path}")
+        if expected.intersection(cohort):
+            raise RuntimeError(f"Overlapping earlier campaign cohorts: {report_path}")
+        expected.update(cohort)
+        config_path = report_path.parent / "isolated_config.json"
+        previous_config = json.loads(config_path.read_text(encoding="utf-8"))
+        ledger_path = Path(previous_config["files"]["classification_db"])
+        if not ledger_path.is_file():
+            raise RuntimeError(f"Missing previous reservation ledger: {ledger_path}")
+        with closing(sqlite3.connect(f"file:{ledger_path.as_posix()}?mode=ro", uri=True)) as source:
+            rows = source.execute(
+                "SELECT business_key, account, provider FROM collection_attempt_reservations"
+            ).fetchall()
+        for key, account, provider in rows:
+            if key in actual and actual[key] != (account, provider):
+                raise RuntimeError(f"Conflicting historical reservation for SKU: {key}")
+            actual[key] = (account, provider)
+        if not set(cohort).issubset(actual):
+            raise RuntimeError(f"Unaccounted previous collection attempts: {report_path}")
+    # Existing production snapshot rows are also attempts; avoid silent
+    # account rewrites and count all reservations across previous pilots.
+    with closing(sqlite3.connect(destination)) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
+            business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
+            provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        for key, account, provider in actual.items():
+            prior = conn.execute(
+                "SELECT account, provider FROM collection_attempt_reservations WHERE business_key=?",
+                (key,),
+            ).fetchone()
+            if prior and prior != (account, provider):
+                raise RuntimeError(f"Conflicting production/historical reservation: {key}")
+            if not prior:
+                conn.execute(
+                    "INSERT INTO collection_attempt_reservations(business_key, account, provider) VALUES (?, ?, ?)",
+                    (key, account, provider),
+                )
+        conn.commit()
+    return {"historical_cohort_keys": len(expected),
+            "historical_reservation_keys": len(actual)}
+
+
 def create_run(cfg,args):
     from pipeline_produtos import load_baseline_inventory
     sources=source_paths(cfg)
@@ -97,6 +156,9 @@ def create_run(cfg,args):
             if p.suffix.lower() in (".sqlite",".db"):snapshot(p,target)
             else:shutil.copy2(p,target)
         files[k]=str(target)
+    # Persistent accounting across isolated pilot DB copies. This must happen
+    # BEFORE the new cohort is handed to the HTTP worker.
+    prior_reservation_stats = import_prior_reservations(Path(files["classification_db"]))
     # A subset input is the strongest protection against accidental RAW_MISSING
     # collection. No 18K files are ever used as collection input in this campaign.
     import pandas as pd
@@ -127,6 +189,7 @@ def create_run(cfg,args):
            "cohort_count":len(eligible),"cohort_skus":[r["model"] for r in eligible],
            "cohort_keys":[r["business_key"] for r in eligible],
            "excluded_prior_pilot_cohorts":len(prior_attempts),
+           "prior_reservation_stats":prior_reservation_stats,
            "prior_serper_quota_error_rescue_authorized":bool(args.allow_prior_serper_quota_error),
            "search_provider_exclusion":["serper"],
            "stages":{},"production_approved":False,"mass_approval":"BLOCKED_REVIEW_REQUIRED"}
