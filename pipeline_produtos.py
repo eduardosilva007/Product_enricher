@@ -11294,6 +11294,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
     keys = set()
     records = []
     raw_items = []
+    isolated_databases = []
     for batch in state["batches"]:
         run = Path(batch["run_dir"]).resolve()
         if run.parent != OUT.resolve():
@@ -11314,6 +11315,10 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             raise RuntimeError("PROMOTION_DUPLICATE_COHORT")
         keys.update(cohort_keys)
         isolated = json.loads((run / "isolated_config.json").read_text(encoding="utf-8"))
+        prior_db = Path(isolated["files"]["classification_db"])
+        if not prior_db.is_file():
+            raise RuntimeError(f"PROMOTION_CLASSIFICATION_DB_MISSING: {prior_db}")
+        isolated_databases.append((prior_db, set(cohort_keys)))
         output = Path(isolated["files"]["output"])
         if not output.is_file():
             raise RuntimeError(f"PROMOTION_CLASSIFICATION_FILE_MISSING: {output}")
@@ -11383,6 +11388,66 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         finally:
             writer.close()
 
+        # Bring terminal classification checkpoints and LLM responses home too:
+        # otherwise future classification could re-spend API credits. Never
+        # overwrite an existing official checkpoint/cache with conflicting bytes.
+        official_checkpoints = ClassificationDB(staged["classification_db"])
+        official_checkpoints.close()
+        with closing(sqlite3.connect(staged["classification_db"])) as target_db:
+            for previous_db, cohort_set in isolated_databases:
+                with closing(sqlite3.connect(previous_db.resolve().as_uri()+"?mode=ro",
+                                             uri=True)) as source_db:
+                    for table, fields, pk in (
+                        ("classification_results",
+                         ("checkpoint_id","business_key","brand","model","raw_hash",
+                          "rules_hash","pipeline_version","result_json","updated_at"),"checkpoint_id"),
+                        ("llm_cache",
+                         ("cache_id","business_key","raw_hash","rules_hash","prompt_version",
+                          "provider","model","response_json","usage_json","created_at"),"cache_id"),
+                    ):
+                        columns = ",".join(fields)
+                        placeholders = ",".join("?" for _ in fields)
+                        for values in source_db.execute(f"SELECT {columns} FROM {table}"):
+                            rec = dict(zip(fields, values))
+                            if rec["business_key"] not in cohort_set:
+                                continue
+                            prior = target_db.execute(
+                                f"SELECT {columns} FROM {table} WHERE {pk}=?",
+                                (rec[pk],)).fetchone()
+                            if prior is not None and tuple(prior) != tuple(values):
+                                # Timestamp differences in an otherwise identical
+                                # cache are harmless; the response content is not.
+                                stable_fields = ("result_json",) if table == "classification_results" else (
+                                    "response_json","usage_json")
+                                existing = dict(zip(fields,prior))
+                                if any(existing[k] != rec[k] for k in stable_fields):
+                                    raise RuntimeError(f"PROMOTION_CHECKPOINT_CONFLICT: {table}/{rec[pk]}")
+                            if prior is None:
+                                target_db.execute(
+                                    f"INSERT INTO {table} ({columns}) VALUES ({placeholders})",
+                                    tuple(values))
+                    # Preserve previous Search attempt reservations and provider
+                    # disable state without modifying an existing official account.
+                    for key, account, provider in source_db.execute(
+                        "SELECT business_key,account,provider FROM collection_attempt_reservations"):
+                        if key in cohort_set:
+                            target_db.execute(
+                                "INSERT OR IGNORE INTO collection_attempt_reservations"
+                                "(business_key,account,provider) VALUES (?,?,?)",
+                                (key,account,provider))
+                    if source_db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='collection_disabled_accounts'").fetchone():
+                        target_db.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
+                            account TEXT PRIMARY KEY, reason TEXT NOT NULL,
+                            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                        for account, reason in source_db.execute(
+                                "SELECT account,reason FROM collection_disabled_accounts"):
+                            target_db.execute(
+                                "INSERT OR IGNORE INTO collection_disabled_accounts"
+                                "(account,reason) VALUES (?,?)",(account,reason))
+            target_db.commit()
+
         # Existing vetted/up-to-date official rows dominate historical proposals.
         # The canonical master routine contains locks for Manual and BI_OK.
         stats = persist_baseline_excels(
@@ -11429,7 +11494,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         atomic_json(manifest_path, state)
         replaced = []
         try:
-            for k in ("cache", "master", "final"):
+            for k in ("cache", "master", "final", "classification_db"):
                 os.replace(staged[k], canonical[k])
                 replaced.append(k)
         except BaseException:
