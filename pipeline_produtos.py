@@ -11619,7 +11619,8 @@ def overnight_campaign(args, cfg, rules=None):
                       "audited": state["audited_products"], "target": args.campaign_total,
                       "jev_reserved": state["reserved_jev_calls"],
                       "tokens_reserved": state["reserved_tokens"],
-                      "production_approved": False}, ensure_ascii=False, indent=2))
+                      "production_persisted": state.get("promotion", {}).get("status") == "COMMITTED",
+                      "human_taxonomy_approved": False}, ensure_ascii=False, indent=2))
     return 0 if state["status"] == "COMPLETE" else 2
 
 
