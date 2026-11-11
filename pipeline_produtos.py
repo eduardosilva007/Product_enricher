@@ -11334,7 +11334,7 @@ def overnight_register_legacy_runs(run_dirs: Sequence[str]) -> Path:
 
 
 def _overnight_scoped_excel_overlay(original_path: Path, generated_path: Path,
-                                    cohort_keys: set) -> Dict[str, int]:
+                                    cohort_pairs: Dict[str, Tuple[str, str]]) -> Dict[str, int]:
     """Overlay ONLY cohort rows after legacy baseline exporter has completed.
 
     Keep every original row, including historical duplicate business keys, in
@@ -11343,6 +11343,7 @@ def _overnight_scoped_excel_overlay(original_path: Path, generated_path: Path,
     those changes MUST NOT enter the canonical workbook.
     """
     import pandas as pd
+    cohort_keys = set(cohort_pairs)
     old, old_sheet = _read_business_sheet(original_path)
     proposed, _ = _read_business_sheet(generated_path)
     old_b = find_col(old, ["Marca", "Fabricante", "Brand", "Manufacturer"])
@@ -11371,35 +11372,23 @@ def _overnight_scoped_excel_overlay(original_path: Path, generated_path: Path,
         choices=indexes.get(key,[])
         if not choices:
             raise RuntimeError(f"PROMOTION_GENERATED_COHORT_MISSING: {key}")
-        # Prefer the exact original Marca/Modelo pair. Where the legacy file
-        # has multiple equivalent spellings, retain them all and update only
-        # the unambiguous exact match.
-        existing=[i for i,k in enumerate(before_keys) if k==key]
-        exact_options=[]
-        for proposed_row in choices:
-            candidate_pair=pair(proposed_row,new_b,new_m)
-            matches=[i for i in existing if pair(old.iloc[i],old_b,old_m)==candidate_pair]
-            if len(matches)==1:
-                exact_options.append((matches[0],proposed_row))
-        # Multiple exact variant matches: use a single best canonical record
-        # only when the proposed candidate maps to a unique unprotected row.
-        if len(exact_options)>1:
-            eligible=[(i,row) for i,row in exact_options if
-                      not _row_bi_locked(old.iloc[i],old) and
-                      not _is_manual_status(old.iloc[i].get(find_col(old,["Status"],required=False)))]
-            if len(eligible)!=1:
-                raise RuntimeError(f"PROMOTION_AMBIGUOUS_COHORT_VARIANTS: {key}")
-            target_idx,selected=eligible[0]
-        elif len(exact_options)==1:
-            target_idx,selected=exact_options[0]
-        elif existing:
-            # Never guess which historical normalized variant should change.
-            raise RuntimeError(f"PROMOTION_NO_EXACT_TARGET_VARIANT: {key}")
-        elif len(choices)==1:
-            target_idx=None
-            selected=choices[0]
-        else:
-            raise RuntimeError(f"PROMOTION_AMBIGUOUS_NEW_COHORT: {key}")
+        # Select the authoritative original input pair, not an arbitrary
+        # existing variant that happens to share a normalized business key.
+        authoritative = cohort_pairs[key]
+        proposed_matches = [row for row in choices
+                            if pair(row,new_b,new_m)==authoritative]
+        original_matches = [i for i in existing
+                            if pair(old.iloc[i],old_b,old_m)==authoritative]
+        if len(proposed_matches)!=1:
+            raise RuntimeError(
+                f"PROMOTION_EXACT_PROPOSAL_MISMATCH: {key} "
+                f"pair={authoritative} matches={len(proposed_matches)}")
+        if len(original_matches)>1:
+            raise RuntimeError(
+                f"PROMOTION_DUPLICATE_EXACT_COHORT_PAIR: {key} "
+                f"pair={authoritative} matches={len(original_matches)}")
+        selected=proposed_matches[0]
+        target_idx=original_matches[0] if original_matches else None
         if target_idx is not None:
             if _row_bi_locked(old.iloc[target_idx],old):
                 locked+=1
@@ -11469,6 +11458,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
     keys = set()
     records = []
     raw_items = []
+    cohort_pairs = {}
     isolated_databases = []
     for batch in state["batches"]:
         run = Path(batch["run_dir"]).resolve()
@@ -11521,6 +11511,10 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
                        for _, row in cohort_frame.iterrows()}
         if set(key_to_pair) != set(cohort_keys):
             raise RuntimeError("PROMOTION_INPUT_COHORT_MISMATCH")
+        for key, exact_pair in key_to_pair.items():
+            if key in cohort_pairs and cohort_pairs[key] != exact_pair:
+                raise RuntimeError("PROMOTION_CONFLICTING_EXACT_COHORT_PAIR")
+            cohort_pairs[key] = exact_pair
         with closing(TavilyReadOnlyStore(Path(isolated["files"]["cache"]))) as cache:
             for key in cohort_keys:
                 brand, model = key_to_pair[key]
@@ -11656,9 +11650,9 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         # The legacy exporter reorders/deduplicates unrelated lines. Rewrite
         # staged workbooks as an exact cohort overlay of the canonical originals.
         stats["master_scoped_overlay"] = _overnight_scoped_excel_overlay(
-            canonical["master"],staged["master"],keys)
+            canonical["master"],staged["master"],cohort_pairs)
         stats["final_scoped_overlay"] = _overnight_scoped_excel_overlay(
-            canonical["final"],staged["final"],keys)
+            canonical["final"],staged["final"],cohort_pairs)
         final, _ = _read_business_sheet(staged["final"])
         fb = find_col(final, ["Marca", "Fabricante", "Brand", "Manufacturer"])
         fm = find_col(final, ["Modelo", "Model", "SKU", "Part Number"])
