@@ -76,6 +76,35 @@ reservas, cobertura RAW_OK ou limite JEV/token interrompe o encadeamento.
 Os resultados permanecem segregados por sublote ate revisao e reconciliacao
 auditadas. Nao confundir 50 SKUs processados com 50 taxonomias corretas.
 
+## Teste de interrupção e retomada controlada (5+5)
+
+Para fechar a amostra de 100 SKUs, a campanha de 10 deve comprovar
+retomada sem repetição de SKUs nem exceder os limites reservados.
+
+1. Rodar `--campaign-total 10 --search-budget 5`, com orçamento global
+   explícito, acrescentando `--campaign-pause-after-sublots 1`.
+   Após o primeiro sublote auditado, o master deixa o manifesto
+   `status=PAUSED_FOR_RESUME_TEST` e `audited_products=5`, com
+   `production_persisted=false`. Essa pausa não é crash no meio da API.
+2. Copiar o caminho exato de `campaign` exibido no relatório (o arquivo
+   `campaign.json`). Retomar com o mesmo comando e os mesmos valores de
+   target/budgets/Serper, retirando a pausa e acrescentando
+   `--campaign-resume-dir "<diretório pai de campaign.json>"`.
+3. Aceitar somente `status=COMPLETE`,
+   `production_persisted=true`, `audited_products=10`,
+   dois sublotes auditados com chaves únicas e reservas totais
+   sem ultrapassar os budgets. A promoção canônica ocorre somente após
+   o segundo sublote ser auditado.
+
+**Limitação intencional:** interromper um worker JEV já iniciado *não*
+tem retomada automática; o processo retorna
+`JEV_INCOMPLETE_REQUIRES_AUDIT` para não repetir chamadas/tokens que
+podem ter sido cobrados. Não considerar esse bloqueio uma retomada bem-sucedida.
+Somente uma reconciliação explícita da contabilidade JEV poderia tornar
+segura a retomada de um worker interrompido. A pausa 5+5 testa
+retomada entre checkpoints completos, não exatamente-once em uma
+requisição HTTP em andamento.
+
 ## Persistência canônica de resultados overnight (11/11/2026)
 
 **A Base Final e o Consolidado são as fontes oficiais.** O cache SQLite
