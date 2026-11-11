@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-11-11 — Controlled overnight interruption and durable resume
+
+- `--campaign-pause-after-sublots 1` checkpoints a running campaign after its first fully audited sublot, without promoting an incomplete campaign or issuing any more API calls.
+- Resume uses the same `campaign.json` directory via `--campaign-resume-dir`, original target and global/sub-batch limits; the second batch consumes only its own reserved allowances.
+- Offline regression covers 5+5 SKU continuity, unique cohort keys, reserved call/token ledger, delayed promotion and `COMPLETE` after resume.
+- A separate interruption regression verifies JEV classifications that have started are **not** automatically retried: `JEV_INCOMPLETE_REQUIRES_AUDIT` remains fail-closed. The checkpoint test does not claim mid-request crash recovery.
+- User acceptance: pause at 5, observe `PAUSED_FOR_RESUME_TEST`, resume exact campaign, observe 10 unique audited products and `production_persisted=true`.
+
 ## 2026-11-11 — Canonical promotion: exact human-lock validation
 
 - Corrected false `BI_OK_HARD_LOCK_VIOLATION` in a completed 50-SKU offline promotion. The erroneous comparison matched human-reviewed records solely by normalized `business_key`, conflating historic ANNOVI/BOSCH Brand+Model variants and comparing their different `Status` / `Revisão` values.
