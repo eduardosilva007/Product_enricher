@@ -120,6 +120,20 @@ class RawEmptyNightTests(unittest.TestCase):
                 pilot.import_prior_reservations(target,base/"history")
             self.assertFalse(target.exists())
 
+    def test_master_cli_supports_overnight_campaign_and_explicit_total_budget(self):
+        import pipeline_produtos as master
+        args=master.build_parser().parse_args([
+            "--mode","overnight","--execute-live",
+            "--campaign-total","250","--search-budget","20",
+            "--campaign-jev-budget","750","--campaign-token-budget","1500000",
+        ])
+        self.assertEqual(args.mode,"overnight")
+        self.assertTrue(args.execute_live)
+        self.assertEqual(args.campaign_total,250)
+        self.assertEqual(args.search_budget,20)
+        self.assertEqual(args.campaign_jev_budget,750)
+        self.assertEqual(args.campaign_token_budget,1500000)
+
     def test_master_campaign_50_products_batches_and_cumulative_reservations(self):
         import pipeline_produtos as master
         from unittest.mock import patch
