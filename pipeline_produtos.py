@@ -48,7 +48,7 @@ import sqlite3
 import sys
 import time
 import unicodedata
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
@@ -10763,7 +10763,7 @@ def overnight_audit(input_path,cache_path,master_path,final_path):
     protected=load_baseline_inventory(master_path,final_path)["hard_lock"]
     processed=load_baseline_inventory(master_path,final_path)["processed"]
     rows=read_input_rows(input_path)
-    seen=set();summary=collections.Counter();eligible=[];errors=[];examples=[]
+    seen=set();summary=Counter();eligible=[];errors=[];examples=[]
     with closing(TavilyReadOnlyStore(cache_path)) as store:
         for row in rows:
             if not row.valid:
