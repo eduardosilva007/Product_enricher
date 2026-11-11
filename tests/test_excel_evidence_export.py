@@ -5,8 +5,8 @@ import inspect
 import unittest
 from pathlib import Path
 from openpyxl import load_workbook
-import pipeline_argentina_excel_fix as pipeline
-from pipeline_argentina_excel_fix import _excel_export_safe_value, export_excel
+import pipeline_produtos as pipeline
+from pipeline_produtos import _excel_export_safe_value, export_excel
 
 
 class ExcelEvidenceExportRegressions(unittest.TestCase):
