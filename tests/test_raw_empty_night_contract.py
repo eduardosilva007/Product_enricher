@@ -173,6 +173,94 @@ class RawEmptyNightTests(unittest.TestCase):
                 pilot.import_prior_reservations(target,base/"history")
             self.assertFalse(target.exists())
 
+    def test_master_promote_complete_campaign_to_canonical_cache_and_final(self):
+        import pipeline_produtos as master
+        import pandas as pd
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            controlled=root/"controlled_night"
+            run=controlled/"run1"
+            campaign=controlled/"campaigns"/"c1"
+            run.mkdir(parents=True);campaign.mkdir(parents=True)
+            official_cache=root/"official_cache.sqlite"
+            pilot_cache=run/"cache.sqlite"
+            official_db=root/"official_classification.sqlite"
+            for database in (official_cache,pilot_cache,official_db):
+                with sqlite3.connect(database) as cx:
+                    cx.execute("CREATE TABLE IF NOT EXISTS tavily_cache "
+                               "(cache_key TEXT PRIMARY KEY,brand TEXT,model TEXT,"
+                               "response_json TEXT,created_at TEXT)")
+            with sqlite3.connect(pilot_cache) as cx:
+                cx.execute("INSERT INTO tavily_cache VALUES (?,?,?,?,?)",(
+                    "v3|cnh|123456","CNH","123456",
+                    json.dumps({"results":[{"title":"CNH Product", "url":"https://example.com/p",
+                                           "content":"CNH product"}],
+                                "_collection":{"state":"READY_FOR_CLASSIFICATION"}}),
+                    "2026-11-11T10:00:00"))
+            original=pd.DataFrame([{"Marca":"CNH","Modelo":"123456",
+                                    "Category General":"","FAMILY":"",
+                                    "Revisão B.I":""}])
+            locked=pd.DataFrame([{"Marca":"CNH","Modelo":"LOCKED",
+                                   "O que é (Tipo)":"TRACTOR",
+                                   "Category General":"TRACTORS","FAMILY":"TRACTORS",
+                                   "Status":"Manual","Revisão B.I":"OK"}])
+            official=pd.concat([original,locked],ignore_index=True)
+            final=root/"Final.xlsx";consolidated=root/"Master.xlsx"
+            inp=root/"Input.xlsx";result_file=run/"classification_output.xlsx"
+            official.to_excel(final,index=False)
+            official.to_excel(consolidated,index=False)
+            original[["Marca","Modelo"]].to_excel(inp,index=False)
+            pd.DataFrame([{
+                "Marca":"CNH","Modelo":"123456",
+                "O que é (Tipo)":"ENGINE",
+                "Alimentação":"PETROL","Category General":"OTHERS","FAMILY":"ENGINE",
+                "Título Real":"CNH Product","Fonte URL":"https://example.com/p",
+                "Resolution State":"CLASSIFIED_CLEF",
+                "Classification Outcome":"CLEF_CLASSIFIED",
+                "Review Required":"SIM", "Auto Eligible":"NÃO",
+                "Classification Identity":"WEAK",
+            }]).to_excel(result_file,sheet_name="Resultados",index=False)
+            (run/"raw_empty_cohort.xlsx").write_bytes(inp.read_bytes())
+            config={"files":{"input":str(run/"raw_empty_cohort.xlsx"),
+                              "cache":str(pilot_cache),"output":str(result_file)}}
+            (run/"isolated_config.json").write_text(json.dumps(config),encoding="utf-8")
+            (run/"run_report.json").write_text(json.dumps({
+                "cohort_keys":["cnh|123456"],"cohort_count":1,
+                "stages":{"collection":{"status":"PASS"},
+                          "classification":{"status":"PASS"}}}),encoding="utf-8")
+            (run/"quality_audit.json").write_text(json.dumps({
+                "status":"PASS","protected_changes_total":0,
+                "original_source_modified":[]}),encoding="utf-8")
+            (campaign/"campaign.json").write_text(json.dumps({
+                "status":"COMPLETE","audited_products":1,
+                "active_run":"","pending_run_creation":False,
+                "batches":[{"run_dir":str(run),"cohort_keys":["cnh|123456"],
+                            "cohort_count":1,"raw_ok":1,"status":"AUDIT_PASS"}]
+            }),encoding="utf-8")
+            cfg={"files":{"input":str(inp),"cache":str(official_cache),
+                          "master":str(consolidated),"final":str(final),
+                          "classification_db":str(official_db)}}
+            rules=SimpleNamespace(version="test",hash="abc")
+            with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
+                promoted=master.overnight_promote_campaign(campaign,cfg,rules)
+            self.assertEqual(promoted["status"],"COMMITTED")
+            self.assertEqual(promoted["cohort_count"],1)
+            result=pd.read_excel(final,dtype=object,keep_default_na=False)
+            idx=result.set_index("Modelo")
+            self.assertEqual(idx.loc["123456","FAMILY"],"ENGINE")
+            self.assertEqual(idx.loc["123456","Category General"],"OTHERS")
+            self.assertEqual(idx.loc["LOCKED","Revisão B.I"],"OK")
+            self.assertEqual(idx.loc["LOCKED","FAMILY"],"TRACTORS")
+            store=master.TavilyReadOnlyStore(official_cache)
+            try:
+                self.assertEqual(store.get("CNH","123456").state,"RAW_OK")
+            finally:
+                store.close()
+            with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
+                again=master.overnight_promote_campaign(campaign,cfg,rules)
+            self.assertEqual(again["status"],"COMMITTED")
+
     def test_master_cli_supports_overnight_campaign_and_explicit_total_budget(self):
         import pipeline_produtos as master
         args=master.build_parser().parse_args([
