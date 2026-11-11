@@ -11332,6 +11332,111 @@ def overnight_register_legacy_runs(run_dirs: Sequence[str]) -> Path:
     return root
 
 
+
+def _overnight_scoped_excel_overlay(original_path: Path, generated_path: Path,
+                                    cohort_keys: set) -> Dict[str, int]:
+    """Overlay ONLY cohort rows after legacy baseline exporter has completed.
+
+    Keep every original row, including historical duplicate business keys, in
+    its original position. Never choose an ambiguous variant and never modify
+    an unrelated product. The legacy exporter may normalize or reorder 13K rows;
+    those changes MUST NOT enter the canonical workbook.
+    """
+    import pandas as pd
+    old, old_sheet = _read_business_sheet(original_path)
+    proposed, _ = _read_business_sheet(generated_path)
+    old_b = find_col(old, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    old_m = find_col(old, ["Modelo", "Model", "SKU", "Part Number"])
+    new_b = find_col(proposed, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    new_m = find_col(proposed, ["Modelo", "Model", "SKU", "Part Number"])
+    def pair(row, b, m):
+        return (safe(row.get(b)), safe(row.get(m)))
+    before_keys = [business_key(*pair(row,old_b,old_m))
+                   for _,row in old.iterrows()]
+    # New columns belong to the central schema; all historical values remain
+    # unchanged (not even empty->NaN) outside the exact target cohort.
+    merged = old.copy()
+    for field in proposed.columns:
+        if field not in merged.columns:
+            merged[field] = pd.Series(pd.NA,index=merged.index,dtype="object")
+    indexes = {}
+    for i,row in proposed.iterrows():
+        brand,model = pair(row,new_b,new_m)
+        if not brand or not model: continue
+        key=business_key(brand,model)
+        if key in cohort_keys:
+            indexes.setdefault(key,[]).append(row)
+    updated=inserted=locked=0
+    for key in sorted(cohort_keys):
+        choices=indexes.get(key,[])
+        if not choices:
+            raise RuntimeError(f"PROMOTION_GENERATED_COHORT_MISSING: {key}")
+        # Prefer the exact original Marca/Modelo pair. Where the legacy file
+        # has multiple equivalent spellings, retain them all and update only
+        # the unambiguous exact match.
+        existing=[i for i,k in enumerate(before_keys) if k==key]
+        exact_options=[]
+        for proposed_row in choices:
+            candidate_pair=pair(proposed_row,new_b,new_m)
+            matches=[i for i in existing if pair(old.iloc[i],old_b,old_m)==candidate_pair]
+            if len(matches)==1:
+                exact_options.append((matches[0],proposed_row))
+        # Multiple exact variant matches: use a single best canonical record
+        # only when the proposed candidate maps to a unique unprotected row.
+        if len(exact_options)>1:
+            eligible=[(i,row) for i,row in exact_options if
+                      not _row_bi_locked(old.iloc[i],old) and
+                      not _is_manual_status(old.iloc[i].get(find_col(old,["Status"],required=False)))]
+            if len(eligible)!=1:
+                raise RuntimeError(f"PROMOTION_AMBIGUOUS_COHORT_VARIANTS: {key}")
+            target_idx,selected=eligible[0]
+        elif len(exact_options)==1:
+            target_idx,selected=exact_options[0]
+        elif existing:
+            # Never guess which historical normalized variant should change.
+            raise RuntimeError(f"PROMOTION_NO_EXACT_TARGET_VARIANT: {key}")
+        elif len(choices)==1:
+            target_idx=None
+            selected=choices[0]
+        else:
+            raise RuntimeError(f"PROMOTION_AMBIGUOUS_NEW_COHORT: {key}")
+        if target_idx is not None:
+            if _row_bi_locked(old.iloc[target_idx],old):
+                locked+=1
+                continue
+            status_col=find_col(old,["Status"],required=False)
+            if status_col and _is_manual_status(old.iloc[target_idx].get(status_col)):
+                locked+=1
+                continue
+            for col in proposed.columns:
+                if col in (new_b,new_m) and col not in (old_b,old_m):
+                    continue
+                if col in (old_b,old_m):
+                    continue
+                if col in {"Revisão B.I","Revisao B.I"}:
+                    continue
+                merged.at[target_idx,col]=selected.get(col)
+            updated+=1
+        else:
+            row={col:pd.NA for col in merged.columns}
+            row[old_b],row[old_m]=pair(selected,new_b,new_m)
+            for col in proposed.columns:
+                if col in (new_b,new_m) or col in {"Revisão B.I","Revisao B.I"}:continue
+                row[col]=selected.get(col)
+            merged=pd.concat([merged,pd.DataFrame([row])],ignore_index=True)
+            inserted+=1
+    # Count and compare every original non-cohort row, even duplicate keys.
+    for i,key in enumerate(before_keys):
+        if key in cohort_keys:continue
+        for col in old.columns:
+            if safe(old.iloc[i].get(col))!=safe(merged.iloc[i].get(col)):
+                raise RuntimeError(f"PROMOTION_UNRELATED_ROW_CHANGED: {key} row={i}")
+    # Export with the original worksheet's name. No non-cohort row is omitted.
+    _atomic_write_dataframe(merged,generated_path,old_sheet)
+    return {"updated":updated,"inserted":inserted,"human_locks_skipped":locked,
+            "original_rows_preserved":len(old)}
+
+
 def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: Rules) -> Dict[str, Any]:
     """Commit verified isolated RAW + classifications into canonical cache/Excel.
 
@@ -11427,9 +11532,22 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         raise RuntimeError("PROMOTION_COHORT_COUNT_MISMATCH")
 
     backup_dir = campaign_dir / "promotion_backup"
-    if backup_dir.exists():
-        raise RuntimeError("PROMOTION_BACKUP_ALREADY_EXISTS: manual inspection required")
-    backup_dir.mkdir(parents=False)
+    resume_staging = backup_dir.exists()
+    if resume_staging:
+        manifest_backup = backup_dir / "source_manifest.json"
+        if not manifest_backup.is_file():
+            raise RuntimeError("PROMOTION_INCOMPLETE_BACKUP: manual recovery required")
+        previous = json.loads(manifest_backup.read_text(encoding="utf-8"))
+        for k in ("cache", "master", "final", "classification_db"):
+            meta=previous.get(k,{})
+            src=canonical[k]
+            old=Path(meta.get("backup","")) if meta.get("backup") else None
+            if (meta.get("path")!=str(src) or
+                    not old or not old.is_file() or
+                    not src.is_file() or digest(src)!=meta.get("sha256")):
+                raise RuntimeError("PROMOTION_SOURCE_CHANGED_SINCE_FAILED_STAGE: " + k)
+    else:
+        backup_dir.mkdir(parents=False)
     # Back up canonical artifacts before creating any staging files. Never
     # rewrite the original files until all independent staging gates pass.
     originals = {}
@@ -11439,10 +11557,11 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         backup = backup_dir / (k + src.suffix)
         stage = backup_dir / ("staged_" + k + src.suffix)
         if src.suffix.lower() in (".sqlite", ".db"):
-            snapshot(src, backup)
+            if not resume_staging: snapshot(src, backup)
+            if stage.exists(): stage.unlink()
             snapshot(src, stage)
         else:
-            shutil.copy2(src, backup)
+            if not resume_staging: shutil.copy2(src, backup)
             shutil.copy2(src, stage)
         originals[k] = {"path": str(src), "sha256": digest(src),
                         "backup": str(backup)}
@@ -11534,6 +11653,12 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             final_path=staged["final"], input_path=promotion_input,
             rules=rules, cache_path=staged["cache"], cfg=cfg,
         )
+        # The legacy exporter reorders/deduplicates unrelated lines. Rewrite
+        # staged workbooks as an exact cohort overlay of the canonical originals.
+        stats["master_scoped_overlay"] = _overnight_scoped_excel_overlay(
+            canonical["master"],staged["master"],keys)
+        stats["final_scoped_overlay"] = _overnight_scoped_excel_overlay(
+            canonical["final"],staged["final"],keys)
         final, _ = _read_business_sheet(staged["final"])
         fb = find_col(final, ["Marca", "Fabricante", "Brand", "Manufacturer"])
         fm = find_col(final, ["Modelo", "Model", "SKU", "Part Number"])
@@ -11554,27 +11679,16 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         original_final, _ = _read_business_sheet(canonical["final"])
         ob = find_col(original_final, ["Marca","Fabricante","Brand","Manufacturer"])
         om = find_col(original_final, ["Modelo","Model","SKU","Part Number"])
-        def outside_by_key(frame, brand_col, model_col):
-            rows = {}
-            for _, row in frame.iterrows():
-                brand, model = safe(row.get(brand_col)), safe(row.get(model_col))
-                if not brand or not model: continue
-                key = business_key(brand, model)
-                if key in keys: continue
-                if key in rows:
-                    raise RuntimeError(f"PROMOTION_UNRELATED_DUPLICATE: {key}")
-                rows[key] = row
-            return rows
-        original_outside = outside_by_key(original_final, ob, om)
-        final_outside = outside_by_key(final, fb, fm)
-        if set(original_outside) - set(final_outside):
+        if len(final)<len(original_final):
             raise RuntimeError("PROMOTION_UNRELATED_ROWS_MISSING")
         common_fields = [col for col in original_final.columns if col in final.columns]
-        for key, old_row in original_outside.items():
-            new_row = final_outside[key]
-            if any(safe(old_row.get(col)) != safe(new_row.get(col))
-                   for col in common_fields):
-                raise RuntimeError(f"PROMOTION_UNRELATED_ROW_CHANGED: {key}")
+        for pos,(_,old_row) in enumerate(original_final.iterrows()):
+            key=business_key(safe(old_row.get(ob)),safe(old_row.get(om)))
+            if key in keys:continue
+            new_row=final.iloc[pos]
+            if business_key(safe(new_row.get(fb)),safe(new_row.get(fm))) != key or any(
+                 safe(old_row.get(col))!=safe(new_row.get(col)) for col in common_fields):
+                raise RuntimeError(f"PROMOTION_UNRELATED_ROW_CHANGED: {key} row={pos}")
         before = _load_bi_lock_snapshot(canonical["final"])
         _assert_bi_lock_snapshot(final, before, "PROMOTION STAGED FINAL")
         # The original campaign's full protected human diff checks exact pairs.
