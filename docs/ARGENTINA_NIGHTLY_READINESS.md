@@ -39,6 +39,43 @@ Se houver alterações locais, salvá-las antes do `git switch`; não usar `git 
 9. Identidade: gate marca+modelo exato/core antes do semântico; n-gram char 2–5 somente para ranking *após* elegibilidade; hard negatives com 2446-21XC/2446-20, CTVLI20018/CGTLI20018, GSR/GSB.
 10. Segurança: nunca registrar valores de API keys no log nem comitar `.env`.
 
+## Master overnight - estabilizacao 11/11/2026
+
+A branch `feature/overnight-master-stabilization-20261111` centraliza o motor
+operacional no **`pipeline_produtos.py`**. Os arquivos
+`run_controlled_night_pilot.py` e `nightly_provider_router.py` permanecem
+apenas como importadores de compatibilidade, sem regras operacionais duplicadas.
+
+O modo `--mode overnight` executa **coleta -> classificacao -> auditoria**
+sobre lotes isolados de ate 20 SKUs, encadeando ate o total solicitado
+(`--campaign-total 50/100/250/500/...`). O bloqueio de repeticao usa os
+cohorts anteriores e o historico de reservas SQLite; contas bloqueadas e
+limites de grupos compartilhados tambem persistem entre lotes. Os totais de
+JEV e tokens sao **reservados conservadoramente por sublote**, de modo que
+um reinicio nao gera uma segunda cota para o mesmo sublote.
+
+Exemplo de **amostra de 50 novos SKUs**, apenas apos confirmar chaves,
+cotacoes, orcamento e backups (consome APIs reais):
+
+```powershell
+& C:\p\venv\Scripts\python.exe C:\p\Product_enricher\pipeline_produtos.py --mode overnight --execute-live --allow-prior-serper-quota-error --campaign-total 50 --search-budget 20 --llm-budget 60 --token-budget 120000 --campaign-jev-budget 180 --campaign-token-budget 360000 --timeout-minutes 120
+```
+
+Para auditoria offline sem chamadas HTTP: executar o mesmo master com
+`--mode overnight` **sem** `--execute-live`.
+
+Para retomar apos interrupcao, usar o mesmo comando original adicionando
+`--campaign-resume-dir <CAMPAIGN_DIR>`, preservando todos os orcamentos e
+a autorizacao original. O checkpoint fica em
+`piloto_argentina/controlled_night/campaigns/<ID>/campaign.json`.
+
+**Gates e limites:** nao e uma autorizacao para rodada irrestrita;
+nenhuma promocao automatica ao cache produtivo ou aprovacao de taxonomia
+humana e permitida. Qualquer falha de coleta, classificacao, auditoria,
+reservas, cobertura RAW_OK ou limite JEV/token interrompe o encadeamento.
+Os resultados permanecem segregados por sublote ate revisao e reconciliacao
+auditadas. Nao confundir 50 SKUs processados com 50 taxonomias corretas.
+
 ## Gatilhos para a coleta noturna
 - Comparar a versão local com main; resolver discrepância do menu.
 - Inventariar 1.030 RAW_EMPTY, histórico de tentativas e contratos do cache.
