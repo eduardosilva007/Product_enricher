@@ -6714,7 +6714,7 @@ def finalize_product(
             "FAMILY": fam if (cg, fam) in rules.valid_pairs else "",
             "Título Real": title,
             "Fonte URL": url,
-            "Review Required": "NÃO",
+            "Review Required": "SIM",
             "Auto Eligible": "NÃO",
             "Double Check Priority": "ALTA",
             "Reason Code": f"CLEF_{safe(data.get('decision')) or 'INSUFFICIENT'}",
