@@ -10162,6 +10162,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--campaign-total", type=int, default=0)
     p.add_argument("--campaign-jev-budget", type=int, default=0)
     p.add_argument("--campaign-token-budget", type=int, default=0)
+    p.add_argument("--campaign-resume-dir", default="", help="Existing campaign manifest directory; never starts new unaudited work")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p
@@ -10545,7 +10546,8 @@ def main() -> int:
             LOG.error(e)
         return 2
     if args.mode == "overnight":
-        return overnight_campaign(args, cfg)
+        with exclusive_campaign_lock():
+            return overnight_campaign(args, cfg)
     if args.mode == "validate":
         validate_all(rules, cfg, args.cache)
         return 0
@@ -11154,7 +11156,7 @@ def exclusive_campaign_lock():
             try:yield
             finally:fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
 
-def overnight_run_one(args, cfg):
+def overnight_run_one(args, cfg, on_run_created=None):
     # Master parser provides args; no shadow CLI.
     if not args.execute_live:
         paths=source_paths(cfg)
@@ -11177,6 +11179,8 @@ def overnight_run_one(args, cfg):
             raise ValueError("Resume budgets must match original campaign exactly")
         isolated=json.loads((run/"isolated_config.json").read_text(encoding="utf-8"))
     else:run,state,isolated=create_run(cfg,args)
+    if on_run_created is not None:
+        on_run_created(run)
     altered=protected_originals(state)
     if altered:raise RuntimeError(f"Original source files changed since campaign started: {altered}")
     base=[sys.executable,str(ROOT/"pipeline_produtos.py"),"--config",str(run/"isolated_config.json"),
@@ -11228,6 +11232,162 @@ def overnight_run_one(args, cfg):
         state["mass_approval"]="BLOCKED_PENDING_QUALITY_AUDIT_AND_REAL_RESUME"
         atomic_json(run/"run_report.json",state)
         print(f"Report: {run/'run_report.json'}",flush=True)
+
+
+
+def overnight_campaign(args, cfg):
+    """One master entrypoint: collect -> classify -> audit in <=20 SKU sublots.
+
+    Reserve the *maximum* possible calls/tokens before every batch. This
+    conservative ledger cannot exceed the cumulative user-authorized limits
+    even when JEV usage is missing, a process crashes, or a batch is resumed.
+    """
+    import copy
+    from datetime import datetime, timezone
+
+    if not args.execute_live:
+        if args.campaign_resume_dir or args.resume_dir:
+            raise ValueError("Resuming a live campaign requires --execute-live")
+        paths = source_paths(cfg)
+        report = overnight_audit(paths["input"], paths["cache"], paths["master"], paths["final"])
+        print(json.dumps({"mode": "AUDIT_ONLY_NO_APIS", "candidates": len(report["candidate_rows"]),
+                          "prior_errors": len(report["error_rows"]),
+                          "search_calls": 0}, ensure_ascii=False, indent=2))
+        return 0
+    if args.resume_dir and (args.campaign_total or args.campaign_resume_dir):
+        raise ValueError("Single-sublot --resume-dir cannot be combined with campaign options")
+    if args.resume_dir:
+        return overnight_run_one(args, cfg)
+    if args.campaign_total <= 0:
+        raise ValueError("--campaign-total must be positive in live master overnight mode")
+    if args.campaign_jev_budget <= 0 or args.campaign_token_budget <= 0:
+        raise ValueError("Explicit cumulative JEV call and token budgets required")
+    if not 1 <= args.search_budget <= 20:
+        raise ValueError("Search cap per sublot must be 1..20")
+    gate(cfg, args)
+
+    if args.campaign_resume_dir:
+        root = Path(args.campaign_resume_dir).resolve()
+        if root.parent != (OUT / "campaigns").resolve():
+            raise ValueError("Campaign resume directory must be a direct child of campaigns/")
+        manifest_path = root / "campaign.json"
+        state = json.loads(manifest_path.read_text(encoding="utf-8"))
+        expected = {"target": args.campaign_total,
+                    "search_per_sublot": args.search_budget,
+                    "jev_limit": args.campaign_jev_budget,
+                    "token_limit": args.campaign_token_budget}
+        if state.get("limits") != expected:
+            raise ValueError("Resume budgets/target differ from original campaign")
+        if state.get("serper_rescue") != args.allow_prior_serper_quota_error:
+            raise ValueError("Resume cannot alter previous Serper-error authorization")
+    else:
+        root = OUT / "campaigns" / (
+            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8])
+        root.mkdir(parents=True, exist_ok=False)
+        manifest_path = root / "campaign.json"
+        state = {"status": "READY", "schema": 1, "limits": {
+                     "target": args.campaign_total,
+                     "search_per_sublot": args.search_budget,
+                     "jev_limit": args.campaign_jev_budget,
+                     "token_limit": args.campaign_token_budget},
+                 "serper_rescue": args.allow_prior_serper_quota_error,
+                 "reserved_jev_calls": 0, "reserved_tokens": 0,
+                 "audited_products": 0, "batches": [], "active_run": ""}
+        atomic_json(manifest_path, state)
+
+    while state["audited_products"] < args.campaign_total:
+        remaining = args.campaign_total - state["audited_products"]
+        allotted_search = min(args.search_budget, remaining)
+        if state["active_run"]:
+            sublot = Path(state["active_run"]).resolve()
+            if sublot.parent != OUT.resolve():
+                raise RuntimeError("Invalid active sublot outside controlled_night")
+            report = json.loads((sublot / "run_report.json").read_text(encoding="utf-8"))
+            subargs = copy.copy(args)
+            subargs.resume_dir = str(sublot)
+            subargs.search_budget = report["budget"]["search"]
+            subargs.llm_budget = report["budget"]["jev_calls"]
+            subargs.token_budget = report["budget"]["tokens"]
+        else:
+            remaining_jev = args.campaign_jev_budget - state["reserved_jev_calls"]
+            remaining_tokens = args.campaign_token_budget - state["reserved_tokens"]
+            allotted_jev = min(args.llm_budget, remaining_jev)
+            allotted_tokens = min(args.token_budget, remaining_tokens)
+            if allotted_jev < 1 or allotted_tokens < 1:
+                state["status"] = "BUDGET_EXHAUSTED"
+                atomic_json(manifest_path, state)
+                print("[OVERNIGHT] Cumulative JEV/token budget exhausted. No extra sublot started.")
+                return 2
+            subargs = copy.copy(args)
+            subargs.resume_dir = ""
+            subargs.search_budget = allotted_search
+            subargs.llm_budget = allotted_jev
+            subargs.token_budget = allotted_tokens
+            # Budget reservations are durable BEFORE a new sublot's requests.
+            # On crash/restart we never reallocate these reserved amounts.
+            state["reserved_jev_calls"] += allotted_jev
+            state["reserved_tokens"] += allotted_tokens
+            state["status"] = "RUNNING"
+            atomic_json(manifest_path, state)
+
+        def created(sublot):
+            state["active_run"] = str(sublot)
+            atomic_json(manifest_path, state)
+
+        try:
+            result = overnight_run_one(subargs, cfg, on_run_created=created)
+        except Exception as exc:
+            state["status"] = "BLOCKED"
+            state["reason"] = f"{type(exc).__name__}: {exc}"
+            atomic_json(manifest_path, state)
+            raise
+        if result != 0:
+            state["status"] = "BLOCKED"
+            state["reason"] = "Sublot collection/classification/audit failed; manual review required"
+            atomic_json(manifest_path, state)
+            return result
+        if not state["active_run"]:
+            raise RuntimeError("Missing sublot checkpoint; fail closed")
+        sublot = Path(state["active_run"])
+        report = json.loads((sublot / "run_report.json").read_text(encoding="utf-8"))
+        quality = json.loads((sublot / "quality_audit.json").read_text(encoding="utf-8"))
+        keys = report.get("cohort_keys", [])
+        if (quality.get("status") != "PASS"
+                or quality.get("protected_changes_total") != 0
+                or quality.get("original_source_modified")
+                or len(keys) != report.get("cohort_count")
+                or len(keys) != len(set(keys))):
+            state["status"] = "BLOCKED"
+            state["reason"] = "Inconsistent sublot audit or duplicate keys"
+            atomic_json(manifest_path, state)
+            return 2
+        previous = [k for batch in state["batches"] for k in batch["cohort_keys"]]
+        if set(previous).intersection(keys):
+            state["status"] = "BLOCKED"
+            state["reason"] = "SKU reused in campaign"
+            atomic_json(manifest_path, state)
+            return 2
+        state["batches"].append({
+            "run_dir": str(sublot), "cohort_keys": keys,
+            "cohort_count": len(keys), "raw_ok": quality.get("useful_raw_count", 0),
+            "status": "AUDIT_PASS"})
+        state["audited_products"] += len(keys)
+        state["active_run"] = ""
+        state["status"] = "RUNNING"
+        atomic_json(manifest_path, state)
+        if len(keys) < allotted_search:
+            # Less than asked: there may be no eligible SKUs left. Rather than
+            # silently exceed the requested scope, finish with a partial report.
+            break
+
+    state["status"] = "COMPLETE" if state["audited_products"] == args.campaign_total else "PARTIAL"
+    atomic_json(manifest_path, state)
+    print(json.dumps({"campaign": str(manifest_path), "status": state["status"],
+                      "audited": state["audited_products"], "target": args.campaign_total,
+                      "jev_reserved": state["reserved_jev_calls"],
+                      "tokens_reserved": state["reserved_tokens"],
+                      "production_approved": False}, ensure_ascii=False, indent=2))
+    return 0 if state["status"] == "COMPLETE" else 2
 
 
 if __name__ == "__main__":
