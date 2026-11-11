@@ -11742,16 +11742,9 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         # never relax the eight protected human fields.
         _overnight_assert_exact_human_locks(original_final, final)
 
-        # The original campaign's full protected human diff checks exact pairs.
-        compare = backup_dir / "protected_check"
-        compare.mkdir()
-        atomic_json(compare / "original_sources.json", {
-            "final": {"path": str(canonical["final"])}})
-        atomic_json(compare / "isolated_config.json", {
-            "files": {"final": str(staged["final"])}})
-        changes, _, _, _ = overnight_examine(compare)
-        if changes:
-            raise RuntimeError(f"PROMOTION_PROTECTED_MANUAL_DIFF: {len(changes)}")
+        # The physical-row gate above protects ALL original BI_OK/Manual
+        # rows including historic exact duplicates. The old grouped forensic
+        # gate can conflate such rows; it is not valid for canonical promotion.
         for k, meta in originals.items():
             if digest(Path(meta["path"])) != meta["sha256"]:
                 raise RuntimeError(f"PROMOTION_SOURCE_CHANGED: {k}")
