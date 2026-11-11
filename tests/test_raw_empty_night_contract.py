@@ -226,6 +226,32 @@ class RawEmptyNightTests(unittest.TestCase):
             self.assertEqual(len(calls),2)
             self.assertEqual(calls[1],str(target/"interrupted"))
 
+    def test_master_resume_blocks_ambiguous_pre_checkpoint_budget(self):
+        import pipeline_produtos as master
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/"controlled_night"
+            args=SimpleNamespace(
+                execute_live=True,campaign_total=20,campaign_jev_budget=40,
+                campaign_token_budget=2000,campaign_resume_dir="",resume_dir="",
+                search_budget=20,llm_budget=20,token_budget=1000,
+                timeout_minutes=120,allow_prior_serper_quota_error=True)
+            with patch.object(master,"OUT",root),patch.object(master,"gate"),\
+                 patch.object(master,"overnight_run_one",
+                              side_effect=RuntimeError("crash before checkpoint")) as call:
+                with self.assertRaisesRegex(RuntimeError,"crash before checkpoint"):
+                    master.overnight_campaign(args,{})
+                path=next((root/"campaigns").glob("*/campaign.json"))
+                state=json.loads(path.read_text(encoding="utf-8"))
+                self.assertTrue(state["pending_run_creation"])
+                self.assertEqual(state["reserved_jev_calls"],20)
+                self.assertEqual(state["reserved_tokens"],1000)
+                args.campaign_resume_dir=str(path.parent)
+                with self.assertRaisesRegex(RuntimeError,"UNCERTAIN_SUBLOT_START"):
+                    master.overnight_campaign(args,{})
+                self.assertEqual(call.call_count,1)
+
     def test_master_campaign_blocks_without_total_llm_budget(self):
         import pipeline_produtos as master
         from types import SimpleNamespace
