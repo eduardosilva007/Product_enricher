@@ -76,6 +76,35 @@ reservas, cobertura RAW_OK ou limite JEV/token interrompe o encadeamento.
 Os resultados permanecem segregados por sublote ate revisao e reconciliacao
 auditadas. Nao confundir 50 SKUs processados com 50 taxonomias corretas.
 
+## Recuperação offline do piloto 10 SKU (falha no baseline)
+
+A campanha de 10 SKUs em `20261111T192842Z_f7a001fb` completou o
+worker de classificação, mas este retornou código 1 depois de gravar o
+Excel isolado: `BASELINE_COHORT_MISMATCH` (7 aceitos vs 6 projetados).
+
+Causa identificada: `DCA AMQ02 65` registrou
+`Resolution State=RESOLVED` e `Classification Identity=WEAK`.
+O critério da Base Final permitia esse registro enquanto
+`_record_is_accepted` o rejeitava. Ambos agora rejeitam identidade
+não-STRONG sem autoridade humana (Manual/BI_OK). Os dois demais DCA,
+`AJZ03 16A` e `AQU02 160`, possuem variantes de escrita com barras
+e estados `REVIEW_NO_RESULTS`; são mantidas distintas sem promoção
+artificial de estados.
+
+Para resgatar a mesma campanha **sem chamadas HTTP**, use
+`--mode overnight-reconcile-failed --campaign-resume-dir <campaign_dir>`.
+O comando só aceita o estado concreto de um lote de 10 com coleta PASS,
+classificação FAIL/exit 1, log de mismatch, todos os 10 resultados
+persistidos e auditoria sem mudança humana. Ele confere igualdade por
+conjuntos de chaves aceitas, registra o erro histórico do worker, ajusta
+o manifesto com auditoria e executa automaticamente
+`overnight_promote_campaign(..., dry_run=True)`. Exigir
+`RECOVERED_OFFLINE_DRY_RUN_PASS` e `DRY_RUN_PASS` antes de executar
+`--mode overnight-promote` na mesma campanha.
+
+Este procedimento recupera uma falha **pós-LLM**; não habilita
+repetição automática de chamadas JEV interrompidas.
+
 ## Teste de interrupção e retomada controlada (5+5)
 
 Para fechar a amostra de 100 SKUs, a campanha de 10 deve comprovar
