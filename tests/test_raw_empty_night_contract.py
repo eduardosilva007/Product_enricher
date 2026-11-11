@@ -308,7 +308,9 @@ class RawEmptyNightTests(unittest.TestCase):
                 return 0
             with patch.object(master,"OUT",target),patch.object(master,"gate"),\
                  patch.object(master,"overnight_run_one",side_effect=fake_one):
-                rc=master.overnight_campaign(args,{})
+                with patch.object(master,"overnight_promote_campaign",return_value={"status":"COMMITTED"}) as promote:
+                    rc=master.overnight_campaign(args,{},rules=SimpleNamespace(version="x",hash="h"))
+                    promote.assert_called_once()
             self.assertEqual(rc,0)
             self.assertEqual(seen,[(20,20,1000),(20,20,1000),(10,20,1000)])
             manifests=list((target/"campaigns").glob("*/campaign.json"))
