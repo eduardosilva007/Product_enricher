@@ -10130,7 +10130,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-promote"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-promote", "overnight-reconcile-failed"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -10556,6 +10556,14 @@ def main() -> int:
         for e in errors[:50]:
             LOG.error(e)
         return 2
+    if args.mode == "overnight-reconcile-failed":
+        if not args.campaign_resume_dir or args.legacy_run_dir:
+            raise ValueError("offline recovery requires --campaign-resume-dir only")
+        with exclusive_campaign_lock():
+            result=overnight_reconcile_failed_campaign(
+                Path(args.campaign_resume_dir),cfg,rules)
+            print(json.dumps(result,ensure_ascii=False,indent=2,default=str))
+            return 0
     if args.mode == "overnight-promote":
         if bool(args.campaign_resume_dir) == bool(args.legacy_run_dir):
             raise ValueError("Provide exactly one: --campaign-resume-dir OR two --legacy-run-dir")
@@ -11274,6 +11282,125 @@ def overnight_run_one(args, cfg, on_run_created=None):
 
 
 
+
+
+
+def overnight_reconcile_failed_campaign(campaign_dir: Path, cfg: Dict[str, Any],
+                                        rules: Rules) -> Dict[str, Any]:
+    """Offline salvage of a fully classified cohort blocked by baseline count.
+
+    No Search, JEV, reranker or classification worker is executed. The former
+    classification subprocess exit code is retained for the forensic audit.
+    Success means output is intact and the isolated final now satisfies the
+    corrected, strict acceptance contract -- NOT that JEV was rerun.
+    """
+    import pandas as pd
+
+    campaign_dir=Path(campaign_dir).resolve()
+    if campaign_dir.parent!=(OUT/"campaigns").resolve():
+        raise RuntimeError("RECOVERY_INVALID_CAMPAIGN_PATH")
+    manifest=campaign_dir/"campaign.json"
+    state=json.loads(manifest.read_text(encoding="utf-8"))
+    if (state.get("status")!="BLOCKED" or state.get("batches") or
+            state.get("audited_products")!=0 or
+            state.get("pending_run_creation") or not state.get("active_run")):
+        raise RuntimeError("RECOVERY_BLOCKED_UNEXPECTED_CAMPAIGN_STATE")
+    run=Path(state["active_run"]).resolve()
+    if run.parent!=OUT.resolve() or not run.is_dir():
+        raise RuntimeError("RECOVERY_INVALID_RUN_PATH")
+    report_path=run/"run_report.json"
+    report=json.loads(report_path.read_text(encoding="utf-8"))
+    collection=report.get("stages",{}).get("collection",{})
+    classification=report.get("stages",{}).get("classification",{})
+    if (collection.get("status")!="PASS" or
+            classification.get("status")!="FAIL" or
+            classification.get("attempts")!=1 or
+            classification.get("exit_code")!=1):
+        raise RuntimeError("RECOVERY_NOT_SINGLE_BASELINE_FAILURE")
+    keys=report.get("cohort_keys",[])
+    if (len(keys)!=state.get("limits",{}).get("target") or
+            len(keys)!=report.get("cohort_count") or
+            len(set(keys))!=len(keys) or len(keys)!=10):
+        raise RuntimeError("RECOVERY_COHORT_INTEGRITY_FAILED")
+    log=run/safe(classification.get("log"))
+    if not log.is_file():
+        raise RuntimeError("RECOVERY_CLASSIFICATION_LOG_MISSING")
+    logtext=log.read_text(encoding="utf-8",errors="replace")
+    required_log=("PROGRESSO 10/10", "BASELINE EXCEL ATUALIZADA",
+                  "BASELINE_COHORT_MISMATCH", "classification")
+    if not all(token in logtext for token in required_log):
+        raise RuntimeError("RECOVERY_NOT_BASELINE_ONLY_FAILURE")
+    if protected_originals(report):
+        raise RuntimeError("RECOVERY_ORIGINAL_SOURCE_MODIFIED")
+
+    isolated=json.loads((run/"isolated_config.json").read_text(encoding="utf-8"))
+    files=isolated["files"]
+    output=Path(files["output"])
+    final=Path(files["final"])
+    if not output.is_file() or not final.is_file():
+        raise RuntimeError("RECOVERY_RESULTS_OR_FINAL_MISSING")
+    frame=pd.read_excel(output,sheet_name="Resultados",dtype=object,keep_default_na=False)
+    if not {"Marca","Modelo"}.issubset(frame.columns):
+        raise RuntimeError("RECOVERY_RESULTS_SCHEMA_INVALID")
+    result_keys=[business_key(safe(r["Marca"]),safe(r["Modelo"]))
+                 for _,r in frame.iterrows()]
+    if len(result_keys)!=len(keys) or set(result_keys)!=set(keys):
+        raise RuntimeError("RECOVERY_CLASSIFICATION_OUTPUT_INCOMPLETE")
+    cohort=pd.read_excel(files["input"],dtype=object,keep_default_na=False)
+    input_keys=[business_key(safe(r["Marca"]),safe(r["Modelo"]))
+                for _,r in cohort.iterrows()]
+    if len(input_keys)!=len(keys) or set(input_keys)!=set(keys):
+        raise RuntimeError("RECOVERY_INPUT_MISMATCH")
+
+    prior_final=Path(json.loads((run/"original_sources.json").read_text(
+        encoding="utf-8"))["final"]["path"])
+    final_start=_accepted_keys_from_baseline_file(prior_final)[0]
+    expected=_expected_cohort_accepted_after_run(
+        set(keys),final_start,frame.to_dict(orient="records"))
+    accepted=_accepted_keys_from_baseline_file(final)[0] & set(keys)
+    if expected!=accepted:
+        raise RuntimeError(
+            "RECOVERY_COHORT_ACCEPTANCE_MISMATCH: "
+            f"expected={sorted(expected)} actual={sorted(accepted)}")
+    if not outcome_audit(run,report,isolated):
+        raise RuntimeError("RECOVERY_ISOLATED_QUALITY_AUDIT_FAILED")
+    quality=json.loads((run/"quality_audit.json").read_text(encoding="utf-8"))
+    if (quality.get("status")!="PASS" or
+            quality.get("protected_changes_total")!=0 or
+            quality.get("useful_raw_count")!=len(keys) or
+            quality.get("original_source_modified")):
+        raise RuntimeError("RECOVERY_QUALITY_GATE_FAILED")
+
+    # Snapshot of the worker's true exit status is never erased.
+    report["stages"]["classification"]["recovery"]={
+        "mode":"OFFLINE_BASELINE_COHORT_RECONCILIATION",
+        "original_status":"FAIL",
+        "original_exit_code":1,
+        "accepted_expected":len(expected),
+        "accepted_actual":len(accepted),
+        "classification_rows_verified":len(result_keys),
+        "http_calls":0,
+    }
+    report["stages"]["classification"]["status"]="PASS"
+    report["all_stages_pass"]=True
+    atomic_json(report_path,report)
+    state["batches"]=[{"run_dir":str(run),"cohort_keys":keys,
+                      "cohort_count":len(keys),
+                      "raw_ok":quality["useful_raw_count"],
+                      "status":"AUDIT_PASS"}]
+    state["audited_products"]=len(keys)
+    state["active_run"]=""
+    state["status"]="COMPLETE"
+    state.pop("reason",None)
+    atomic_json(manifest,state)
+    # A real-data pre-commit is mandatory before authorizing canonical swap.
+    result=overnight_promote_campaign(campaign_dir,cfg,rules,dry_run=True)
+    return {"status":"RECOVERED_OFFLINE_DRY_RUN_PASS",
+            "campaign":str(campaign_dir),"audited_products":len(keys),
+            "classification_rows":len(result_keys),
+            "accepted_strict":len(accepted),
+            "original_worker_exit_code":1,
+            "http_calls":0,"promotion_preflight":result}
 
 
 def overnight_register_legacy_runs(run_dirs: Sequence[str]) -> Path:
