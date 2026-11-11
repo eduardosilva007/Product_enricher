@@ -11394,6 +11394,9 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         official_checkpoints = ClassificationDB(staged["classification_db"])
         official_checkpoints.close()
         with closing(sqlite3.connect(staged["classification_db"])) as target_db:
+            target_db.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
+                business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
+                provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
             for previous_db, cohort_set in isolated_databases:
                 with closing(sqlite3.connect(previous_db.resolve().as_uri()+"?mode=ro",
                                              uri=True)) as source_db:
