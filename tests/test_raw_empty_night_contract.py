@@ -420,6 +420,30 @@ class RawEmptyNightTests(unittest.TestCase):
                     master.overnight_campaign(args,{})
                 self.assertEqual(call.call_count,1)
 
+    def test_promotion_scoped_overlay_preserves_unrelated_duplicate_keys(self):
+        import pipeline_produtos as master
+        import pandas as pd
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            original=root/"canonical.xlsx"
+            generated=root/"staged.xlsx"
+            pd.DataFrame([
+                {"Marca":"ANNOVI REVERBERI","Modelo":"52180","FAMILY":"OLD1","Status":"Script"},
+                {"Marca":"Annovi-Reverberi","Modelo":"52180","FAMILY":"OLD2","Status":"Script"},
+                {"Marca":"CNH","Modelo":"123456","FAMILY":"","Status":"Script"}
+            ]).to_excel(original,index=False)
+            pd.DataFrame([
+                {"Marca":"CNH","Modelo":"123456","FAMILY":"ENGINE","Status":"Script"},
+                {"Marca":"ANNOVI REVERBERI","Modelo":"52180","FAMILY":"WRONG","Status":"Script"}
+            ]).to_excel(generated,index=False)
+            stats=master._overnight_scoped_excel_overlay(
+                original,generated,{"cnh|123456"})
+            actual=pd.read_excel(generated,dtype=object,keep_default_na=False)
+            self.assertEqual(len(actual),3)
+            self.assertEqual(actual["FAMILY"].tolist(),["OLD1","OLD2","ENGINE"])
+            self.assertEqual(stats["updated"],1)
+            self.assertEqual(stats["original_rows_preserved"],3)
+
     def test_legacy_two_twenty_sku_pilots_register_offline_with_verified_manifest(self):
         import pipeline_produtos as master
         with tempfile.TemporaryDirectory() as folder:
