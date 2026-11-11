@@ -220,7 +220,25 @@ class RawEmptyNightTests(unittest.TestCase):
                                    "O que é (Tipo)":"TRACTOR",
                                    "Category General":"TRACTORS","FAMILY":"TRACTORS",
                                    "Status":"Manual","Revisão B.I":"OK"}])
-            official=pd.concat([original,locked],ignore_index=True)
+            historical=pd.DataFrame([
+                {"Marca":"ANNOVI REVERBERI","Modelo":"52180",
+                 "O que é (Tipo)":"PUMP","Category General":"OTHERS",
+                 "FAMILY":"PUMP","Status":"Script",
+                 "Revisão":"AUTO_APROVADO","Revisão B.I":"OK"},
+                {"Marca":"Annovi-Reverberi","Modelo":"52180",
+                 "O que é (Tipo)":"PUMP","Category General":"OTHERS",
+                 "FAMILY":"PUMP","Status":"Manual",
+                 "Revisão":"MANUAL","Revisão B.I":"OK"},
+                {"Marca":"BOSCH","Modelo":"GWS2200180",
+                 "O que é (Tipo)":"ANGLE GRINDER","Category General":"OTHERS",
+                 "FAMILY":"ANGLE GRINDER","Status":"Script",
+                 "Revisão":"AUTO_APROVADO","Revisão B.I":"OK"},
+                {"Marca":"Bosch","Modelo":"GWS 2200 180",
+                 "O que é (Tipo)":"ANGLE GRINDER","Category General":"OTHERS",
+                 "FAMILY":"ANGLE GRINDER","Status":"Manual",
+                 "Revisão":"VALIDADO_MANUAL","Revisão B.I":"OK"}
+            ])
+            official=pd.concat([original,locked,historical],ignore_index=True)
             final=root/"Final.xlsx";consolidated=root/"Master.xlsx"
             inp=root/"Input.xlsx";result_file=run/"classification_output.xlsx"
             official.to_excel(final,index=False)
@@ -288,6 +306,15 @@ class RawEmptyNightTests(unittest.TestCase):
             self.assertEqual(idx.loc["123456","Category General"],"OTHERS")
             self.assertEqual(idx.loc["LOCKED","Revisão B.I"],"OK")
             self.assertEqual(idx.loc["LOCKED","FAMILY"],"TRACTORS")
+            self.assertEqual(result.loc[
+                result["Marca"]=="ANNOVI REVERBERI","Revisão"].iloc[0],
+                "AUTO_APROVADO")
+            self.assertEqual(result.loc[
+                result["Marca"]=="Annovi-Reverberi","Revisão"].iloc[0],
+                "MANUAL")
+            self.assertEqual(result.loc[
+                result["Marca"]=="Bosch","Revisão"].iloc[0],
+                "VALIDADO_MANUAL")
             store=master.TavilyReadOnlyStore(official_cache)
             try:
                 self.assertEqual(store.get("CNH","123456").state,"RAW_OK")
