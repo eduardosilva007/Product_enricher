@@ -359,6 +359,110 @@ class RawEmptyNightTests(unittest.TestCase):
         self.assertEqual(args.campaign_jev_budget,750)
         self.assertEqual(args.campaign_token_budget,1500000)
 
+    def test_weak_resolved_identity_never_enters_accepted_final(self):
+        import pandas as pd
+        import pipeline_produtos as master
+        base=pd.DataFrame([
+            {"Marca":"DCA","Modelo":"AMQ02 65",
+             "Resolution State":"RESOLVED","Classification Identity":"WEAK",
+             "O que é (Tipo)":"DRILL","Category General":"OTHERS",
+             "FAMILY":"COMBO KIT","Revisão":"AUTO_APROVADO",
+             "Status":"Script","Revisão B.I":""},
+            {"Marca":"DCA","Modelo":"AJZ03 16A",
+             "Resolution State":"RESOLVED","Classification Identity":"STRONG",
+             "O que é (Tipo)":"DRILL","Category General":"OTHERS",
+             "FAMILY":"POWER TOOLS","Revisão":"AUTO_APROVADO",
+             "Status":"Script","Revisão B.I":""},
+        ])
+        self.assertFalse(master._baseline_row_accepted(base.iloc[0],base))
+        self.assertTrue(master._baseline_row_accepted(base.iloc[1],base))
+        self.assertFalse(master._record_is_accepted(base.iloc[0].to_dict()))
+        self.assertTrue(master._record_is_accepted(base.iloc[1].to_dict()))
+        base.loc[0,"Revisão B.I"]="OK"
+        self.assertTrue(master._baseline_row_accepted(base.iloc[0],base))
+        base.loc[0,"Revisão B.I"]=""
+        base.loc[0,"Status"]="Manual"
+        self.assertTrue(master._baseline_row_accepted(base.iloc[0],base))
+
+    def test_failed_classification_salvage_reuses_all_10_results_without_http(self):
+        import pandas as pd
+        import pipeline_produtos as master
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/"controlled_night"
+            run=root/"failed"
+            campaign=root/"campaigns"/"c10"
+            run.mkdir(parents=True)
+            campaign.mkdir(parents=True)
+            keys=["dca|sku%d"%i for i in range(10)]
+            input_rows=[{"Marca":"DCA","Modelo":"SKU%d"%i} for i in range(10)]
+            output=[]
+            final_rows=[]
+            for i, pair in enumerate(input_rows):
+                strong=i!=6
+                approved=i<7
+                value={"Marca":pair["Marca"],"Modelo":pair["Modelo"],
+                       "Resolution State":"RESOLVED" if approved else "REVIEW_NO_RESULTS",
+                       "Classification Identity":"STRONG" if strong else "WEAK",
+                       "O que é (Tipo)":"DRILL","Category General":"OTHERS",
+                       "FAMILY":"POWER TOOLS","Review Required":"NÃO"}
+                output.append(value)
+                final_rows.append({**value,"Status":"Script",
+                                   "Revisão":"AUTO_APROVADO"})
+            files={}
+            for name in ("input","output","final"):
+                files[name]=str(run/(name+".xlsx"))
+            pd.DataFrame(input_rows).to_excel(files["input"],index=False)
+            pd.DataFrame(output).to_excel(files["output"],
+                                         sheet_name="Resultados",index=False)
+            pd.DataFrame(final_rows).to_excel(files["final"],index=False)
+            prior=run/"prior.xlsx"
+            pd.DataFrame(input_rows).to_excel(prior,index=False)
+            (run/"original_sources.json").write_text(
+                json.dumps({"final":{"path":str(prior)}}),encoding="utf-8")
+            (run/"isolated_config.json").write_text(
+                json.dumps({"files":files}),encoding="utf-8")
+            (run/"classification_01.log").write_text(
+                "PROGRESSO 10/10 | BASELINE EXCEL ATUALIZADA | "
+                "BASELINE_COHORT_MISMATCH | classification",encoding="utf-8")
+            report={"stages":{
+                 "collection":{"status":"PASS","attempts":1},
+                 "classification":{"status":"FAIL","attempts":1,
+                                   "exit_code":1,"log":"classification_01.log"}},
+                "originals":str(run/"original_sources.json"),
+                "cohort_keys":keys,"cohort_count":10}
+            (run/"run_report.json").write_text(
+                json.dumps(report),encoding="utf-8")
+            manifest={"status":"BLOCKED","batches":[],"audited_products":0,
+                      "active_run":str(run),"pending_run_creation":False,
+                      "limits":{"target":10},"reason":"failed classification"}
+            (campaign/"campaign.json").write_text(
+                json.dumps(manifest),encoding="utf-8")
+            def fake_audit(run,state,isolated):
+                (run/"quality_audit.json").write_text(json.dumps({
+                    "status":"PASS","protected_changes_total":0,
+                    "useful_raw_count":10,"original_source_modified":[]
+                }),encoding="utf-8")
+                return True
+            with patch.object(master,"OUT",root),\
+                 patch.object(master,"protected_originals",return_value=[]),\
+                 patch.object(master,"outcome_audit",side_effect=fake_audit),\
+                 patch.object(master,"overnight_promote_campaign",
+                              return_value={"status":"DRY_RUN_PASS"}) as promote:
+                recovered=master.overnight_reconcile_failed_campaign(
+                    campaign,{},SimpleNamespace(version="x",hash="h"))
+            self.assertEqual(recovered["status"],"RECOVERED_OFFLINE_DRY_RUN_PASS")
+            self.assertEqual(recovered["accepted_strict"],6)
+            self.assertEqual(recovered["classification_rows"],10)
+            promote.assert_called_once()
+            self.assertTrue(promote.call_args.kwargs["dry_run"])
+            state=json.loads((campaign/"campaign.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"],"COMPLETE")
+            self.assertEqual(state["audited_products"],10)
+            self.assertEqual(len(state["batches"]),1)
+            self.assertEqual(json.loads((run/"run_report.json").read_text(
+                encoding="utf-8"))["stages"]["classification"]["recovery"][
+                "original_exit_code"],1)
+
     def test_master_campaign_50_products_batches_and_cumulative_reservations(self):
         import pipeline_produtos as master
         from unittest.mock import patch
