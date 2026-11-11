@@ -10905,8 +10905,8 @@ def gate(cfg,args):
         raise ValueError("Collection safety contract violated")
     if not cfg.get("semantic_funnel",{}).get("offline_mode"):
         raise ValueError("Local semantic offline mode required")
-        load_env_file(ROOT/".env")
-        slots=[slot for slot in configured_slots() if slot.provider!="serper"]
+    load_env_file(ROOT/".env")
+    slots=[slot for slot in configured_slots() if slot.provider!="serper"]
     if not slots:raise ValueError("No Tavily/Bright Data account with explicit positive budget; Serper quota-error retry forbidden")
     jev=cfg.get("jev",{})
     key=jev.get("api_key_env") or "TYPESAFE_API_KEY"
@@ -10972,7 +10972,7 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
 
 
 def create_run(cfg,args):
-        sources=source_paths(cfg)
+    sources=source_paths(cfg)
     for key in ("input","cache","master","final"):
         if not sources[key].is_file():raise FileNotFoundError(f"Missing input: {key}: {sources[key]}")
     result=overnight_audit(sources["input"],sources["cache"],sources["master"],sources["final"])
@@ -11089,13 +11089,12 @@ def run_stage(run,state,label,cmd,timeout):
 def outcome_audit(run,state,isolated):
     """Independent post-run checks. No promotion/approval happens here."""
     import pandas as pd
-        from contextlib import closing
     cohort=pd.read_excel(isolated["files"]["input"],dtype=object,keep_default_na=False)
     final=pd.read_excel(isolated["files"]["final"],dtype=object,keep_default_na=False)
     original=json.loads(Path(state["originals"]).read_text(encoding="utf-8"))
     # Compare exact Brand+Model human locks, not the last record sharing
     # a normalized business_key. Structural aliases can share that key.
-        protected_details, protected_counts, original_rows_count, final_rows_count = overnight_examine(run)
+    protected_details, protected_counts, original_rows_count, final_rows_count = overnight_examine(run)
     cohort_b=find_col(cohort,["Marca","Fabricante","Brand","Manufacturer"])
     cohort_m=find_col(cohort,["Modelo","Model","SKU","Part Number"])
     final_b=find_col(final,["Marca","Fabricante","Brand","Manufacturer"])
