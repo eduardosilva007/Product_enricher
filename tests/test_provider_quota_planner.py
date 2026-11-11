@@ -46,6 +46,12 @@ class QuotaPlannerTests(unittest.TestCase):
         q.record_attempt("sku2")
         self.assertIsNone(q.reserve("sku3"))
 
+    def test_attempt_without_reservation_fails_without_consuming_quota(self):
+        q = QuotaPlanner([ProviderAccount("tavily", "a", 2)])
+        with self.assertRaisesRegex(ValueError, "No active reservation"):
+            q.record_attempt("unreserved")
+        self.assertEqual(q.reserve("unreserved").credential_id, "a")
+
     def test_disable_bad_credential(self):
         q = QuotaPlanner([
             ProviderAccount("tavily", "a", 10),
