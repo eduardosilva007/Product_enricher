@@ -40,6 +40,59 @@ class RawEmptyNightTests(unittest.TestCase):
         self.assertEqual(rep["summary"]["state_RAW_MISSING"],1)
         self.assertEqual(rep["candidate_rows"][0]["model"],"0")
 
+    def test_master_offline_audit_real_entrypoint_function(self):
+        import pipeline_produtos as master
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        rows=[
+            SimpleNamespace(valid=True,key="brand|sku1",brand_original="Brand",model_original="SKU1"),
+            SimpleNamespace(valid=True,key="brand|sku2",brand_original="Brand",model_original="SKU2"),
+        ]
+        class FakeStore:
+            def __init__(self,path): pass
+            def __enter__(self): return self
+            def __exit__(self,*args): return False
+            def close(self): pass
+            def get(self,brand,model):
+                return SimpleNamespace(state="RAW_EMPTY",payload={})
+        with patch.object(master,"read_input_rows",return_value=rows),\
+             patch.object(master,"load_baseline_inventory",return_value={
+                 "hard_lock":set(),"processed":set()}),\
+             patch.object(master,"TavilyReadOnlyStore",FakeStore):
+            result=master.overnight_audit(Path("input"),Path("cache"),
+                                          Path("master"),Path("final"))
+        self.assertEqual(result["recollectable_without_prior_error"],2)
+        self.assertEqual(result["summary"]["state_RAW_EMPTY"],2)
+        self.assertEqual(len(result["candidate_rows"]),2)
+        self.assertEqual(result["search_calls"],0)
+
+    def test_master_forensic_diff_on_real_excel_lock(self):
+        import pipeline_produtos as master
+        import pandas as pd
+        with tempfile.TemporaryDirectory() as folder:
+            base=Path(folder)
+            old=base/"original.xlsx"
+            new=base/"isolated.xlsx"
+            frame=pd.DataFrame([{"Marca":"CNH","Modelo":"123456",
+                                "Status":"Manual","Revisão B.I":"OK",
+                                "Category General":"OTHERS","FAMILY":"PART"}])
+            frame.to_excel(old,index=False)
+            frame.to_excel(new,index=False)
+            (base/"original_sources.json").write_text(json.dumps({
+                "final":{"path":str(old)}}),encoding="utf-8")
+            (base/"isolated_config.json").write_text(json.dumps({
+                "files":{"final":str(new)}}),encoding="utf-8")
+            changes,counts,old_n,new_n=master.overnight_examine(base)
+            self.assertEqual(changes,[])
+            self.assertEqual((old_n,new_n),(1,1))
+            changed=frame.copy()
+            changed.loc[0,"FAMILY"]="FAN"
+            changed.to_excel(new,index=False)
+            changes,counts,_,_=master.overnight_examine(base)
+            self.assertEqual(len(changes),1)
+            self.assertEqual(changes[0]["field"],"FAMILY")
+            self.assertEqual(changes[0]["severity"],"CRITICAL")
+
     def test_cumulative_quota_from_prior_isolated_campaigns(self):
         from nightly_provider_router import DurableRouter,Slot
         with tempfile.TemporaryDirectory() as folder:
