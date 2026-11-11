@@ -10163,6 +10163,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--campaign-jev-budget", type=int, default=0)
     p.add_argument("--campaign-token-budget", type=int, default=0)
     p.add_argument("--campaign-resume-dir", default="", help="Existing campaign manifest directory; never starts new unaudited work")
+    p.add_argument("--campaign-pause-after-sublots", type=int, default=0, help="Safety test: pause a campaign after N audited sublots; resume with the same campaign directory and zero pause")
     p.add_argument("--legacy-run-dir", action="append", default=[], help="Two historical audited run folders for offline-only 40-SKU promotion")
     p.add_argument("--promotion-dry-run", action="store_true", help="Build and verify staging without replacing any canonical data")
     p.add_argument("--yes", action="store_true")
@@ -11831,6 +11832,8 @@ def overnight_campaign(args, cfg, rules=None):
         raise ValueError("Explicit cumulative JEV call and token budgets required")
     if not 1 <= args.search_budget <= 20:
         raise ValueError("Search cap per sublot must be 1..20")
+    if args.campaign_pause_after_sublots < 0:
+        raise ValueError("campaign-pause-after-sublots must not be negative")
     gate(cfg, args)
 
     if args.campaign_resume_dir:
@@ -11866,6 +11869,7 @@ def overnight_campaign(args, cfg, rules=None):
     if state.get("pending_run_creation") and not state.get("active_run"):
         raise RuntimeError("UNCERTAIN_SUBLOT_START: reserved budget but missing sublot checkpoint; manual reconciliation required before resume")
 
+    completed_this_invocation = 0
     while state["audited_products"] < args.campaign_total:
         remaining = args.campaign_total - state["audited_products"]
         allotted_search = min(args.search_budget, remaining)
@@ -11949,6 +11953,31 @@ def overnight_campaign(args, cfg, rules=None):
         state["active_run"] = ""
         state["status"] = "RUNNING"
         atomic_json(manifest_path, state)
+        completed_this_invocation += 1
+        if (args.campaign_pause_after_sublots
+                and completed_this_invocation >= args.campaign_pause_after_sublots
+                and state["audited_products"] < args.campaign_total):
+            # Pausing is a successful checkpoint, but intentionally NOT a
+            # completed or promotable campaign. No further Search/JEV requests.
+            state["status"] = "PAUSED_FOR_RESUME_TEST"
+            state["pause_checkpoint"] = {
+                "audited_products": state["audited_products"],
+                "completed_sublots": len(state["batches"]),
+                "reserved_jev_calls": state["reserved_jev_calls"],
+                "reserved_tokens": state["reserved_tokens"],
+            }
+            atomic_json(manifest_path, state)
+            print(json.dumps({
+                "campaign": str(manifest_path),
+                "status": state["status"],
+                "audited": state["audited_products"],
+                "target": args.campaign_total,
+                "next": "resume_same_campaign",
+                "production_persisted": False,
+                "reserved_jev_calls": state["reserved_jev_calls"],
+                "reserved_tokens": state["reserved_tokens"]
+            }, ensure_ascii=False, indent=2))
+            return 0
         if len(keys) < allotted_search:
             # Less than asked: there may be no eligible SKUs left. Rather than
             # silently exceed the requested scope, finish with a partial report.
