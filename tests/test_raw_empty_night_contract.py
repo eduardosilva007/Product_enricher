@@ -420,6 +420,46 @@ class RawEmptyNightTests(unittest.TestCase):
                     master.overnight_campaign(args,{})
                 self.assertEqual(call.call_count,1)
 
+    def test_legacy_two_twenty_sku_pilots_register_offline_with_verified_manifest(self):
+        import pipeline_produtos as master
+        with tempfile.TemporaryDirectory() as folder:
+            out=Path(folder)/"controlled_night"
+            out.mkdir()
+            runs=[]
+            for n in (1,2):
+                run=out/("legacy"+str(n))
+                run.mkdir()
+                keys=["cnh|%04d"%i for i in range((n-1)*20,n*20)]
+                (run/"run_report.json").write_text(json.dumps({
+                    "cohort_keys":keys,"cohort_count":20,
+                    "stages":{"collection":{"status":"PASS"},
+                              "classification":{"status":"PASS"}}}),encoding="utf-8")
+                (run/"quality_audit.json").write_text(json.dumps({
+                    "status":"PASS","useful_raw_count":20,
+                    "protected_changes_total":0,
+                    "original_source_modified":[]}),encoding="utf-8")
+                files={}
+                for name in ("cache","input","output","classification_db"):
+                    p=run/(name+".txt")
+                    p.write_text("fixture",encoding="utf-8")
+                    files[name]=str(p)
+                (run/"isolated_config.json").write_text(
+                    json.dumps({"files":files}),encoding="utf-8")
+                runs.append(str(run))
+            with patch.object(master,"OUT",out):
+                campaign=master.overnight_register_legacy_runs(runs)
+                report=json.loads((campaign/"campaign.json").read_text(encoding="utf-8"))
+                self.assertEqual(report["audited_products"],40)
+                self.assertEqual(len(report["batches"]),2)
+                self.assertEqual(report["status"],"COMPLETE")
+                self.assertEqual(master.overnight_register_legacy_runs(runs),campaign)
+                bad=out/"legacy2"/"quality_audit.json"
+                quality=json.loads(bad.read_text(encoding="utf-8"))
+                quality["status"]="BLOCKED"
+                bad.write_text(json.dumps(quality),encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError,"LEGACY_RUN_NOT_AUDITABLE"):
+                    master.overnight_register_legacy_runs(runs)
+
     def test_master_campaign_blocks_without_total_llm_budget(self):
         import pipeline_produtos as master
         from types import SimpleNamespace
