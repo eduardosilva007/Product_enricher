@@ -11832,7 +11832,7 @@ def overnight_campaign(args, cfg, rules=None):
         raise ValueError("Explicit cumulative JEV call and token budgets required")
     if not 1 <= args.search_budget <= 20:
         raise ValueError("Search cap per sublot must be 1..20")
-    if args.campaign_pause_after_sublots < 0:
+    if getattr(args, "campaign_pause_after_sublots", 0) < 0:
         raise ValueError("campaign-pause-after-sublots must not be negative")
     gate(cfg, args)
 
@@ -11954,7 +11954,7 @@ def overnight_campaign(args, cfg, rules=None):
         state["status"] = "RUNNING"
         atomic_json(manifest_path, state)
         completed_this_invocation += 1
-        if (args.campaign_pause_after_sublots
+        if (getattr(args, "campaign_pause_after_sublots", 0)
                 and completed_this_invocation >= args.campaign_pause_after_sublots
                 and state["audited_products"] < args.campaign_total):
             # Pausing is a successful checkpoint, but intentionally NOT a
