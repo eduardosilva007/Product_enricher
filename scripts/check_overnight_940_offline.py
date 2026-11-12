@@ -57,8 +57,12 @@ def main() -> int:
                "overnight_approved": False}
     try:
         for label, base in CHECKS:
-            command = base + ([str(run_dir)] if label.startswith("accepted_baseline")
-                              or label == "failed_20_sku_output_replay" else [])
+            if label == "historical_reservation_ledger":
+                command = base + [str(run_dir.parent)]
+            elif label in ("remaining_eligible_skus", "failed_20_sku_output_replay") or label.startswith("accepted_baseline"):
+                command = base + [str(run_dir)]
+            else:
+                command = list(base)
             print(f"\n[940 OFFLINE] START {label}", flush=True)
             result = subprocess.run(command, cwd=ROOT, check=False)
             summary["tests"].append({
