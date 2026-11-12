@@ -25,5 +25,6 @@ jobs:
           python -m py_compile tests/test_baseline_final_authority_regression.py
           python -m py_compile tests/verify_baseline_940_readonly.py
           python -m py_compile tests/verify_baseline_940_isolated_write.py
+          python -m py_compile scripts/replay_failed_940_offline.py
       - name: Run synthetic baseline tests without APIs
         run: python -m unittest discover -s tests -p test_baseline_final_authority_regression.py -v
