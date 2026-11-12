@@ -11193,8 +11193,12 @@ def outcome_audit(run,state,isolated):
         else:
             result_keys = [business_key(safe(row["Marca"]), safe(row["Modelo"]))
                            for _, row in results.iterrows()]
-            if (len(result_keys) != len(cohort) or len(set(result_keys)) != len(result_keys)
-                    or set(result_keys) != cohort_keys):
+            # A prior accepted campaign can have fewer classification rows
+            # than collected SKUs (e.g. 40 of 50). Missing output is not an
+            # automatic approval; reject duplicates/foreign SKUs and audit the
+            # subset actually classified.
+            if (len(set(result_keys)) != len(result_keys)
+                    or not set(result_keys).issubset(cohort_keys)):
                 result_errors.append("RESULT_COHORT_MISMATCH")
             for _, row in results.iterrows():
                 resolved = safe(row.get("Resolution State")) == "RESOLVED"
