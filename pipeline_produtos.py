@@ -7625,6 +7625,20 @@ def _sync_final_into_master(
 
             if src_manual or src_accepted:
                 _copy_business_values(src, final_df, master_df, idx)
+                if src_accepted and not src_manual:
+                    # An approved Final row must not inherit rejection or WEAK
+                    # identity metadata from a stale Consolidado row.
+                    for dest, aliases in (
+                        ("O que é (Tipo)", ("O que é (Tipo)", "Tipo", "Product Type")),
+                        ("Category General", ("Category General",)),
+                        ("FAMILY", ("FAMILY", "Family")),
+                        ("Classification Identity", ("Classification Identity",)),
+                        ("Revisão", ("Revisão", "Revisao")),
+                    ):
+                        src_col = find_col(final_df, aliases, required=False)
+                        if dest not in master_df.columns:
+                            master_df[dest] = pd.NA
+                        master_df.at[idx, dest] = src.get(src_col) if src_col else pd.NA
                 if src_manual:
                     master_df.at[idx, "Status"] = "Manual"
                     stats["final_manual_promoted"] += 1
@@ -8696,10 +8710,22 @@ def persist_baseline_excels(
         }
         dropped = before_accepted - after_accepted
         if dropped:
+            # Do not waive the gate. Save exact affected keys under the
+            # baseline backup directory for deterministic offline diagnosis.
+            audit_root = Path((cfg or {}).get("files", {}).get(
+                "baseline_backup_dir", "Backups_Baseline"))
+            audit_root.mkdir(parents=True, exist_ok=True)
+            report = audit_root / "baseline_preservation_blocked.json"
+            report.write_text(json.dumps({
+                "before_accepted": len(before_accepted),
+                "after_accepted": len(after_accepted),
+                "dropped": len(dropped),
+                "dropped_keys": sorted(dropped),
+            }, indent=2, ensure_ascii=False), encoding="utf-8")
             raise RuntimeError(
                 "BASELINE_ACCEPTED_PRESERVATION_FAILED: "
                 f"{len(dropped)} classificacoes aceitas seriam removidas. "
-                "Nenhum Excel foi regravado."
+                f"Auditoria: {report}. Nenhum Excel foi regravado."
             )
 
     # Verificar acesso a AMBOS os arquivos antes de gravar o primeiro.
@@ -11432,7 +11458,7 @@ def create_run(cfg,args):
         "pending_with_cache":"pending_with_cache.xlsx",
         "pending_without_cache":"pending_without_cache.xlsx",
         "collection_report_cache_rebuild":"curation.xlsx",
-        "baseline_backup_dir":"backups",
+        "baseline_backup_dir":str(ROOT/"Backups_Baseline"/"controlled_night"/run.name),
         "baseline_audit":"audit.csv",
         "evidence_export_jsonl":"evidence.jsonl",
     }.items():files[k]=str(run/v)
