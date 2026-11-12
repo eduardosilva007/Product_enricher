@@ -12377,7 +12377,7 @@ def overnight_campaign(args, cfg, rules=None):
             raise ValueError("Resume budgets/target differ from original campaign")
         if state.get("serper_rescue") != args.allow_prior_serper_quota_error:
             raise ValueError("Resume cannot alter previous Serper-error authorization")
-        if state.get("review_before_promotion", False) != bool(args.campaign_review_before_promotion):
+        if state.get("review_before_promotion", False) != bool(getattr(args, "campaign_review_before_promotion", False)):
             raise ValueError("Resume must preserve review-before-promotion flag")
     else:
         root = OUT / "campaigns" / (
@@ -12390,7 +12390,7 @@ def overnight_campaign(args, cfg, rules=None):
                      "jev_limit": args.campaign_jev_budget,
                      "token_limit": args.campaign_token_budget},
                  "serper_rescue": args.allow_prior_serper_quota_error,
-                 "review_before_promotion": bool(args.campaign_review_before_promotion),
+                 "review_before_promotion": bool(getattr(args, "campaign_review_before_promotion", False)),
                  "reserved_jev_calls": 0, "reserved_tokens": 0,
                  "audited_products": 0, "batches": [], "active_run": "",
                  "pending_run_creation": False}
