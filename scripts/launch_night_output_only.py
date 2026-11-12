@@ -27,6 +27,12 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--execute-live", action="store_true",
                         help="Explicitly authorize paid Search/JEV; omit for no-API preflight")
+    parser.add_argument("--include-raw-missing", action="store_true",
+                        help="Allow fresh RAW_MISSING input SKUs; never a previously attempted SKU")
+    parser.add_argument("--allow-serper-quota-errors", action="store_true",
+                        help="Allow never-retried old Serper 'not enough credits' RAW_EMPTY cases")
+    parser.add_argument("--allow-reviewed-provider-errors", action="store_true",
+                        help="Explicitly authorize another paid Search for old provider-error RAW_EMPTY, excluding previous controlled-night attempts")
     parser.add_argument("--target", type=int, default=20)
     parser.add_argument("--per-sublot", type=int, default=20)
     parser.add_argument("--llm-budget", type=int, default=20)
@@ -102,24 +108,30 @@ def main() -> int:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         if report.get("stages", {}).get("collection", {}).get("attempts", 0):
             prior_attempts.update(report.get("cohort_keys") or [])
-    available = [
-        row for row in audit["candidate_rows"]
-        if row["business_key"] not in prior_attempts
-    ]
+    available, selection = core.select_overnight_eligible(
+        audit, prior_attempts,
+        include_raw_missing=args.include_raw_missing,
+        allow_serper_quota_error=args.allow_serper_quota_errors,
+        allow_previous_errors=args.allow_reviewed_provider_errors,
+    )
     # A temporary, disposable ledger exercises the complete historic
     # reservation/account audit without modifying any real database.
     with tempfile.TemporaryDirectory(prefix="night_preflight_") as temp:
         reservation_audit = core.import_prior_reservations(
             Path(temp) / "audit.sqlite", historical_root
         )
-    print("NO-API ELIGIBILITY | raw_empty_new=%d | prior_attempted=%d | remaining=%d"
-          % (len(audit["candidate_rows"]), len(prior_attempts), len(available)), flush=True)
+    print("NO-API SOURCE STATES |", json.dumps(audit["summary"], ensure_ascii=False), flush=True)
+    print("NO-API SELECTOR |", json.dumps(selection, ensure_ascii=False), flush=True)
     print("NO-API HISTORY |", json.dumps(reservation_audit, ensure_ascii=False), flush=True)
+    print("NO-API ELIGIBILITY | requested=%d available=%d already_attempted=%d"
+          % (args.target,len(available),len(prior_attempts)), flush=True)
     if len(available) < args.target:
         raise RuntimeError(
             "INSUFFICIENT_ELIGIBLE_UNTRIED_SKUS: "
-            f"requested={args.target}, available={len(available)}. "
-            "Use the exact remaining amount; never reissue prior Search."
+            f"requested={args.target}, available={len(available)}, "
+            "see NO-API SOURCE STATES and NO-API SELECTOR above. "
+            "Use exact available count or opt into missing/error groups explicitly; "
+            "prior controlled-night attempts are never reissued."
         )
     if not args.execute_live:
         print("NIGHT_PREFLIGHT_PASS_NO_APIS; zero paid calls. "
@@ -147,6 +159,11 @@ def main() -> int:
     print("SEARCH PER SUBLOT:", args.per_sublot, flush=True)
     print("JEV CAMPAIGN MAX:", args.campaign_jev_budget, flush=True)
     print("TOKEN CAMPAIGN MAX:", args.campaign_token_budget, flush=True)
+    print("AUTHORIZED INPUT GROUPS:", json.dumps({
+        "fresh_RAW_MISSING": args.include_raw_missing,
+        "Serper_quota_error_RAW_EMPTY": args.allow_serper_quota_errors,
+        "reviewed_provider_errors_RAW_EMPTY": args.allow_reviewed_provider_errors,
+    }, ensure_ascii=False),flush=True)
     # parser and internal runtime will validate the same limits again.
     sys.argv = [
         str(SNAPSHOT / "pipeline_produtos.py"),
@@ -164,6 +181,12 @@ def main() -> int:
         "--night-output-only",
         "--yes",
     ]
+    if args.include_raw_missing:
+        sys.argv.append("--night-include-raw-missing")
+    if args.allow_serper_quota_errors:
+        sys.argv.append("--allow-prior-serper-quota-error")
+    if args.allow_reviewed_provider_errors:
+        sys.argv.append("--night-allow-previous-errors")
     return core.main()
 
 
