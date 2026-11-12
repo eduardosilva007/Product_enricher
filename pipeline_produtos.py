@@ -4335,8 +4335,8 @@ class DeterministicEngine:
         # Do not infer mains power in battery/charger contexts or for generators.
         input_pattern = (
             r"\\b(?:rated\\s+power\\s+input|power\\s+input|input)\\s*"
-            r"(?:\\(\\s*w\\s*\\)\\s*[:=]?\\s*[0-9][0-9,. ]{0,8}\\b"
-            r"|[:=]?\\s*[0-9][0-9,. ]{0,8}\\s*w\\b)"
+            r"(?:w\\s+[0-9][0-9 ]{0,8}\\b"
+            r"|[0-9][0-9 ]{0,8}\\s+w\\b)"
         )
         spec_input = re.search(input_pattern, combined)
         battery_context = any(
