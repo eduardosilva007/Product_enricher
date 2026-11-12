@@ -137,6 +137,40 @@ class FinalAuthorityRegression(unittest.TestCase):
             self.assertNotEqual(comet["Próxima Ação"], "REVISAR_SEM_RESULTADOS")
             self.assertEqual(comet["Raw State"], "RAW_OK")
 
+    def test_bi_ok_does_not_spread_across_normalized_sku_aliases(self):
+        from pipeline_produtos import Rules, persist_baseline_excels, _read_business_sheet
+        approved = record("ANNOVI REVERBERI", "52180", bi="OK", review="MANUAL")
+        approved["Status"] = "Manual"
+        variant = record("Annovi-Reverberi", "52180", identity="WEAK", review="REVISAR")
+        variant["Resolution State"] = "REVIEW"
+        variant["Review Required"] = "SIM"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            master, final, inp = (root / name for name in
+                                  ("master.xlsx", "final.xlsx", "input.xlsx"))
+            pd.DataFrame([variant, approved]).to_excel(master, index=False)
+            pd.DataFrame([approved, variant]).to_excel(final, index=False)
+            pd.DataFrame([{"Marca": "NEW", "Modelo": "123"}]).to_excel(inp, index=False)
+            persist_baseline_excels(
+                rows=[], master_path=master, final_path=final, input_path=inp,
+                rules=Rules(Path(__file__).resolve().parents[1] / "regras_negocio.json"),
+                cache_path=None, cfg=None,
+            )
+            after, _ = _read_business_sheet(final)
+            original = after.loc[
+                (after["Marca"] == "ANNOVI REVERBERI") & (after["Modelo"] == "52180")
+            ]
+            alias = after.loc[
+                (after["Marca"] == "Annovi-Reverberi") & (after["Modelo"] == "52180")
+            ]
+            self.assertEqual(len(original), 1)
+            self.assertEqual(len(alias), 1)
+            self.assertEqual(original.iloc[0]["Revisão B.I"], "OK")
+            self.assertEqual(original.iloc[0]["Status"], "Manual")
+            self.assertFalse(any(
+                str(x).strip().upper() == "OK" for x in alias["Revisão B.I"]
+            ), "human BI approval was incorrectly inherited by a compact-key alias")
+
     def test_final_only_accepted_survives(self):
         original = record("OTHER", "OLD")
         approved = record("BRAND", "FINAL-ONLY")
