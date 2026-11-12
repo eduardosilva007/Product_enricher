@@ -10425,6 +10425,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--campaign-total", type=int, default=0)
     p.add_argument("--campaign-review-before-promotion", action="store_true",
                    help="Complete and audit isolated batches, NEVER auto-promote to canonical files; explicit promotion remains separate")
+    p.add_argument("--night-output-only", action="store_true",
+                   help="Isolated 1..20 SKU night only: retain classifier XLSX+SQLite, defer legacy Final/Master export; requires review-before-promotion")
     p.add_argument("--campaign-jev-budget", type=int, default=0)
     p.add_argument("--campaign-token-budget", type=int, default=0)
     p.add_argument("--campaign-resume-dir", default="", help="Existing campaign manifest directory; never starts new unaudited work")
@@ -11692,7 +11694,7 @@ def create_run(cfg,args):
     # During isolated overnight, durable classification output + SQLite are
     # authoritative until human-audited, cohort-scoped canonical promotion.
     # Never run the legacy full-baseline export during the paid worker.
-    isolated["_nightly_output_only"] = True
+    isolated["_nightly_output_only"] = bool(getattr(args, "night_output_only", False))
     files=isolated["files"]
     for k,p in sources.items():
         target=run/("source_"+k+p.suffix)
@@ -12652,6 +12654,8 @@ def overnight_campaign(args, cfg, rules=None):
         raise ValueError("Search cap per sublot must be 1..20")
     if getattr(args, "campaign_pause_after_sublots", 0) < 0:
         raise ValueError("campaign-pause-after-sublots must not be negative")
+    if getattr(args, "night_output_only", False) and not getattr(args, "campaign_review_before_promotion", False):
+        raise ValueError("NIGHT_OUTPUT_ONLY_REQUIRES_REVIEW_BEFORE_PROMOTION")
     gate(cfg, args)
 
     if args.campaign_resume_dir:
@@ -12670,6 +12674,8 @@ def overnight_campaign(args, cfg, rules=None):
             raise ValueError("Resume cannot alter previous Serper-error authorization")
         if state.get("review_before_promotion", False) != bool(getattr(args, "campaign_review_before_promotion", False)):
             raise ValueError("Resume must preserve review-before-promotion flag")
+        if state.get("night_output_only", False) != bool(getattr(args, "night_output_only", False)):
+            raise ValueError("Resume must preserve night-output-only mode")
     else:
         root = OUT / "campaigns" / (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8])
@@ -12682,6 +12688,7 @@ def overnight_campaign(args, cfg, rules=None):
                      "token_limit": args.campaign_token_budget},
                  "serper_rescue": args.allow_prior_serper_quota_error,
                  "review_before_promotion": bool(getattr(args, "campaign_review_before_promotion", False)),
+                 "night_output_only": bool(getattr(args, "night_output_only", False)),
                  "reserved_jev_calls": 0, "reserved_tokens": 0,
                  "audited_products": 0, "batches": [], "active_run": "",
                  "pending_run_creation": False}
