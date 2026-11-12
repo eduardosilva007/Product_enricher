@@ -12544,9 +12544,19 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             meta=previous.get(k,{})
             src=canonical[k]
             old=Path(meta.get("backup","")) if meta.get("backup") else None
-            if (meta.get("path")!=str(src) or
+            # On Windows tempfile may return an 8.3 (RUNNER~1) spelling
+            # while Path.resolve() expands it to runneradmin. Validate that
+            # both spellings identify the SAME physical source file, then
+            # independently require its original SHA-256 to match. Never
+            # relax the byte-level source-change protection.
+            recorded_src = Path(meta.get("path", "")) if meta.get("path") else None
+            same_source = bool(
+                recorded_src and recorded_src.is_file() and src.is_file()
+                and os.path.samefile(recorded_src, src)
+            )
+            if (not same_source or
                     not old or not old.is_file() or
-                    not src.is_file() or digest(src)!=meta.get("sha256")):
+                    digest(src)!=meta.get("sha256")):
                 raise RuntimeError("PROMOTION_SOURCE_CHANGED_SINCE_FAILED_STAGE: " + k)
     else:
         backup_dir.mkdir(parents=False)
