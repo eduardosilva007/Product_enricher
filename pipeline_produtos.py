@@ -4455,6 +4455,52 @@ class DeterministicEngine:
                 all_power_hits[power].append(src.source_id)
 
         type_candidates = self._apply_specificity(all_type_hits.keys())
+        # Source pages may mention unrelated products in BODY (related items,
+        # advertisements, reviews). Two independent STRONG titles agreeing on
+        # one TYPE outweigh BODY-only competing candidates. Never use this
+        # shortcut when distinct types each have STRONG TITLE support.
+        title_support = {
+            typ: {
+                src.source_id for src in sources
+                if src.relevance == "STRONG"
+                and typ in src.type_scores
+                and "TITLE" in (src.type_evidence_fields.get(typ, []) or [])
+            }
+            for typ in type_candidates
+        }
+        strong_title_types = [t for t in type_candidates if len(title_support[t]) >= 2]
+        if len(strong_title_types) == 1:
+            winner = strong_title_types[0]
+            other_titles = [
+                t for t in type_candidates if t != winner and title_support[t]
+            ]
+            if not other_titles:
+                type_candidates = [winner]
+
+        # Wood/laminate edge trimmers are ROUTER TOOLS, not grass trimmers.
+        # Guard against broad "trimmer" lexical matches by requiring two
+        # STRONG SKU-anchored wood-router titles, without lawn/grass context.
+        if {"TRIMMER", "ROUTER TOOL"}.issubset(type_candidates):
+            wood_router_titles = [
+                src for src in sources
+                if src.relevance == "STRONG"
+                and "ROUTER TOOL" in src.type_hits
+                and "TITLE" in (src.type_evidence_fields.get("ROUTER TOOL", []) or [])
+                and any(contains_alias_prepared(norm_text(src.title), alias)
+                        for alias in ("wood trimmer", "trimmer router", "laminate trimmer"))
+                and not any(contains_alias_prepared(norm_text(src.title), alias)
+                            for alias in ("grass trimmer", "string trimmer", "hedge trimmer"))
+            ]
+            if len(wood_router_titles) >= 2 and not any(
+                src.relevance == "STRONG"
+                and "TRIMMER" in src.type_hits
+                and "TITLE" in (src.type_evidence_fields.get("TRIMMER", []) or [])
+                and any(contains_alias_prepared(norm_text(src.title), x)
+                        for x in ("grass trimmer", "string trimmer", "line trimmer"))
+                for src in sources
+            ):
+                type_candidates.remove("TRIMMER")
+
         power_candidates = sorted(all_power_hits.keys())
         # Após especificidade, métricas só consideram candidatos sobreviventes.
         type_support = {t: len(set(all_type_hits.get(t, []))) for t in type_candidates}
