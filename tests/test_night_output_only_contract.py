@@ -21,6 +21,18 @@ import pipeline_produtos as core
 
 
 class NightOutputOnlyModeTests(unittest.TestCase):
+    def test_archived_release_bundle_uses_reviewed_taxonomy(self):
+        root=Path(__file__).resolve().parents[1]
+        cfg=json.loads((root/"pipeline_config.json").read_text(encoding="utf-8"))
+        rules=json.loads((root/"regras_negocio.json").read_text(encoding="utf-8"))
+        policy=json.loads((root/"collection_quality_policy.json").read_text(encoding="utf-8"))
+        self.assertEqual(cfg["release_contract"]["rules_version"],rules["VERSION"])
+        self.assertEqual(cfg["release_contract"]["collection_policy_version"],policy["VERSION"])
+        self.assertEqual(
+            cfg["release_contract"]["rules_version"],
+            "2026-11-09-v3.0.21-final-reviewed-taxonomy",
+        )
+
     def test_cli_flag_defaults_off_and_explicit_is_on(self):
         args = core.build_parser().parse_args(["--mode", "overnight"])
         self.assertFalse(args.night_output_only)
