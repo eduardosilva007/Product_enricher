@@ -22,6 +22,8 @@ CHECKS = (
       "-p", "test_*.py", "-v"]),
     ("historical_reservation_ledger",
      [sys.executable, "scripts/audit_overnight_history_offline.py"]),
+    ("remaining_eligible_skus",
+     [sys.executable, "scripts/audit_overnight_940_eligible.py"]),
     ("accepted_baseline_readonly",
      [sys.executable, "tests/verify_baseline_940_readonly.py"]),
     ("accepted_baseline_isolated_write",
