@@ -26,5 +26,20 @@ jobs:
           python -m py_compile tests/verify_baseline_940_readonly.py
           python -m py_compile tests/verify_baseline_940_isolated_write.py
           python -m py_compile scripts/replay_failed_940_offline.py
+          python -m py_compile scripts/apply_baseline_940_local.py
       - name: Run synthetic baseline tests without APIs
         run: python -m unittest discover -s tests -p test_baseline_final_authority_regression.py -v
+      - name: Verify local patch plan and idempotence
+        run: |
+          python - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location("installer", "scripts/apply_baseline_940_local.py")
+          installer = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(installer)
+          source = Path("pipeline_produtos.py").read_text(encoding="utf-8")
+          planned, states = installer.patch_text(source)
+          assert planned == source, states
+          assert all(x == "ALREADY_PRESENT" for _, x in states), states
+          print("PATCH PLAN PASS", states)
+          PY
