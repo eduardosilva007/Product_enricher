@@ -10,6 +10,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -73,6 +74,37 @@ def main() -> int:
             raise RuntimeError(f"CANONICAL_FILE_NOT_FOUND: {name}: {resolved}")
         files[name] = str(resolved)
     cfg["files"] = files
+
+    # The archive can contain an older taxonomy than the real repo. Use
+    # the REVIEWED local rules, never relabel the old JSON as a new version.
+    # A mismatch stops the campaign BEFORE any paid HTTP request.
+    rules_path = (original / "regras_negocio.json").resolve()
+    if not rules_path.is_file():
+        raise RuntimeError(f"REVIEWED_TAXONOMY_NOT_FOUND: {rules_path}")
+    reviewed_rules = core.read_json(rules_path)
+    expected_rules = str((cfg.get("release_contract") or {}).get("rules_version") or "")
+    actual_rules = str(reviewed_rules.get("VERSION") or "")
+    if not expected_rules or actual_rules != expected_rules:
+        raise RuntimeError(
+            "RELEASE_RULES_MISMATCH_BEFORE_SEARCH: "
+            f"expected={expected_rules}, local={actual_rules}, file={rules_path}"
+        )
+    rules_hash = hashlib.sha256(rules_path.read_bytes()).hexdigest()
+    cfg["_nightly_rules_path"] = str(rules_path)
+    cfg["_nightly_rules_sha256"] = rules_hash
+    # Validate ALL release components using the same policy the child loads.
+    policy_path = (SNAPSHOT / str(files.get("collection_policy", "collection_quality_policy.json"))).resolve()
+    if not policy_path.is_file():
+        raise RuntimeError(f"NIGHT_POLICY_NOT_FOUND: {policy_path}")
+    policy = core.read_json(policy_path)
+    release_failures = core.validate_release_contract(
+        cfg, core.Rules(rules_path), policy
+    )
+    if release_failures:
+        raise RuntimeError(
+            "RELEASE_CONTRACT_PRECHECK_FAILED: " + "; ".join(release_failures)
+        )
+    print(f"RELEASE CONTRACT OK | Rules={actual_rules} | sha256={rules_hash[:12]}",flush=True)
 
     env_path = (
         args.env_file.resolve() if args.env_file else original / ".env"
@@ -173,7 +205,7 @@ def main() -> int:
         str(SNAPSHOT / "pipeline_produtos.py"),
         "--mode", "overnight", "--execute-live",
         "--config", str(working_config),
-        "--rules", str(SNAPSHOT / "regras_negocio.json"),
+        "--rules", str(rules_path),
         "--campaign-total", str(args.target),
         "--search-budget", str(args.per_sublot),
         "--llm-budget", str(args.llm_budget),
