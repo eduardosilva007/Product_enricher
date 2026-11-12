@@ -11481,9 +11481,11 @@ def select_overnight_eligible(audit, prior_attempts, *,
     counts=Counter()
     chosen=[]
     selected=set()
+    # Preserve original RAW_EMPTY campaign scope before considering brand
+    # new RAW_MISSING input products. Explicit previous errors come next,
+    # missing input is a last resort and needs a separate opt-in.
     candidates=[
         ("raw_empty_clean", audit.get("candidate_rows", []), True),
-        ("raw_missing_new", audit.get("missing_rows", []), bool(include_raw_missing)),
     ]
     for label, items, authorized in candidates:
         for item in items:
@@ -11512,6 +11514,16 @@ def select_overnight_eligible(audit, prior_attempts, *,
             chosen.append(item)
             selected.add(key)
             counts["prior_provider_error_selected"]+=1
+    for item in audit.get("missing_rows", []):
+        key=item["business_key"]
+        if key in prior:
+            counts["raw_missing_new_previous_campaign"]+=1
+        elif not include_raw_missing:
+            counts["raw_missing_new_requires_opt_in"]+=1
+        elif key not in selected:
+            chosen.append(item)
+            selected.add(key)
+            counts["raw_missing_new_selected"]+=1
     counts["eligible_unique"] = len(chosen)
     counts["historical_attempts_excluded_unique"] = len(prior)
     return chosen,dict(sorted(counts.items()))
