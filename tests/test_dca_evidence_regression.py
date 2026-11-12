@@ -53,15 +53,15 @@ class DcaEvidenceRegression(unittest.TestCase):
         self.assertEqual(_combo_kit_components(self.rules,s1),[])
 
     def test_explicit_combo_title_remains_eligible(self):
-        src = self.source("DCA drill and angle grinder combo kit",
-                          "Contains drill and angle grinder",
-                          {"DRILL":["drill"],"ANGLE GRINDER":["angle grinder"]})
-        src.type_scores = {"DRILL":4.0,"ANGLE GRINDER":4.0}
-        src.type_evidence_fields = {"DRILL":["TITLE"],"ANGLE GRINDER":["TITLE"]}
+        src = self.source("DCA heat gun and angle grinder combo kit",
+                          "Contains heat gun and angle grinder",
+                          {"HEAT GUN":["heat gun"],"ANGLE GRINDER":["angle grinder"]})
+        src.type_scores = {"HEAT GUN":4.0,"ANGLE GRINDER":4.0}
+        src.type_evidence_fields = {"HEAT GUN":["TITLE"],"ANGLE GRINDER":["TITLE"]}
         s1=Stage1Result(state="AMBIGUOUS", product_type=None, power=None,
-                        type_candidates=["DRILL","ANGLE GRINDER"],power_candidates=[],
+                        type_candidates=["HEAT GUN","ANGLE GRINDER"],power_candidates=[],
                         sources=[src],reasons=[])
-        self.assertEqual(set(_combo_kit_components(self.rules,s1)),{"DRILL","ANGLE GRINDER"})
+        self.assertEqual(set(_combo_kit_components(self.rules,s1)),{"HEAT GUN","ANGLE GRINDER"})
 
 if __name__ == "__main__":
     unittest.main()
