@@ -84,10 +84,13 @@ def main() -> int:
 
     working_config = SNAPSHOT / "night_output_only_local_config.json"
     if working_config.exists():
-        raise RuntimeError("EXISTING_SNAPSHOT_CONFIG_NOT_OVERWRITTEN")
-    working_config.write_text(
-        json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+        prior_cfg = json.loads(working_config.read_text(encoding="utf-8"))
+        if prior_cfg != cfg:
+            raise RuntimeError("SNAPSHOT_CONFIG_CHANGED: use a fresh archived copy")
+    else:
+        working_config.write_text(
+            json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
     print("MODE: ISOLATED OUTPUT-ONLY / NO CANONICAL PROMOTION", flush=True)
     print("SOURCE REPO:", original, flush=True)
     print("HISTORY:", historical_root, flush=True)
