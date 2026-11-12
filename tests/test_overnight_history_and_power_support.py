@@ -8,6 +8,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from dataclasses import fields
 from pathlib import Path
 
@@ -22,7 +23,7 @@ def history_run(root: Path, label: str, keys: list[str],
     folder = root / label
     folder.mkdir()
     sqlite = folder / "history.sqlite"
-    with sqlite3.connect(sqlite) as connection:
+    with closing(sqlite3.connect(sqlite)) as connection, connection:
         connection.execute(
             "CREATE TABLE collection_attempt_reservations ("
             "business_key TEXT PRIMARY KEY, account TEXT, provider TEXT)"
@@ -57,7 +58,7 @@ class HistoricalReservationTests(unittest.TestCase):
             self.assertEqual(result["historical_cohort_keys"], 2)
             self.assertEqual(result["historical_overlapping_keys"], 1)
             self.assertEqual(result["historical_reservation_keys"], 2)
-            with sqlite3.connect(destination) as db:
+            with closing(sqlite3.connect(destination)) as db, db:
                 self.assertEqual(db.execute(
                     "SELECT COUNT(*) FROM collection_attempt_reservations"
                 ).fetchone()[0], 2)
