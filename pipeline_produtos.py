@@ -10235,7 +10235,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-promote", "overnight-reconcile-failed"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-promote", "overnight-reconcile-failed", "promote-isolated-ten"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -10279,6 +10279,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--campaign-pause-after-sublots", type=int, default=0, help="Safety test: pause a campaign after N audited sublots; resume with the same campaign directory and zero pause")
     p.add_argument("--legacy-run-dir", action="append", default=[], help="Two historical audited run folders for offline-only 40-SKU promotion")
     p.add_argument("--promotion-dry-run", action="store_true", help="Build and verify staging without replacing any canonical data")
+    p.add_argument("--pilot-dir", default="", help="Isolated ten-SKU pilot folder for targeted official promotion")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p
@@ -10606,6 +10607,216 @@ def run_baseline_repair(args: argparse.Namespace, cfg: Dict[str, Any], rules: Ru
     LOG.info("Revisão B.I não foi recalculada nem preenchida pelo script.")
 
 
+
+def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool = False) -> Dict[str, Any]:
+    """Promote only ten verified pilot rows to the official Final workbook.
+
+    No collection/LLM, no full-baseline reconciliation, and no changes to
+    manual / BI_OK records. A dry run is the default. An immutable backup is
+    created immediately before an atomic workbook replacement.
+    """
+    import hashlib
+    import shutil
+    import tempfile
+    from datetime import datetime
+    from openpyxl import load_workbook
+
+    pilot_dir = Path(pilot_dir).resolve()
+    official_final = Path(official_final).resolve()
+    result_path = pilot_dir / "classification_output.xlsx"
+    isolated_cfg_path = pilot_dir / "isolated_config.json"
+    if not result_path.is_file() or not isolated_cfg_path.is_file():
+        raise RuntimeError("PROMOTE10_MISSING_PILOT_RESULT_OR_CONFIG")
+    cfg_pilot = json.loads(isolated_cfg_path.read_text(encoding="utf-8-sig"))
+    pilot_files = cfg_pilot.get("files", {})
+    source_final = Path(pilot_files.get("final", "")).resolve()
+    input_path = Path(pilot_files.get("input", "")).resolve()
+    if any(not p.is_file() for p in (source_final, input_path, official_final)):
+        raise RuntimeError("PROMOTE10_MISSING_SOURCE_OR_OFFICIAL_FILE")
+    if not all(p.is_relative_to(pilot_dir) for p in (source_final, input_path, result_path)):
+        raise RuntimeError("PROMOTE10_NONISOLATED_SOURCE")
+    if source_final == official_final:
+        raise RuntimeError("PROMOTE10_SAME_SOURCE_AND_DEST")
+    if official_final.suffix.lower() != ".xlsx" or source_final.suffix.lower() != ".xlsx":
+        raise RuntimeError("PROMOTE10_ONLY_XLSX_SUPPORTED")
+
+    def headers(ws):
+        return {safe(cell.value): cell.column for cell in ws[1] if safe(cell.value)}
+
+    def business_sheet(wb):
+        for ws in wb.worksheets:
+            h = headers(ws)
+            if "Marca" in h and "Modelo" in h:
+                return ws, h
+        raise RuntimeError("PROMOTE10_BUSINESS_SHEET_NOT_FOUND")
+
+    def rows_by_key(ws, h):
+        out = {}
+        for row_idx in range(2, ws.max_row + 1):
+            brand = safe(ws.cell(row_idx, h["Marca"]).value)
+            model = safe(ws.cell(row_idx, h["Modelo"]).value)
+            if not brand and not model:
+                continue
+            if not brand or not model:
+                continue
+            key = business_key(brand, model)
+            if key in out:
+                raise RuntimeError("PROMOTE10_DUPLICATE_BUSINESS_KEY:" + key)
+            out[key] = row_idx
+        return out
+
+    def sheet_digest(ws):
+        h = hashlib.sha256()
+        for row in ws:
+            for cell in row:
+                value = cell.value
+                h.update((repr((cell.coordinate, cell.data_type, value)) + "\n").encode("utf-8", errors="replace"))
+        return h.hexdigest()
+
+    source_wb = load_workbook(source_final, read_only=True, data_only=False)
+    result_wb = load_workbook(result_path, read_only=True, data_only=True)
+    input_wb = load_workbook(input_path, read_only=True, data_only=True)
+    official_wb = load_workbook(official_final, read_only=False, data_only=False)
+    tmp = None
+    try:
+        result_ws = result_wb["Resultados"]
+        rh = headers(result_ws)
+        for name in ("Marca", "Modelo", "Resolution State", "Review Required", "Auto Eligible"):
+            if name not in rh:
+                raise RuntimeError("PROMOTE10_MISSING_RESULT_FIELD:" + name)
+        results = {}
+        for values in result_ws.iter_rows(min_row=2, values_only=True):
+            brand, model = safe(values[rh["Marca"] - 1]), safe(values[rh["Modelo"] - 1])
+            if not brand and not model:
+                continue
+            key = business_key(brand, model)
+            if key in results:
+                raise RuntimeError("PROMOTE10_DUPLICATE_RESULT:" + key)
+            if (safe(values[rh["Resolution State"] - 1]).upper() != "RESOLVED"
+                    or safe(values[rh["Review Required"] - 1]).upper() != "NÃO"
+                    or safe(values[rh["Auto Eligible"] - 1]).upper() != "SIM"):
+                raise RuntimeError("PROMOTE10_NOT_ELIGIBLE:" + key)
+            results[key] = (brand, model)
+        if len(results) != 10:
+            raise RuntimeError(f"PROMOTE10_EXPECTED_EXACTLY_TEN_GOT_{len(results)}")
+
+        input_ws, ih = business_sheet(input_wb)
+        input_keys = set(rows_by_key(input_ws, ih))
+        if input_keys != set(results):
+            raise RuntimeError("PROMOTE10_INPUT_MISMATCH")
+
+        sws, sh = business_sheet(source_wb)
+        ows, oh = business_sheet(official_wb)
+        source_rows = rows_by_key(sws, sh)
+        official_rows = rows_by_key(ows, oh)
+        if not set(results).issubset(source_rows) or not set(results).issubset(official_rows):
+            raise RuntimeError("PROMOTE10_MISSING_KEYS_IN_FINAL")
+
+        required = ("O que é (Tipo)", "Alimentação", "Category General", "FAMILY")
+        for field in required:
+            if field not in sh or field not in oh:
+                raise RuntimeError("PROMOTE10_REQUIRED_COLUMN_MISSING:" + field)
+        allowed = (
+            "O que é (Tipo)", "Alimentação", "Category General", "FAMILY",
+            "Título Real", "Fonte URL", "Status", "Status Processamento",
+            "Revisão", "Resolution State", "Review Required", "Auto Eligible",
+            "Classification Outcome", "Classification Identity", "Stage",
+            "Reason Code", "Motivo", "Próxima Ação", "Rules Hash",
+            "Pipeline Version", "Processed At", "Clef Provider", "Clef Model",
+            "Clef Cache", "Clef Prompt Tokens", "Clef Completion Tokens",
+            "Clef Total Tokens"
+        )
+        transferable = [name for name in allowed if name in sh and name in oh]
+        changes = []
+        for key in sorted(results):
+            src_row, dst_row = source_rows[key], official_rows[key]
+            current_bi = safe(ows.cell(dst_row, oh.get("Revisão B.I", -1)).value) if "Revisão B.I" in oh else ""
+            current_status = safe(ows.cell(dst_row, oh["Status"]).value) if "Status" in oh else ""
+            if current_bi.upper() == "OK" or current_status.upper() == "MANUAL":
+                raise RuntimeError("PROMOTE10_HUMAN_LOCK:" + key)
+            source_values = {name: sws.cell(src_row, sh[name]).value for name in required}
+            if not all(safe(x) for x in source_values.values()):
+                raise RuntimeError("PROMOTE10_EMPTY_CLASSIFICATION:" + key)
+            if safe(source_values["O que é (Tipo)"]).upper() in ("REVISAR", "UNKNOWN"):
+                raise RuntimeError("PROMOTE10_UNKNOWN_TYPE:" + key)
+            if safe(source_values["Alimentação"]).upper() == "UNKNOWN":
+                raise RuntimeError("PROMOTE10_UNKNOWN_POWER:" + key)
+            if (safe(source_values["Category General"]), safe(source_values["FAMILY"])) == ("OTHERS", "OTHERS"):
+                raise RuntimeError("PROMOTE10_GENERIC_TAXONOMY:" + key)
+            src_res = safe(sws.cell(src_row, sh["Resolution State"]).value) if "Resolution State" in sh else ""
+            if src_res and src_res.upper() != "RESOLVED":
+                raise RuntimeError("PROMOTE10_SOURCE_NOT_RESOLVED:" + key)
+            for name in transferable:
+                source_cell = sws.cell(src_row, sh[name])
+                dest_cell = ows.cell(dst_row, oh[name])
+                if source_cell.data_type == "f":
+                    raise RuntimeError("PROMOTE10_SOURCE_FORMULA:" + key + ":" + name)
+                if source_cell.value != dest_cell.value:
+                    changes.append((key, name, dest_cell.value, source_cell.value))
+                    dest_cell.value = source_cell.value
+        # Reopen and verify the full staged workbook before touching the original.
+        from tempfile import NamedTemporaryFile
+        with NamedTemporaryFile(prefix=".promote10_", suffix=".xlsx",
+                                dir=official_final.parent, delete=False) as handle:
+            tmp = Path(handle.name)
+        official_wb.save(tmp)
+        check_wb = load_workbook(tmp, read_only=True, data_only=False)
+        try:
+            check_ws, check_h = business_sheet(check_wb)
+            check_rows = rows_by_key(check_ws, check_h)
+            if set(check_rows) != set(official_rows):
+                raise RuntimeError("PROMOTE10_STAGED_KEY_INTEGRITY")
+            for key in results:
+                for name in transferable:
+                    original_cell = sws.cell(source_rows[key], sh[name])
+                    staged_cell = check_ws.cell(check_rows[key], check_h[name])
+                    if staged_cell.value != original_cell.value:
+                        raise RuntimeError("PROMOTE10_STAGED_VALUE_MISMATCH:" + key + ":" + name)
+        finally:
+            check_wb.close()
+
+        report = {
+            "status": "DRY_RUN_PASS" if not commit else "READY_TO_COMMIT",
+            "cohort": len(results),
+            "changed_cells": len(changes),
+            "official": str(official_final),
+            "isolated_source": str(source_final),
+            "modified_skus": sorted({k for k, _, _, _ in changes}),
+            "search_calls": 0, "jev_calls": 0,
+        }
+        if not commit:
+            return report
+        # Prevent accidental overwrite when Excel is open / another process wrote
+        # the official workbook during staging.
+        def digest_file(path):
+            h = hashlib.sha256()
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        # Saving a backup uses copy2; the original remains untouched until replace.
+        original_hash = digest_file(official_final)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = official_final.with_name(official_final.stem + ".backup_promote10_" + stamp + official_final.suffix)
+        shutil.copy2(official_final, backup)
+        if digest_file(backup) != original_hash or digest_file(official_final) != original_hash:
+            raise RuntimeError("PROMOTE10_CONCURRENT_MODIFICATION")
+        os.replace(tmp, official_final)
+        tmp = None
+        report["status"] = "COMMITTED"
+        report["backup"] = str(backup)
+        report["verified_after_replace"] = digest_file(official_final) != original_hash or not changes
+        return report
+    finally:
+        for wb in (source_wb, result_wb, input_wb, official_wb):
+            wb.close()
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def main() -> int:
     base = Path(__file__).resolve().parent
     args = interactive_menu(base) if len(sys.argv) == 1 else build_parser().parse_args()
@@ -10661,6 +10872,14 @@ def main() -> int:
         for e in errors[:50]:
             LOG.error(e)
         return 2
+    if args.mode == "promote-isolated-ten":
+        if not args.pilot_dir:
+            raise ValueError("PROMOTE10_REQUIRES_PILOT_DIR")
+        official = Path(args.final or cfg["files"]["final"]).resolve()
+        with exclusive_campaign_lock():
+            report = promote_isolated_ten(Path(args.pilot_dir), official, commit=args.yes)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
     if args.mode == "overnight-reconcile-failed":
         if not args.campaign_resume_dir or args.legacy_run_dir:
             raise ValueError("offline recovery requires --campaign-resume-dir only")
