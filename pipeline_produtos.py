@@ -11817,6 +11817,12 @@ def outcome_audit(run,state,isolated):
         log=run/state["stages"]["classification"]["log"]
     logtext=log.read_text(encoding="utf-8",errors="replace") if log.is_file() else ""
     output_only = bool(isolated.get("_nightly_output_only", False))
+    # In isolated output-only mode the original Final is intentionally
+    # immutable; the classification work is in the isolated XLSX/SQLite.
+    # Requiring every cohort key in Final would falsely reject all new SKUs.
+    # Still enforce original rows, exact human locks, RAW and output integrity.
+    if output_only:
+        missing = []
     log_checks=(
         {"NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK":
             "NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK" in logtext}
@@ -12322,6 +12328,12 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         return state["promotion"]
     if state.get("promotion", {}).get("status") in {"PROMOTING", "RECOVERY_REQUIRED"}:
         raise RuntimeError("PROMOTION_RECOVERY_REQUIRED: inspect immutable backup before trying again")
+    if state.get("night_output_only", False):
+        raise RuntimeError(
+            "PROMOTION_BLOCKED_OUTPUT_ONLY: classifier results were stored only "
+            "in output XLSX/SQLite; a separately audited cohort-scoped Excel "
+            "projection is required before any canonical promotion."
+        )
     if state.get("status") != "COMPLETE" or not state.get("batches"):
         raise RuntimeError("PROMOTION_BLOCKED: requires COMPLETE audited campaign")
     if state.get("active_run") or state.get("pending_run_creation"):
