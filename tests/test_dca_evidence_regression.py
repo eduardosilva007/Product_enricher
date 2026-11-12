@@ -52,6 +52,50 @@ class DcaEvidenceRegression(unittest.TestCase):
                         sources=[src],reasons=[])
         self.assertEqual(_combo_kit_components(self.rules,s1),[])
 
+    def test_repeated_sku_titles_override_unrelated_body_type(self):
+        payload = {"results": [
+            {"title": "DCA AMQ02-65 Jigsaw", "url": "https://example.org/a",
+             "content": "Related products: circular saw"},
+            {"title": "DCA AMQ02-65 Jig Saw 550W", "url": "https://example.org/b",
+             "content": "Precise cutting tool"},
+            {"title": "DCA AMQ02-65 Jigsaw tool", "url": "https://example.org/c",
+             "content": ""},
+        ]}
+        result = self.engine.classify("DCA", "AMQ02 65", payload)
+        self.assertEqual(result.product_type, "JIGSAW")
+        self.assertNotIn("CIRCULAR SAW", result.type_candidates)
+
+    def test_wood_trimmer_resolves_router_not_garden_tool(self):
+        payload = {"results": [
+            {"title":"DCA AMP04-6 550W Wood Trimmer", "url":"https://example.org/a",
+             "content":"Rated Power Input: 550W"},
+            {"title":"DCA AMP04-6 Trimmer Router", "url":"https://example.org/b",
+             "content":"Input: 550W"},
+            {"title":"DCA AMP04-6 trimmer", "url":"https://example.org/c",
+             "content":""}
+        ]}
+        result = self.engine.classify("DCA","AMP04/6",payload)
+        self.assertEqual(result.product_type,"ROUTER TOOL")
+        self.assertNotIn("TRIMMER",result.type_candidates)
+
+    def test_pressure_washer_titles_override_unrelated_saw_body(self):
+        payload={"results":[
+            {"title":"DCA AQW5.5/10 High Pressure Washer","url":"https://example.org/a",
+             "content":"Related products: circular saw"},
+            {"title":"DCA AQW5.5/10 Pressure Washer","url":"https://example.org/b",
+             "content":"Rated Power Input (W): 1600"}
+        ]}
+        result=self.engine.classify("DCA","AQW5.5/10",payload)
+        self.assertEqual(result.product_type,"PRESSURE WASHER")
+        self.assertNotIn("CIRCULAR SAW",result.type_candidates)
+
+    def test_jet_pump_with_self_priming_keyword_keeps_jet_family(self):
+        cg,fam,reason=self.rules.map_taxonomy(
+            "WATERPUMP","CORDED","DCA AJET-1.5 self-priming jet pump",
+            "DCA","AJET 1.5"
+        )
+        self.assertEqual((cg,fam),("OTHERS","JET PUMP"))
+
     def test_explicit_combo_title_remains_eligible(self):
         src = self.source("DCA heat gun and angle grinder combo kit",
                           "Contains heat gun and angle grinder",
