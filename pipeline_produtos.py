@@ -7994,8 +7994,26 @@ def _export_base_final(
         out[col] = work[src] if src else pd.NA
 
     if review_bi_source_exists:
-        review_bi_snapshot = review_bi_snapshot or {}
-        out["Revisão B.I"] = [review_bi_snapshot.get(key, pd.NA) for key in work["__key"]]
+        # BI approval is owned by the EXACT Marca+Modelo pair in Final.
+        # Never copy a human OK to another alias sharing the compacted key.
+        # _load_review_bi_snapshot uses normalized keys for historical
+        # lookups; it is NOT an approval authority for distinct physical SKUs.
+        prior_bi_by_exact_pair = {}
+        if final_path.is_file():
+            original_bi_df, _ = _read_business_sheet(final_path)
+            ob = find_col(original_bi_df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+            om = find_col(original_bi_df, ["Modelo", "Model", "SKU", "Part Number"])
+            orbi = find_col(original_bi_df, ["Revisão B.I", "Revisao B.I"], required=False)
+            for _, old_row in original_bi_df.iterrows():
+                exact_pair = (safe(old_row.get(ob)), safe(old_row.get(om)))
+                old_value = old_row.get(orbi) if orbi else pd.NA
+                if (exact_pair not in prior_bi_by_exact_pair
+                        or _is_bi_ok_value(old_value)):
+                    prior_bi_by_exact_pair[exact_pair] = old_value
+        out["Revisão B.I"] = [
+            prior_bi_by_exact_pair.get((safe(brand), safe(model)), pd.NA)
+            for brand, model in zip(out["Marca"], out["Modelo"])
+        ]
     else:
         src_rbi = find_col(work, ["Revisão B.I", "Revisao B.I"], required=False)
         out["Revisão B.I"] = work[src_rbi] if src_rbi else pd.NA
