@@ -4500,7 +4500,14 @@ class DeterministicEngine:
         else:
             cg, fam, tax_reason = "", "", ""
 
-        if (product_type and power is not None and len(power_candidates) <= 1
+        # A valid taxonomy pair does not prove the power source. Active tools
+        # with UNKNOWN power must go through adjudication, never RULE_CLASSIFIED.
+        # Passive types explicitly allow UNKNOWN.
+        power_verified_for_auto = (
+            power != "UNKNOWN" or product_type in self.rules.passive_types
+        )
+        if (product_type and power is not None and power_verified_for_auto
+                and len(power_candidates) <= 1
                 and (cg, fam) in self.rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS")
                 # Generic WATERPUMP fallback proves a broad type, not the commercial FAMILY.
                 # Route to JEV with evidence rather than silently auto-resolving.
@@ -6279,6 +6286,11 @@ def _clef_auto_gate(
     fam = safe(data.get("family"))
     if typ not in rules.types:
         return False, "CLEF_TYPE_INVALID"
+    # A confident TYPE/FAMILY does not justify automatic acceptance when an
+    # active product's power source remains unsupported by target evidence.
+    clef_power = safe(data.get("power")) or "UNKNOWN"
+    if clef_power == "UNKNOWN" and typ not in rules.passive_types:
+        return False, "CLEF_POWER_UNVERIFIED"
     if (cg, fam) not in rules.valid_pairs or (cg, fam) == ("OTHERS", "OTHERS"):
         return False, "CLEF_TAXONOMY_INVALID"
 
@@ -11167,8 +11179,35 @@ def outcome_audit(run,state,isolated):
     logtext=log.read_text(encoding="utf-8",errors="replace") if log.is_file() else ""
     log_checks={label:label in logtext for label in labels}
     useful_raw=sum(raw_states.get(x,0) for x in ("RAW_OK","RAW_OK_MERGED"))
+    # The cohort audit must validate every result, not merely one useful RAW
+    # entry and the appearance of success messages in a log.
+    output_path = Path(isolated["files"]["output"])
+    result_errors = []
+    if not output_path.is_file():
+        result_errors.append("RESULT_FILE_MISSING")
+    else:
+        results = pd.read_excel(output_path, sheet_name="Resultados",
+                                dtype=object, keep_default_na=False)
+        if not {"Marca", "Modelo"}.issubset(results.columns):
+            result_errors.append("RESULT_SCHEMA_INVALID")
+        else:
+            result_keys = [business_key(safe(row["Marca"]), safe(row["Modelo"]))
+                           for _, row in results.iterrows()]
+            if (len(result_keys) != len(cohort) or len(set(result_keys)) != len(result_keys)
+                    or set(result_keys) != cohort_keys):
+                result_errors.append("RESULT_COHORT_MISMATCH")
+            for _, row in results.iterrows():
+                resolved = safe(row.get("Resolution State")) == "RESOLVED"
+                eligible = safe(row.get("Auto Eligible")).upper() == "SIM"
+                needs_review = safe(row.get("Review Required")).upper() == "SIM"
+                if eligible and (not resolved or needs_review or
+                                 not safe(row.get("Category General")) or
+                                 not safe(row.get("FAMILY"))):
+                    result_errors.append("FALSE_AUTO_ELIGIBLE")
+                    break
     passed=(not missing and not missing_existing and not protected_changes
-            and not protected_originals(state) and useful_raw>0 and all(log_checks.values()))
+            and not protected_originals(state) and useful_raw==len(cohort)
+            and not result_errors and all(log_checks.values()))
     result={"status":"PASS" if passed else "FAIL","cohort":len(cohort),
             "missing_cohort_in_final":missing[:20],"missing_original_in_final":missing_existing[:20],
             "protected_manual_or_bi_changes":protected_changes[:20],
@@ -11176,6 +11215,7 @@ def outcome_audit(run,state,isolated):
             "protected_changes_by_type":protected_counts,
             "cache_states_after":raw_states,"useful_raw_count":useful_raw,
             "log_contracts":log_checks,
+            "result_integrity_errors":result_errors,
             "original_source_modified":protected_originals(state),
             "quality_decision":"REVIEW_REQUIRED","taxonomy_accuracy_measured":False}
     state["quality_audit"]=result
