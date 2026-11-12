@@ -75,6 +75,68 @@ class FinalAuthorityRegression(unittest.TestCase):
             self.assertEqual(before["processed"] - after["final_accepted"], set())
             self.assertGreaterEqual(result["final_accepted_total"], 2)
 
+    def test_stale_no_results_with_confirmed_raw_is_reconciled(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from pipeline_produtos import Rules, persist_baseline_excels
+
+        approved = record("BRAND", "APPROVED")
+        stale = {
+            "Marca": "COMET", "Modelo": "KS25010/150 CLASSIC",
+            "Status": "Script", "Revisão": "REVISAR",
+            "Próxima Ação": "REVISAR_SEM_RESULTADOS",
+            "Collection State": "READY_FOR_CLASSIFICATION",
+            "Resolution State": "REVIEW_NO_RESULTS",
+            "Classification Identity": "WEAK",
+            "Review Required": "SIM",
+            "Revisão B.I": "",
+        }
+
+        class ReadOnlyCache:
+            def __init__(self, path):
+                pass
+
+            def get(self, brand, model):
+                return SimpleNamespace(
+                    brand=brand, model=model, state="RAW_OK",
+                    payload={"results": [], "_collection": {
+                        "state": "READY_FOR_CLASSIFICATION",
+                        "curated_results": [{"title": "Comet pressure washer",
+                                             "url": "https://example.org/item"}]
+                    }},
+                )
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            master_path, final_path = root / "master.xlsx", root / "final.xlsx"
+            input_path, cache_path = root / "cohort.xlsx", root / "cache.sqlite"
+            pd.DataFrame([approved, stale]).to_excel(master_path, index=False)
+            pd.DataFrame([approved]).to_excel(final_path, index=False)
+            pd.DataFrame([{"Marca": "COMET", "Modelo": "KS25010/150 CLASSIC"}]).to_excel(
+                input_path, index=False
+            )
+            cache_path.write_bytes(b"read-only-test-double")
+            before = load_baseline_inventory(master_path, final_path)["processed"]
+            with patch("pipeline_produtos.TavilyReadOnlyStore", ReadOnlyCache):
+                stats = persist_baseline_excels(
+                    rows=[], master_path=master_path, final_path=final_path,
+                    input_path=input_path,
+                    rules=Rules(Path(__file__).resolve().parents[1] / "regras_negocio.json"),
+                    cache_path=cache_path,
+                    cfg={"files": {"baseline_backup_dir": str(root / "diagnostic")}},
+                )
+            after = load_baseline_inventory(master_path, final_path)["processed"]
+            self.assertFalse(before - after)
+            self.assertGreaterEqual(stats["cache_pending_corrected"], 1)
+            from pipeline_produtos import _read_business_sheet
+            saved, _ = _read_business_sheet(master_path)
+            comet = saved.loc[saved["Modelo"] == "KS25010/150 CLASSIC"].iloc[0]
+            self.assertNotEqual(comet["Próxima Ação"], "REVISAR_SEM_RESULTADOS")
+            self.assertEqual(comet["Raw State"], "RAW_OK")
+
     def test_final_only_accepted_survives(self):
         original = record("OTHER", "OLD")
         approved = record("BRAND", "FINAL-ONLY")
