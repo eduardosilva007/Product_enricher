@@ -11704,7 +11704,12 @@ def create_run(cfg,args):
         files[k]=str(target)
     # Persistent accounting across isolated pilot DB copies. This must happen
     # BEFORE the new cohort is handed to the HTTP worker.
-    prior_reservation_stats = import_prior_reservations(Path(files["classification_db"]))
+    # Pass live OUT explicitly. The function's default OUT is bound at
+    # definition time and would otherwise point at the archived code snapshot,
+    # silently missing historical attempts after a guarded launcher relocates it.
+    prior_reservation_stats = import_prior_reservations(
+        Path(files["classification_db"]), OUT
+    )
     # A subset input is the strongest protection against accidental RAW_MISSING
     # collection. No 18K files are ever used as collection input in this campaign.
     import pandas as pd
