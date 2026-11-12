@@ -74,7 +74,7 @@ class NightOutputOnlyModeTests(unittest.TestCase):
                 sources[label] = path
             audited = {
                 "candidate_rows": [{"brand": "ABC", "model": "ONE", "business_key": "abc|one"}],
-                "error_rows": [], "summary": {},
+                "error_rows": [], "summary": {}, "summary": {},
             }
             options = SimpleNamespace(
                 allow_prior_serper_quota_error=False, search_budget=1,
@@ -102,6 +102,65 @@ class NightOutputOnlyModeTests(unittest.TestCase):
         self.assertIn('not state.get("review_before_promotion", False)', campaign_source)
 
 
+class NightSelectionRegressionTests(unittest.TestCase):
+    def _sample(self):
+        return {
+            "candidate_rows": [
+                {"business_key": "CLEAN", "brand": "A", "model": "1"},
+            ],
+            "missing_rows": [
+                {"business_key": "MISSING", "brand": "B", "model": "2"},
+            ],
+            "error_rows": [
+                {"business_key": "SERPER", "brand": "C", "model": "3",
+                 "provider": "serper", "prior_state": "REQUEST_ATTEMPTED_NO_AUTO_RETRY",
+                 "previous_error": "not enough credits"},
+                {"business_key": "429", "brand": "D", "model": "4",
+                 "provider": "tavily", "prior_state": "REQUEST_ERROR",
+                 "previous_error": "429 too many requests"},
+            ],
+            "summary": {},
+        }
+
+    def test_unattempted_clean_only_is_default(self):
+        eligible, details = core.select_overnight_eligible(self._sample(), set())
+        self.assertEqual([x["business_key"] for x in eligible], ["CLEAN"])
+        self.assertEqual(details["raw_missing_new_requires_opt_in"], 1)
+        self.assertEqual(details["prior_provider_error_requires_opt_in"], 2)
+
+    def test_explicit_permissions_unlock_missing_and_old_errors(self):
+        eligible, details = core.select_overnight_eligible(
+            self._sample(), set(), include_raw_missing=True,
+            allow_previous_errors=True,
+        )
+        self.assertEqual([x["business_key"] for x in eligible],
+                         ["CLEAN", "MISSING", "SERPER", "429"])
+        self.assertEqual(details["eligible_unique"], 4)
+
+    def test_serper_permission_is_narrow(self):
+        eligible, _ = core.select_overnight_eligible(
+            self._sample(), set(), allow_serper_quota_error=True,
+        )
+        self.assertEqual([x["business_key"] for x in eligible],
+                         ["CLEAN", "SERPER"])
+
+    def test_prior_attempts_never_reissued_even_with_all_permissions(self):
+        eligible, details = core.select_overnight_eligible(
+            self._sample(), {"CLEAN", "SERPER", "429", "MISSING"},
+            include_raw_missing=True, allow_previous_errors=True,
+            allow_serper_quota_error=True,
+        )
+        self.assertEqual(eligible, [])
+        self.assertEqual(details["eligible_unique"], 0)
+
+    def test_same_helper_used_in_live_run_and_launcher(self):
+        from inspect import getsource
+        self.assertIn("select_overnight_eligible(", getsource(core.create_run))
+        source = (Path(__file__).resolve().parents[1] / "scripts"
+                  / "launch_night_output_only.py").read_text(encoding="utf-8")
+        self.assertIn("core.select_overnight_eligible(", source)
+
+
 class ArchivedLauncherTests(unittest.TestCase):
     def test_launcher_default_does_not_invoke_live_runtime(self):
         source = Path(__file__).resolve().parents[1] / "scripts" / "launch_night_output_only.py"
@@ -125,7 +184,7 @@ class ArchivedLauncherTests(unittest.TestCase):
             )
             fake_audit = {"candidate_rows": [
                 {"business_key": "test|%d" % i} for i in range(20)
-            ], "error_rows": []}
+            ], "error_rows": [], "summary": {}}
             argv = list(sys.argv)
             try:
                 with (patch.object(mod, "SNAPSHOT", snapshot),
@@ -168,7 +227,7 @@ class ArchivedLauncherTests(unittest.TestCase):
                     "candidate_rows": [
                         {"business_key": "test|%d" % i} for i in range(20)
                     ],
-                    "error_rows": [],
+                    "error_rows": [], "summary": {},
                 }
                 with (patch.object(mod, "SNAPSHOT", snapshot),
                       patch.object(core, "configured_slots", return_value=[object()]),
