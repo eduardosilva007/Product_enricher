@@ -10273,6 +10273,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout-minutes", type=int, default=120)
     p.add_argument("--resume-dir", default="")
     p.add_argument("--campaign-total", type=int, default=0)
+    p.add_argument("--campaign-review-before-promotion", action="store_true",
+                   help="Complete and audit isolated batches, NEVER auto-promote to canonical files; explicit promotion remains separate")
     p.add_argument("--campaign-jev-budget", type=int, default=0)
     p.add_argument("--campaign-token-budget", type=int, default=0)
     p.add_argument("--campaign-resume-dir", default="", help="Existing campaign manifest directory; never starts new unaudited work")
@@ -12375,6 +12377,8 @@ def overnight_campaign(args, cfg, rules=None):
             raise ValueError("Resume budgets/target differ from original campaign")
         if state.get("serper_rescue") != args.allow_prior_serper_quota_error:
             raise ValueError("Resume cannot alter previous Serper-error authorization")
+        if state.get("review_before_promotion", False) != bool(args.campaign_review_before_promotion):
+            raise ValueError("Resume must preserve review-before-promotion flag")
     else:
         root = OUT / "campaigns" / (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8])
@@ -12386,6 +12390,7 @@ def overnight_campaign(args, cfg, rules=None):
                      "jev_limit": args.campaign_jev_budget,
                      "token_limit": args.campaign_token_budget},
                  "serper_rescue": args.allow_prior_serper_quota_error,
+                 "review_before_promotion": bool(args.campaign_review_before_promotion),
                  "reserved_jev_calls": 0, "reserved_tokens": 0,
                  "audited_products": 0, "batches": [], "active_run": "",
                  "pending_run_creation": False}
@@ -12510,15 +12515,16 @@ def overnight_campaign(args, cfg, rules=None):
 
     state["status"] = "COMPLETE" if state["audited_products"] == args.campaign_total else "PARTIAL"
     atomic_json(manifest_path, state)
-    if state["status"] == "COMPLETE" and rules is not None:
-        # Persist each fully audited campaign into the official source of truth.
-        # A failed promotion is an operational failure, not a successful overnight.
+    if state["status"] == "COMPLETE" and rules is not None and not state.get("review_before_promotion", False):
+        # Legacy behavior: automatically persist fully audited campaigns unless
+        # the user explicitly requested human review before promotion.
         overnight_promote_campaign(root, cfg, rules)
     print(json.dumps({"campaign": str(manifest_path), "status": state["status"],
                       "audited": state["audited_products"], "target": args.campaign_total,
                       "jev_reserved": state["reserved_jev_calls"],
                       "tokens_reserved": state["reserved_tokens"],
                       "production_persisted": state.get("promotion", {}).get("status") == "COMMITTED",
+                      "review_before_promotion": state.get("review_before_promotion", False),
                       "human_taxonomy_approved": False}, ensure_ascii=False, indent=2))
     return 0 if state["status"] == "COMPLETE" else 2
 
