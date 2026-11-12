@@ -3780,6 +3780,7 @@ class Stage1Result:
     type_margin: float = 0.0
     type_support: Dict[str, int] = field(default_factory=dict)
     power_scores: Dict[str, float] = field(default_factory=dict)
+    power_support: Dict[str, int] = field(default_factory=dict)
     power_share: float = 0.0
     power_margin: float = 0.0
     best_source_score: int = 0
@@ -4613,6 +4614,7 @@ class DeterministicEngine:
             type_margin=type_margin,
             type_support=type_support,
             power_scores=power_scores,
+            power_support=power_support,
             power_share=power_share,
             power_margin=power_margin,
             best_source_score=best_source_score,
@@ -7631,6 +7633,20 @@ def _sync_final_into_master(
 
             if src_manual or src_accepted:
                 _copy_business_values(src, final_df, master_df, idx)
+                if src_accepted and not src_manual:
+                    # Final-approved data must not inherit a stale WEAK or
+                    # REVIEW flag from a superseded Consolidado row.
+                    for dest, aliases in (
+                        ("O que é (Tipo)", ("O que é (Tipo)", "Tipo", "Product Type")),
+                        ("Category General", ("Category General",)),
+                        ("FAMILY", ("FAMILY", "Family")),
+                        ("Classification Identity", ("Classification Identity",)),
+                        ("Revisão", ("Revisão", "Revisao")),
+                    ):
+                        col = find_col(final_df, aliases, required=False)
+                        if dest not in master_df.columns:
+                            master_df[dest] = pd.NA
+                        master_df.at[idx, dest] = src.get(col) if col else pd.NA
                 if src_manual:
                     master_df.at[idx, "Status"] = "Manual"
                     stats["final_manual_promoted"] += 1
@@ -8298,7 +8314,10 @@ def _export_base_final(
             continue
         complete = classified(row)
         approved = safe(row.get("Revisão")).upper() == "AUTO_APROVADO"
-        if approved and not complete:
+        # A legacy accepted classification need not have Título Real.
+        # Do not silently revoke it under a stricter unrelated export rule.
+        accepted_under_contract = _baseline_row_accepted(row, out)
+        if approved and not complete and not accepted_under_contract:
             out.at[idx, "Revisão"] = "REVISAR"
             out.at[idx, "Próxima Ação"] = "REVISAR_CLASSIFICACAO_INCOMPLETA"
             repaired_approval += 1
@@ -8749,10 +8768,20 @@ def persist_baseline_excels(
         }
         dropped = before_accepted - after_accepted
         if dropped:
+            audit_root = Path((cfg or {}).get("files", {}).get(
+                "baseline_backup_dir", str(ROOT / "Backups_Baseline")))
+            audit_root.mkdir(parents=True, exist_ok=True)
+            report = audit_root / "baseline_preservation_blocked.json"
+            report.write_text(json.dumps({
+                "before_accepted": len(before_accepted),
+                "after_accepted": len(after_accepted),
+                "dropped": len(dropped),
+                "dropped_keys": sorted(dropped),
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
             raise RuntimeError(
                 "BASELINE_ACCEPTED_PRESERVATION_FAILED: "
                 f"{len(dropped)} classificacoes aceitas seriam removidas. "
-                "Nenhum Excel foi regravado."
+                f"Audit: {report}. Nenhum Excel foi regravado."
             )
 
     # Verificar acesso a AMBOS os arquivos antes de gravar o primeiro.
@@ -11473,6 +11502,9 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
     expected = set()
     actual = {}
     disabled_accounts = {}
+    overlap_keys = set()
+    scanned_runs = 0
+    LOG.info("OVERNIGHT HISTORY | scanning %d past run reports (read-only)", len(reports))
     for report_path in reports:
         state = json.loads(report_path.read_text(encoding="utf-8"))
         if not state.get("stages", {}).get("collection", {}).get("attempts", 0):
@@ -11480,9 +11512,17 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
         cohort = state.get("cohort_keys", [])
         if len(cohort) != len(set(cohort)) or not cohort:
             raise RuntimeError(f"Invalid earlier campaign cohort: {report_path}")
-        if expected.intersection(cohort):
-            raise RuntimeError(f"Overlapping earlier campaign cohorts: {report_path}")
+        # Multiple historical pilots can refer to the SAME SKU. Do not
+        # abort simply because cohorts overlap. Accept only identical
+        # account/provider reservations; a conflict still aborts below.
+        overlap_keys.update(expected.intersection(cohort))
         expected.update(cohort)
+        scanned_runs += 1
+        if scanned_runs % 10 == 0:
+            LOG.info(
+                "OVERNIGHT HISTORY | audited_runs=%d historical_keys=%d duplicates=%d",
+                scanned_runs, len(expected), len(overlap_keys),
+            )
         config_path = report_path.parent / "isolated_config.json"
         previous_config = json.loads(config_path.read_text(encoding="utf-8"))
         ledger_path = Path(previous_config["files"]["classification_db"])
@@ -11501,12 +11541,17 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
                     "SELECT account, reason FROM collection_disabled_accounts"
                 ):
                     disabled_accounts[account] = reason
+        reserved_here = {key for key, account, provider in rows}
+        if not set(cohort).issubset(reserved_here):
+            missing = sorted(set(cohort) - reserved_here)
+            raise RuntimeError(
+                f"Unaccounted previous collection attempts: {report_path}; "
+                f"missing_count={len(missing)} first={missing[:5]}"
+            )
         for key, account, provider in rows:
             if key in actual and actual[key] != (account, provider):
                 raise RuntimeError(f"Conflicting historical reservation for SKU: {key}")
             actual[key] = (account, provider)
-        if not set(cohort).issubset(actual):
-            raise RuntimeError(f"Unaccounted previous collection attempts: {report_path}")
     # Existing production snapshot rows are also attempts; avoid silent
     # account rewrites and count all reservations across previous pilots.
     with closing(sqlite3.connect(destination)) as conn:
@@ -11534,8 +11579,16 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
                 "ON CONFLICT(account) DO UPDATE SET reason=excluded.reason",
                 (account, reason))
         conn.commit()
+    LOG.info(
+        "OVERNIGHT HISTORY OK | reports=%d audited_runs=%d unique_keys=%d "
+        "duplicate_keys=%d reservations=%d disabled_accounts=%d",
+        len(reports), scanned_runs, len(expected), len(overlap_keys),
+        len(actual), len(disabled_accounts),
+    )
     return {"historical_cohort_keys": len(expected),
             "historical_reservation_keys": len(actual),
+            "historical_overlapping_keys": len(overlap_keys),
+            "historical_runs_scanned": scanned_runs,
             "historical_disabled_accounts": len(disabled_accounts)}
 
 
@@ -11592,7 +11645,7 @@ def create_run(cfg,args):
         "pending_with_cache":"pending_with_cache.xlsx",
         "pending_without_cache":"pending_without_cache.xlsx",
         "collection_report_cache_rebuild":"curation.xlsx",
-        "baseline_backup_dir":"backups",
+        "baseline_backup_dir":str(ROOT/"Backups_Baseline"/"controlled_night"/run.name),
         "baseline_audit":"audit.csv",
         "evidence_export_jsonl":"evidence.jsonl",
     }.items():files[k]=str(run/v)
@@ -11659,7 +11712,6 @@ def outcome_audit(run,state,isolated):
     import pandas as pd
     cohort=pd.read_excel(isolated["files"]["input"],dtype=object,keep_default_na=False)
     final=pd.read_excel(isolated["files"]["final"],dtype=object,keep_default_na=False)
-    original=json.loads(Path(state["originals"]).read_text(encoding="utf-8"))
     # Compare exact Brand+Model human locks, not the last record sharing
     # a normalized business_key. Structural aliases can share that key.
     protected_details, protected_counts, original_rows_count, final_rows_count = overnight_examine(run)
