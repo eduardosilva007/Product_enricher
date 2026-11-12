@@ -2,7 +2,7 @@
 # Code lives in a clean git-archive, NEVER switches/overwrites the user's work branch.
 [CmdletBinding()]
 param(
-    [string]$RepoPath = "C:\\p\\Product_enricher",
+    [string]$RepoPath = "C:\p\Product_enricher",
     [int]$Target = 5,
     [int]$SearchPerSublot = 5,
     [int]$JevBudget = 20,
@@ -13,8 +13,8 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoPath = (Resolve-Path -LiteralPath $RepoPath).Path
 $CodeRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
-$python = "C:\\p\\venv\\Scripts\\python.exe"
-$history = Join-Path $RepoPath "piloto_argentina\\controlled_night"
+$python = "C:\p\venv\Scripts\python.exe"
+$history = Join-Path $RepoPath "piloto_argentina\controlled_night"
 if (-not (Test-Path -LiteralPath $python)) { throw "PYTHON_DO_VENV_NAO_ENCONTRADO" }
 if ($CodeRoot -eq $RepoPath) { throw "CODIGO_PRECISA_ESTAR_EM_GIT_ARCHIVE_NAO_NA_BRANCH_SUJA" }
 if (-not (Test-Path -LiteralPath $history)) { throw "HISTORICO_ORIGINAL_AUSENTE" }
@@ -24,7 +24,7 @@ if ($JevBudget -lt 1 -or $TokenBudget -lt 1) { throw "ORCAMENTO_TOTAL_OBRIGATORI
 Push-Location $CodeRoot
 try {
     Write-Host "ETAPA 1/4: Compilacao Python" -ForegroundColor Cyan
-    & $python -m py_compile ".\\pipeline_produtos.py" ".\\scripts\\launch_night_output_only.py"
+    & $python -m py_compile ".\pipeline_produtos.py" ".\scripts\launch_night_output_only.py"
     if ($LASTEXITCODE -ne 0) { throw "PYTHON_COMPILE_FAILED; API_CALLS=0" }
 
     Write-Host "ETAPA 2/4: Suíte completa offline" -ForegroundColor Cyan
@@ -32,11 +32,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "UNIT_TESTS_FAILED; API_CALLS=0" }
 
     Write-Host "ETAPA 3/4: Historico de tentativas (offline)" -ForegroundColor Cyan
-    & $python ".\\scripts\\audit_overnight_history_offline.py" $history
+    & $python ".\scripts\audit_overnight_history_offline.py" $history
     if ($LASTEXITCODE -ne 0) { throw "HISTORICO_INCONSISTENTE; API_CALLS=0" }
 
     $params = @(
-        ".\\scripts\\launch_night_output_only.py",
+        ".\scripts\launch_night_output_only.py",
         "--repo", $RepoPath,
         "--target", ([string]$Target),
         "--per-sublot", ([string]$SearchPerSublot),
