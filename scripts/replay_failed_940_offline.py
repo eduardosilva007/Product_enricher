@@ -79,12 +79,17 @@ def preview(run_dir: Path) -> dict:
 
         # This is the REAL persistence path with the existing output rows.
         # Search/LLM are never called; only read-only cache hydration is allowed.
+        isolated_cfg = dict(cfg)
+        isolated_cfg["files"] = dict(cfg.get("files", {}))
+        isolated_cfg["files"]["baseline_backup_dir"] = str(
+            ROOT / "Backups_Baseline" / "replay_940_diagnostics"
+        )
         stats = persist_baseline_excels(
             rows=records,
             master_path=master, final_path=final, input_path=source_input,
             rules=Rules(ROOT / "regras_negocio.json"),
             cache_path=paths["cache"],
-            cfg=cfg,
+            cfg=isolated_cfg,
         )
         after = load_baseline_inventory(master, final)
         lost_accepted = previous_accepted - after["processed"]
