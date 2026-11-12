@@ -9537,6 +9537,25 @@ def run_pipeline(
     output_path = Path(args.output or cfg["files"]["output"])
     inventory_path = Path(args.inventory_output or cfg["files"]["inventory_output"])
 
+    output_only = bool(cfg.get("_nightly_output_only", False))
+    if output_only:
+        # This is NOT a generic switch to disable safety gates. It is valid
+        # only for an overnight-created, isolated 1..20 SKU cohort.
+        if args.mode != "classify":
+            raise RuntimeError("OUTPUT_ONLY_REQUIRES_CLASSIFY")
+        isolated_run = input_path.resolve().parent if input_path else None
+        required_paths = (master_path, final_path, cache_path, db_path, output_path)
+        if (not isolated_run
+                or input_path.name != "raw_empty_cohort.xlsx"
+                or not (isolated_run / "run_report.json").is_file()
+                or not all(p and p.resolve().parent == isolated_run
+                           for p in required_paths)):
+            raise RuntimeError("OUTPUT_ONLY_ISOLATED_PATH_CONTRACT_FAILED")
+        original_state = json.loads((isolated_run / "run_report.json").read_text(encoding="utf-8"))
+        if (original_state.get("mode") != "ISOLATED_RAW_EMPTY_CONTROLLED"
+                or not 1 <= original_state.get("cohort_count", 0) <= 20):
+            raise RuntimeError("OUTPUT_ONLY_INVALID_COHORT_STATE")
+
     baseline_pre_stats: Dict[str, int] = {}
     if args.mode in {"classify", "full", "recover"}:
         backup_root = Path(cfg.get("files", {}).get("baseline_backup_dir", "Backups_Baseline"))
@@ -9556,12 +9575,33 @@ def run_pipeline(
         else:
             LOG.info("AUDITORIA BASELINE OK | sem conflitos objetivos")
 
-        baseline_pre_stats = reconcile_baseline_before_run(
-            master_path=master_path,
-            final_path=final_path,
-            input_path=input_path,
-            rules=rules,
-        )
+        if output_only:
+            # Never mutate the isolated workbook when no output has been
+            # classified. The original Final must already cover every
+            # accepted key, otherwise fail before ANY paid LLM call.
+            previous_inv = load_baseline_inventory(master_path, final_path)
+            missing_accepted = previous_inv["processed"] - previous_inv["final_accepted"]
+            if missing_accepted:
+                raise RuntimeError(
+                    "OUTPUT_ONLY_PREEXISTING_BASELINE_GAP: "
+                    f"{len(missing_accepted)} missing accepted keys"
+                )
+            baseline_pre_stats = {
+                "pre_master_accepted": len(previous_inv["master_accepted"]),
+                "pre_final_accepted": len(previous_inv["final_accepted"]),
+                "pre_union_accepted": len(previous_inv["processed"]),
+                "pre_missing_in_final": 0,
+                "pre_reconciled": 0,
+            }
+            LOG.info("OUTPUT_ONLY BASELINE | accepted=%d unchanged | official_writes=0",
+                     len(previous_inv["processed"]))
+        else:
+            baseline_pre_stats = reconcile_baseline_before_run(
+                master_path=master_path,
+                final_path=final_path,
+                input_path=input_path,
+                rules=rules,
+            )
         LOG.info(
             "BASELINE CHECK | Consolidado aceitos=%d | Base Final aceitos=%d | "
             "união=%d | faltando na Base Final=%d | reconciliada=%s",
@@ -9898,70 +9938,77 @@ def run_pipeline(
 
             baseline_stats: Dict[str, int] = {}
             baseline_warning = ""
-            try:
-                baseline_stats = persist_baseline_excels(
-                    rows=rows,
-                    master_path=master_path,
-                    final_path=final_path,
-                    input_path=input_path,
-                    rules=rules,
-                    reprocess=args.reprocess,
-                    force_reprocess_keys=force_reprocess_keys,
-                    cache_path=cache_path,
-                    cfg=cfg,
-                )
-                if baseline_stats:
-                    post_inv = load_baseline_inventory(master_path, final_path)
-                    final_cohort_accepted = len(
-                        cohort_keys & post_inv["final_accepted"]
-                    )
-                    expected_cohort_keys = _expected_cohort_accepted_after_run(
-                        cohort_keys=cohort_keys,
-                        final_accepted_at_start=cohort_final_accepted_keys_at_start,
+            if output_only:
+                stats["deferred_isolated_baseline_export"] = 1
+                LOG.info("NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK | "
+                         "durable_output_xlsx_and_sqlite=YES | "
+                         "isolated_master_final_unchanged=YES | "
+                         "canonical_promotion=BLOCKED")
+            else:
+                try:
+                    baseline_stats = persist_baseline_excels(
                         rows=rows,
-                        force_reprocess_keys=force_reprocess_keys,
-                    )
-                    equivalence_accepted_keys = _cohort_equivalence_accepted_keys(
+                        master_path=master_path,
                         final_path=final_path,
-                        cohort_keys=cohort_keys,
+                        input_path=input_path,
+                        rules=rules,
+                        reprocess=args.reprocess,
+                        force_reprocess_keys=force_reprocess_keys,
+                        cache_path=cache_path,
+                        cfg=cfg,
                     )
-                    expected_cohort_keys |= equivalence_accepted_keys
-                    expected_cohort_accepted = len(expected_cohort_keys)
-                    stats["cohort_final_accepted_at_end"] = final_cohort_accepted
-                    stats["cohort_expected_accepted_at_end"] = expected_cohort_accepted
-                    stats["cohort_equivalence_accepted_at_end"] = len(equivalence_accepted_keys)
-
-                    LOG.info(
-                        "BASELINE EXCEL ATUALIZADA | %s",
-                        " | ".join(
-                            f"{k}={v}" for k, v in baseline_stats.items()
-                        ),
-                    )
-                    LOG.info(
-                        "COHORT BASE FINAL | aceitos=%d/%d | esperado=%d | equivalencia=%d | review=%d",
-                        final_cohort_accepted,
-                        len(cohort),
-                        expected_cohort_accepted,
-                        len(equivalence_accepted_keys),
-                        int(stats.get("final_review", 0) or 0),
-                    )
-
-                    if final_path and final_cohort_accepted != expected_cohort_accepted:
-                        raise RuntimeError(
-                            "BASELINE_COHORT_MISMATCH: "
-                            f"Base Final possui {final_cohort_accepted} aceito(s) "
-                            f"no cohort, mas eram esperados {expected_cohort_accepted}. "
-                            "Classificacao_v3 e checkpoints foram preservados; "
-                            "a Base Final precisa ser reconciliada antes da próxima execução."
+                    if baseline_stats:
+                        post_inv = load_baseline_inventory(master_path, final_path)
+                        final_cohort_accepted = len(
+                            cohort_keys & post_inv["final_accepted"]
                         )
-            except Exception as exc:
-                # Classificação e checkpoints não são perdidos só porque o Excel
-                # está aberto ou houve falha de gravação.
-                baseline_warning = f"{type(exc).__name__}: {exc}"
-                LOG.error(
-                    "BASELINE EXCEL NÃO ATUALIZADA: %s",
-                    baseline_warning,
-                )
+                        expected_cohort_keys = _expected_cohort_accepted_after_run(
+                            cohort_keys=cohort_keys,
+                            final_accepted_at_start=cohort_final_accepted_keys_at_start,
+                            rows=rows,
+                            force_reprocess_keys=force_reprocess_keys,
+                        )
+                        equivalence_accepted_keys = _cohort_equivalence_accepted_keys(
+                            final_path=final_path,
+                            cohort_keys=cohort_keys,
+                        )
+                        expected_cohort_keys |= equivalence_accepted_keys
+                        expected_cohort_accepted = len(expected_cohort_keys)
+                        stats["cohort_final_accepted_at_end"] = final_cohort_accepted
+                        stats["cohort_expected_accepted_at_end"] = expected_cohort_accepted
+                        stats["cohort_equivalence_accepted_at_end"] = len(equivalence_accepted_keys)
+
+                        LOG.info(
+                            "BASELINE EXCEL ATUALIZADA | %s",
+                            " | ".join(
+                                f"{k}={v}" for k, v in baseline_stats.items()
+                            ),
+                        )
+                        LOG.info(
+                            "COHORT BASE FINAL | aceitos=%d/%d | esperado=%d | equivalencia=%d | review=%d",
+                            final_cohort_accepted,
+                            len(cohort),
+                            expected_cohort_accepted,
+                            len(equivalence_accepted_keys),
+                            int(stats.get("final_review", 0) or 0),
+                        )
+
+                        if final_path and final_cohort_accepted != expected_cohort_accepted:
+                            raise RuntimeError(
+                                "BASELINE_COHORT_MISMATCH: "
+                                f"Base Final possui {final_cohort_accepted} aceito(s) "
+                                f"no cohort, mas eram esperados {expected_cohort_accepted}. "
+                                "Classificacao_v3 e checkpoints foram preservados; "
+                                "a Base Final precisa ser reconciliada antes da próxima execução."
+                            )
+                except Exception as exc:
+                    # Classificação e checkpoints não são perdidos só porque o Excel
+                    # está aberto ou houve falha de gravação.
+                    baseline_warning = f"{type(exc).__name__}: {exc}"
+                    LOG.error(
+                        "BASELINE EXCEL NÃO ATUALIZADA: %s",
+                        baseline_warning,
+                    )
 
             summary = {
                 "Pipeline Version": PIPELINE_VERSION,
@@ -10024,30 +10071,33 @@ def run_pipeline(
                 raise RuntimeError("RECOVERY_BATCH_PAUSED: " + paused_reason)
 
         except KeyboardInterrupt:
-            try:
-                partial_baseline = persist_baseline_excels(
-                    rows=rows,
-                    master_path=master_path,
-                    final_path=final_path,
-                    input_path=input_path,
-                    rules=rules,
-                    reprocess=args.reprocess,
-                    force_reprocess_keys=force_reprocess_keys,
-                    cache_path=cache_path,
-                    cfg=cfg,
-                )
-                if partial_baseline:
-                    LOG.warning(
-                        "Interrompido, mas baseline Excel foi atualizada: %s",
-                        " | ".join(
-                            f"{k}={v}" for k, v in partial_baseline.items()
-                        ),
+            if output_only:
+                LOG.warning("OUTPUT_ONLY INTERRUPTED | saving durable checkpoints; no baseline export")
+            else:
+                try:
+                    partial_baseline = persist_baseline_excels(
+                        rows=rows,
+                        master_path=master_path,
+                        final_path=final_path,
+                        input_path=input_path,
+                        rules=rules,
+                        reprocess=args.reprocess,
+                        force_reprocess_keys=force_reprocess_keys,
+                        cache_path=cache_path,
+                        cfg=cfg,
                     )
-            except Exception as baseline_exc:
-                LOG.error(
-                    "Interrompido; baseline Excel não pôde ser atualizada: %s",
-                    baseline_exc,
-                )
+                    if partial_baseline:
+                        LOG.warning(
+                            "Interrompido, mas baseline Excel foi atualizada: %s",
+                            " | ".join(
+                                f"{k}={v}" for k, v in partial_baseline.items()
+                            ),
+                        )
+                except Exception as baseline_exc:
+                    LOG.error(
+                        "Interrompido; baseline Excel não pôde ser atualizada: %s",
+                        baseline_exc,
+                    )
 
             db.finish_run(
                 run_id,
@@ -11639,6 +11689,10 @@ def create_run(cfg,args):
     run.mkdir(parents=True,exist_ok=False)
     originals={k:{"path":str(p),"sha256":digest(p)} for k,p in sources.items() if p.is_file()}
     isolated=json.loads(json.dumps(cfg))
+    # During isolated overnight, durable classification output + SQLite are
+    # authoritative until human-audited, cohort-scoped canonical promotion.
+    # Never run the legacy full-baseline export during the paid worker.
+    isolated["_nightly_output_only"] = True
     files=isolated["files"]
     for k,p in sources.items():
         target=run/("source_"+k+p.suffix)
@@ -11755,7 +11809,12 @@ def outcome_audit(run,state,isolated):
     if state["stages"].get("classification",{}).get("log"):
         log=run/state["stages"]["classification"]["log"]
     logtext=log.read_text(encoding="utf-8",errors="replace") if log.is_file() else ""
-    log_checks={label:label in logtext for label in labels}
+    output_only = bool(isolated.get("_nightly_output_only", False))
+    log_checks=(
+        {"NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK":
+            "NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK" in logtext}
+        if output_only else {label:label in logtext for label in labels}
+    )
     useful_raw=sum(raw_states.get(x,0) for x in ("RAW_OK","RAW_OK_MERGED"))
     # The cohort audit must validate every result, not merely one useful RAW
     # entry and the appearance of success messages in a log.
@@ -11791,6 +11850,8 @@ def outcome_audit(run,state,isolated):
             and not protected_originals(state) and useful_raw==len(cohort)
             and not result_errors and all(log_checks.values()))
     result={"status":"PASS" if passed else "FAIL","cohort":len(cohort),
+            "classification_output_only":output_only,
+            "canonical_promotion_allowed":False,
             "missing_cohort_in_final":missing[:20],"missing_original_in_final":missing_existing[:20],
             "protected_manual_or_bi_changes":protected_changes[:20],
             "protected_changes_total":len(protected_changes),
