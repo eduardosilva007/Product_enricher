@@ -1,0 +1,29 @@
+name: Baseline 940 offline regression
+
+on:
+  push:
+    branches:
+      - fix/baseline-preservation-nightly-940-20261112
+  pull_request:
+    branches:
+      - feature/nightly-100-review-ci-20261112
+
+jobs:
+  offline-baseline-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install offline test dependencies
+        run: python -m pip install 'pandas>=2,<3' 'openpyxl>=3.1,<4'
+      - name: Check Python syntax
+        run: |
+          python -m py_compile pipeline_produtos.py
+          python -m py_compile tests/test_baseline_final_authority_regression.py
+          python -m py_compile tests/verify_baseline_940_readonly.py
+          python -m py_compile tests/verify_baseline_940_isolated_write.py
+      - name: Run synthetic baseline tests without APIs
+        run: python -m unittest discover -s tests -p test_baseline_final_authority_regression.py -v
