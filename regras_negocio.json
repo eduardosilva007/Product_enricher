@@ -1405,7 +1405,9 @@
         "router tool",
         "compact router",
         "trim router",
-        "laminate trimmer"
+        "laminate trimmer",
+        "wood trimmer",
+        "trimmer router"
       ]
     },
     "ROUTER": {
@@ -7268,10 +7270,7 @@
         "jet water pump",
         "jet pump"
       ],
-      "negative_aliases": [
-        "self priming",
-        "self-priming"
-      ],
+      "negative_aliases": [],
       "priority": 295
     },
     {
