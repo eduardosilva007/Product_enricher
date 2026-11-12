@@ -87,6 +87,31 @@ class PromoteIsolatedTenTests(unittest.TestCase):
             promote_isolated_ten(self.run,self.official,commit=True)
         self.assertEqual(self.official.read_bytes(),before)
 
+    def test_unrelated_duplicate_in_final_is_ignored(self):
+        wb=load_workbook(self.official)
+        ws=wb.active
+        ws.append([ws.cell(12,col).value for col in range(1,14)])
+        wb.save(self.official)
+        wb.close()
+        report=promote_isolated_ten(self.run,self.official,commit=True)
+        self.assertEqual(report["status"],"COMMITTED")
+        wb=load_workbook(self.official)
+        self.assertEqual(wb.active.max_row,13)
+        self.assertEqual(wb.active.cell(12,2).value,"KEEP-001")
+        self.assertEqual(wb.active.cell(13,2).value,"KEEP-001")
+        wb.close()
+
+    def test_duplicate_target_blocks(self):
+        wb=load_workbook(self.official)
+        ws=wb.active
+        ws.append([ws.cell(2,col).value for col in range(1,14)])
+        wb.save(self.official)
+        wb.close()
+        before=self.official.read_bytes()
+        with self.assertRaisesRegex(RuntimeError,"PROMOTE10_DUPLICATE_BUSINESS_KEY"):
+            promote_isolated_ten(self.run,self.official,commit=True)
+        self.assertEqual(self.official.read_bytes(),before)
+
     def test_incomplete_result_blocks(self):
         wb=load_workbook(self.output)
         wb.active.cell(2,11,"SIM")
