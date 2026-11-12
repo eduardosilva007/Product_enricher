@@ -162,7 +162,7 @@ class NightSelectionRegressionTests(unittest.TestCase):
             allow_previous_errors=True,
         )
         self.assertEqual([x["business_key"] for x in eligible],
-                         ["CLEAN", "MISSING", "SERPER", "429"])
+                         ["CLEAN", "SERPER", "429", "MISSING"])
         self.assertEqual(details["eligible_unique"], 4)
 
     def test_serper_permission_is_narrow(self):
