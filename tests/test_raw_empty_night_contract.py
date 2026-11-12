@@ -650,7 +650,13 @@ class RawEmptyNightTests(unittest.TestCase):
             self.assertEqual(after["reserved_jev_calls"],20)
             self.assertEqual(after["reserved_tokens"],1000)
             self.assertEqual(len(calls),2)
-            self.assertEqual(calls[1],str(target/"interrupted"))
+            # Windows tempfile can emit RUNNER~1 while Path.resolve() uses
+            # runneradmin for the SAME directory. Test filesystem identity,
+            # not a different textual spelling of an identical location.
+            self.assertTrue(
+                Path(calls[1]).samefile(target/"interrupted"),
+                f"Resumed a different run: {calls[1]} vs {target/'interrupted'}",
+            )
 
     def test_master_resume_blocks_ambiguous_pre_checkpoint_budget(self):
         import pipeline_produtos as master
