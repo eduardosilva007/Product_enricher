@@ -8457,6 +8457,24 @@ def _export_base_final(
         finally:
             store.close()
 
+    # Release gate: RAW_OK can need evidence review, but can never mean
+    # that Search returned no results. Catch stale Excel state before writing.
+    stale_raw_ok = out.loc[
+        out["Collection State"].isin([
+            "READY_FOR_CLASSIFICATION", "TARGET_EVIDENCE",
+            "PARTIAL_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE",
+            "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA"
+        ]) & out["Próxima Ação"].eq("REVISAR_SEM_RESULTADOS")
+        & ~out["Revisão B.I"].map(_is_bi_ok_value)
+        & ~out["Status"].map(_is_manual_status)
+    ]
+    if not stale_raw_ok.empty:
+        examples = list(zip(stale_raw_ok["Marca"].head(5), stale_raw_ok["Modelo"].head(5)))
+        raise RuntimeError(
+            "BASE_FINAL_STALE_NO_RESULTS_ON_RAW_OK: "
+            f"rows={len(stale_raw_ok)} examples={examples}"
+        )
+
     tmp = final_path.with_name(final_path.stem + f".tmp_{os.getpid()}" + final_path.suffix)
     final_path.parent.mkdir(parents=True, exist_ok=True)
     try:
