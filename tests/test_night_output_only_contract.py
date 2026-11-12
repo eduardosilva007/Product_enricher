@@ -263,9 +263,14 @@ class ArchivedLauncherTests(unittest.TestCase):
                       patch.object(core, "import_prior_reservations", return_value={}),
                       patch.object(core, "main", return_value=0) as runtime):
                     sys.argv = ["launcher", "--repo", str(repo), "--target", "20",
-                                "--execute-live"]
+                                "--execute-live", "--include-raw-missing",
+                                "--allow-reviewed-provider-errors",
+                                "--allow-serper-quota-errors"]
                     self.assertEqual(mod.main(), 0)
                     runtime.assert_called_once()
+                    self.assertIn("--night-include-raw-missing", sys.argv)
+                    self.assertIn("--night-allow-previous-errors", sys.argv)
+                    self.assertIn("--allow-prior-serper-quota-error", sys.argv)
                     self.assertEqual(core.OUT, repo / "piloto_argentina" / "controlled_night")
                     self.assertIn("--night-output-only", sys.argv)
                     self.assertIn("--campaign-review-before-promotion", sys.argv)
