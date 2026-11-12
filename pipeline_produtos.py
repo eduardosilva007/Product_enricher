@@ -8277,7 +8277,13 @@ def _export_base_final(
             continue
         complete = classified(row)
         approved = safe(row.get("Revisão")).upper() == "AUTO_APROVADO"
-        if approved and not complete:
+        # Do not downgrade a classification that satisfies the canonical
+        # baseline acceptance gate merely because a legacy row lacks Título
+        # Real. Title completeness is a review/enrichment signal; it is not
+        # an acceptance condition in _baseline_row_accepted. Applying a
+        # different rule here caused approved Final rows to disappear.
+        accepted_under_contract = _baseline_row_accepted(row, out)
+        if approved and not complete and not accepted_under_contract:
             out.at[idx, "Revisão"] = "REVISAR"
             out.at[idx, "Próxima Ação"] = "REVISAR_CLASSIFICACAO_INCOMPLETA"
             repaired_approval += 1
