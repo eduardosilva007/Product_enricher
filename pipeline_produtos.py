@@ -10653,7 +10653,7 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
     def rows_by_key(ws, h, target_keys=None):
         # Canonical workbooks may contain legacy duplicate keys unrelated to
         # this ten-SKU promotion. Never repair or reject those unrelated rows.
-        # Duplicate keys for any promoted SKU remain a hard stop.
+        # Preserve all duplicate rows for the ten targets, never drop rows.
         out = {}
         for row_idx in range(2, ws.max_row + 1):
             brand = safe(ws.cell(row_idx, h["Marca"]).value)
@@ -10665,9 +10665,7 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
             key = business_key(brand, model)
             if target_keys is not None and key not in target_keys:
                 continue
-            if key in out:
-                raise RuntimeError("PROMOTE10_DUPLICATE_BUSINESS_KEY:" + key)
-            out[key] = row_idx
+            out.setdefault(key, []).append(row_idx)
         return out
 
     def sheet_digest(ws):
@@ -10710,11 +10708,15 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
         if input_keys != set(results):
             raise RuntimeError("PROMOTE10_INPUT_MISMATCH")
 
-        sws, sh = business_sheet(source_wb)
+        baseline_ws, baseline_h = business_sheet(source_wb)
+        sws, sh = result_ws, rh
         ows, oh = business_sheet(official_wb)
         source_rows = rows_by_key(sws, sh, set(results))
+        isolated_rows = rows_by_key(baseline_ws, baseline_h, set(results))
         official_rows = rows_by_key(ows, oh, set(results))
-        if not set(results).issubset(source_rows) or not set(results).issubset(official_rows):
+        if (set(results) != set(source_rows)
+                or not set(results).issubset(isolated_rows)
+                or not set(results).issubset(official_rows)):
             raise RuntimeError("PROMOTE10_MISSING_KEYS_IN_FINAL")
 
         required = ("O que é (Tipo)", "Alimentação", "Category General", "FAMILY")
@@ -10734,11 +10736,7 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
         transferable = [name for name in allowed if name in sh and name in oh]
         changes = []
         for key in sorted(results):
-            src_row, dst_row = source_rows[key], official_rows[key]
-            current_bi = safe(ows.cell(dst_row, oh.get("Revisão B.I", -1)).value) if "Revisão B.I" in oh else ""
-            current_status = safe(ows.cell(dst_row, oh["Status"]).value) if "Status" in oh else ""
-            if current_bi.upper() == "OK" or current_status.upper() == "MANUAL":
-                raise RuntimeError("PROMOTE10_HUMAN_LOCK:" + key)
+            src_row = source_rows[key][0]
             source_values = {name: sws.cell(src_row, sh[name]).value for name in required}
             if not all(safe(x) for x in source_values.values()):
                 raise RuntimeError("PROMOTE10_EMPTY_CLASSIFICATION:" + key)
@@ -10751,14 +10749,29 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
             src_res = safe(sws.cell(src_row, sh["Resolution State"]).value) if "Resolution State" in sh else ""
             if src_res and src_res.upper() != "RESOLVED":
                 raise RuntimeError("PROMOTE10_SOURCE_NOT_RESOLVED:" + key)
-            for name in transferable:
-                source_cell = sws.cell(src_row, sh[name])
-                dest_cell = ows.cell(dst_row, oh[name])
-                if source_cell.data_type == "f":
-                    raise RuntimeError("PROMOTE10_SOURCE_FORMULA:" + key + ":" + name)
-                if source_cell.value != dest_cell.value:
-                    changes.append((key, name, dest_cell.value, source_cell.value))
-                    dest_cell.value = source_cell.value
+            # All isolated baseline duplicates must agree with the adjudicated
+            # classification result, or promotion is blocked.
+            for baseline_row in isolated_rows[key]:
+                for name in required:
+                    if name not in baseline_h:
+                        raise RuntimeError("PROMOTE10_ISOLATED_COLUMN_MISSING:" + name)
+                    value = baseline_ws.cell(baseline_row, baseline_h[name]).value
+                    if value is not None and safe(value) and safe(value) != safe(source_values[name]):
+                        raise RuntimeError("PROMOTE10_ISOLATED_CONFLICT:" + key + ":" + name)
+            # Update every official occurrence, but abort if ANY has a human lock.
+            for dst_row in official_rows[key]:
+                current_bi = safe(ows.cell(dst_row, oh["Revisão B.I"]).value) if "Revisão B.I" in oh else ""
+                current_status = safe(ows.cell(dst_row, oh["Status"]).value) if "Status" in oh else ""
+                if current_bi.upper() == "OK" or current_status.upper() == "MANUAL":
+                    raise RuntimeError("PROMOTE10_HUMAN_LOCK:" + key)
+                for name in transferable:
+                    source_cell = sws.cell(src_row, sh[name])
+                    dest_cell = ows.cell(dst_row, oh[name])
+                    if source_cell.data_type == "f":
+                        raise RuntimeError("PROMOTE10_SOURCE_FORMULA:" + key + ":" + name)
+                    if source_cell.value != dest_cell.value:
+                        changes.append((key, name, dest_cell.value, source_cell.value))
+                        dest_cell.value = source_cell.value
         # Reopen and verify the full staged workbook before touching the original.
         from tempfile import NamedTemporaryFile
         with NamedTemporaryFile(prefix=".promote10_", suffix=".xlsx",
@@ -10772,11 +10785,14 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
             if set(check_rows) != set(official_rows):
                 raise RuntimeError("PROMOTE10_STAGED_KEY_INTEGRITY")
             for key in results:
-                for name in transferable:
-                    original_cell = sws.cell(source_rows[key], sh[name])
-                    staged_cell = check_ws.cell(check_rows[key], check_h[name])
-                    if staged_cell.value != original_cell.value:
-                        raise RuntimeError("PROMOTE10_STAGED_VALUE_MISMATCH:" + key + ":" + name)
+                if len(check_rows[key]) != len(official_rows[key]):
+                    raise RuntimeError("PROMOTE10_STAGED_ROWCOUNT_MISMATCH:" + key)
+                for row_idx in check_rows[key]:
+                    for name in transferable:
+                        original_cell = sws.cell(source_rows[key][0], sh[name])
+                        staged_cell = check_ws.cell(row_idx, check_h[name])
+                        if staged_cell.value != original_cell.value:
+                            raise RuntimeError("PROMOTE10_STAGED_VALUE_MISMATCH:" + key + ":" + name)
         finally:
             check_wb.close()
 
