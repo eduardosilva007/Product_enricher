@@ -238,8 +238,16 @@ class ArchivedLauncherTests(unittest.TestCase):
                 path = repo / (name + ".xlsx")
                 path.write_bytes(b"dryrun-stub")
                 files[name] = path.name
+            (repo / "regras_negocio.json").write_text(
+                json.dumps({"VERSION": "test-reviewed"}), encoding="utf-8"
+            )
+            (snapshot / "collection_quality_policy.json").write_text(
+                json.dumps({"VERSION": "test-policy"}), encoding="utf-8"
+            )
             (repo / "pipeline_config.json").write_text(
-                json.dumps({"files": files}), encoding="utf-8"
+                json.dumps({"files": files,
+                            "release_contract": {"rules_version": "test-reviewed"}}),
+                encoding="utf-8"
             )
             fake_audit = {"candidate_rows": [
                 {"business_key": "test|%d" % i} for i in range(20)
@@ -247,6 +255,8 @@ class ArchivedLauncherTests(unittest.TestCase):
             argv = list(sys.argv)
             try:
                 with (patch.object(mod, "SNAPSHOT", snapshot),
+                      patch.object(core, "Rules", return_value=SimpleNamespace(version="test-reviewed")),
+                      patch.object(core, "validate_release_contract", return_value=[]),
                       patch.object(core, "configured_slots", return_value=[object()]),
                       patch.object(core, "overnight_audit", return_value=fake_audit),
                       patch.object(core, "prior_attempts_in_database", return_value=set()),
@@ -258,6 +268,42 @@ class ArchivedLauncherTests(unittest.TestCase):
                     self.assertFalse((snapshot / "night_output_only_local_config.json").exists())
             finally:
                 sys.argv = argv
+
+    def test_launcher_blocks_stale_rules_before_any_paid_calls(self):
+        source = Path(__file__).resolve().parents[1] / "scripts" / "launch_night_output_only.py"
+        spec = importlib.util.spec_from_file_location("launch_rules_contract_probe", source)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            original=root/"original"
+            snapshot=root/"snapshot"
+            original.mkdir()
+            snapshot.mkdir()
+            (snapshot/"pipeline_produtos.py").write_text("# stub",encoding="utf-8")
+            files={}
+            for name in ("input","cache","master","final","classification_db"):
+                path=original/(name+".xlsx")
+                path.write_bytes(b"stub")
+                files[name]=path.name
+            (original/"pipeline_config.json").write_text(
+                json.dumps({"files":files,
+                            "release_contract":{"rules_version":"approved-v3.0.21"}}),
+                encoding="utf-8"
+            )
+            (original/"regras_negocio.json").write_text(
+                json.dumps({"VERSION":"old-v3.0.13"}),encoding="utf-8"
+            )
+            previous=list(sys.argv)
+            try:
+                with (patch.object(mod,"SNAPSHOT",snapshot),
+                      patch.object(core,"main") as paid):
+                    sys.argv=["launcher","--repo",str(original),"--target","5","--execute-live"]
+                    with self.assertRaisesRegex(RuntimeError,"RELEASE_RULES_MISMATCH_BEFORE_SEARCH"):
+                        mod.main()
+                    paid.assert_not_called()
+            finally:
+                sys.argv=previous
 
     def test_archived_code_preserves_real_history_and_config(self):
         source = Path(__file__).resolve().parents[1] / "scripts" / "launch_night_output_only.py"
@@ -277,8 +323,16 @@ class ArchivedLauncherTests(unittest.TestCase):
                 src = repo / (label + (".sqlite" if label in ("cache", "classification_db") else ".xlsx"))
                 src.write_bytes(b"test-bytes")
                 files[label] = src.name
+            (repo / "regras_negocio.json").write_text(
+                json.dumps({"VERSION": "test-reviewed"}), encoding="utf-8"
+            )
+            (snapshot / "collection_quality_policy.json").write_text(
+                json.dumps({"VERSION": "test-policy"}), encoding="utf-8"
+            )
             (repo / "pipeline_config.json").write_text(
-                json.dumps({"files": files}), encoding="utf-8"
+                json.dumps({"files": files,
+                            "release_contract": {"rules_version": "test-reviewed"}}),
+                encoding="utf-8"
             )
             old_argv = list(sys.argv)
             previous_out = core.OUT
@@ -290,6 +344,8 @@ class ArchivedLauncherTests(unittest.TestCase):
                     "error_rows": [], "summary": {},
                 }
                 with (patch.object(mod, "SNAPSHOT", snapshot),
+                      patch.object(core, "Rules", return_value=SimpleNamespace(version="test-reviewed")),
+                      patch.object(core, "validate_release_contract", return_value=[]),
                       patch.object(core, "configured_slots", return_value=[object()]),
                       patch.object(core, "overnight_audit", return_value=fake_audit),
                       patch.object(core, "prior_attempts_in_database", return_value=set()),
@@ -307,6 +363,10 @@ class ArchivedLauncherTests(unittest.TestCase):
                     self.assertEqual(core.OUT, repo / "piloto_argentina" / "controlled_night")
                     self.assertIn("--night-output-only", sys.argv)
                     self.assertIn("--campaign-review-before-promotion", sys.argv)
+                    rules_file = repo / "regras_negocio.json"
+                    self.assertEqual(
+                        sys.argv[sys.argv.index("--rules")+1], str(rules_file)
+                    )
                     snap_cfg = json.loads((snapshot / "night_output_only_local_config.json").read_text(
                         encoding="utf-8"))
                     self.assertEqual(snap_cfg["files"]["master"], str(repo / files["master"]))
