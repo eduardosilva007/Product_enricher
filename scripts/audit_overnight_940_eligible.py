@@ -10,17 +10,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pipeline_produtos import OUT, overnight_audit, read_json, source_paths
+from pipeline_produtos import overnight_audit, read_json
 
 
 def main() -> int:
-    cfg = read_json(ROOT / "pipeline_config.json")
-    paths = source_paths(cfg)
+    # When executed from git-archive preflight, ROOT is ONLY the code snapshot.
+    # Source workbooks and campaign ledgers must come from the user's REAL repo.
+    if len(sys.argv) != 2:
+        raise RuntimeError("USAGE: audit_overnight_940_eligible.py FAILED_RUN_DIR")
+    run_dir = Path(sys.argv[1]).resolve()
+    if not (run_dir / "isolated_config.json").is_file():
+        raise RuntimeError("ORIGINAL_FAILED_RUN_NOT_FOUND")
+    repo_root = run_dir.parents[2]
+    config_file = repo_root / "pipeline_config.json"
+    cfg = read_json(config_file)
+    paths = {
+        k: (repo_root / str(cfg["files"][k])).resolve()
+        for k in ("input", "cache", "master", "final")
+    }
+    if any(not p.is_file() for p in paths.values()):
+        raise RuntimeError("ORIGINAL_CANONICAL_INPUT_CACHE_OR_BASELINE_MISSING")
     result = overnight_audit(
         paths["input"], paths["cache"], paths["master"], paths["final"]
     )
     prior_keys = set()
-    history_files = sorted(OUT.glob("*/run_report.json"))
+    history_files = sorted(run_dir.parent.glob("*/run_report.json"))
     for file in history_files:
         report = json.loads(file.read_text(encoding="utf-8"))
         if report.get("stages", {}).get("collection", {}).get("attempts", 0):
@@ -40,6 +54,7 @@ def main() -> int:
     eligible = normal | serper_rescues
     print(json.dumps({
         "mode": "READONLY_ELIGIBLE_CAMPAIGN_AUDIT",
+        "original_repo_root": str(repo_root),
         "normal_new_candidates": len(normal),
         "serper_quota_error_rescue": len(serper_rescues),
         "eligible_unique_skus": len(eligible),
