@@ -10427,6 +10427,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Complete and audit isolated batches, NEVER auto-promote to canonical files; explicit promotion remains separate")
     p.add_argument("--night-output-only", action="store_true",
                    help="Isolated 1..20 SKU night only: retain classifier XLSX+SQLite, defer legacy Final/Master export; requires review-before-promotion")
+    p.add_argument("--night-include-raw-missing", action="store_true",
+                   help="Explicitly allow never-collected RAW_MISSING SKUs from the input; excludes historical attempts and human locks")
+    p.add_argument("--night-allow-previous-errors", action="store_true",
+                   help="Explicitly authorize ONE new paid Search for RAW_EMPTY with an old provider error but no controlled-night attempt; may incur charges")
     p.add_argument("--campaign-jev-budget", type=int, default=0)
     p.add_argument("--campaign-token-budget", type=int, default=0)
     p.add_argument("--campaign-resume-dir", default="", help="Existing campaign manifest directory; never starts new unaudited work")
@@ -11410,7 +11414,7 @@ def overnight_audit(input_path,cache_path,master_path,final_path):
     protected=load_baseline_inventory(master_path,final_path)["hard_lock"]
     processed=load_baseline_inventory(master_path,final_path)["processed"]
     rows=read_input_rows(input_path)
-    seen=set();summary=Counter();eligible=[];errors=[];examples=[]
+    seen=set();summary=Counter();eligible=[];errors=[];missing_rows=[];examples=[]
     with closing(TavilyReadOnlyStore(cache_path)) as store:
         for row in rows:
             if not row.valid:
@@ -11420,6 +11424,19 @@ def overnight_audit(input_path,cache_path,master_path,final_path):
             seen.add(row.key)
             raw=store.get(row.brand_original,row.model_original)
             summary["state_"+raw.state]+=1
+            if raw.state=="RAW_MISSING":
+                if row.key in protected:
+                    summary["raw_missing_hard_locked"]+=1
+                elif row.key in processed:
+                    summary["raw_missing_processed"]+=1
+                else:
+                    missing_rows.append({
+                        "brand":row.brand_original,"model":row.model_original,
+                        "business_key":row.key,
+                        "prior_state":"RAW_MISSING","provider":"","previous_error":"",
+                    })
+                    summary["raw_missing_unattempted_input"]+=1
+                continue
             if raw.state!="RAW_EMPTY":continue
             payload=raw.payload or {}
             coll=payload.get("_collection",{}) if isinstance(payload,dict) else {}
@@ -11446,9 +11463,59 @@ def overnight_audit(input_path,cache_path,master_path,final_path):
     return {"unique_input_keys":len(seen),"summary":dict(sorted(summary.items())),
             "recollectable_without_prior_error":len(eligible),
             "previous_search_errors_requiring_explicit_review":len(errors),
-            "candidate_rows":eligible,"error_rows":errors,"examples":examples,
+            "candidate_rows":eligible,"error_rows":errors,
+            "missing_rows":missing_rows,"examples":examples,
             "interpretation":"RAW_EMPTY does not prove a completed Search, and requerying can incur charges.",
             "search_calls":0,"auto_approval":False}
+
+def select_overnight_eligible(audit, prior_attempts, *,
+                              include_raw_missing=False,
+                              allow_serper_quota_error=False,
+                              allow_previous_errors=False):
+    """One candidate policy used by BOTH offline launcher and paid create_run.
+
+    Prior real pilot attempts are NEVER eligible, even with retry overrides.
+    RAW_MISSING and old provider errors require independent explicit permission.
+    """
+    prior=set(prior_attempts)
+    counts=Counter()
+    chosen=[]
+    selected=set()
+    candidates=[
+        ("raw_empty_clean", audit.get("candidate_rows", []), True),
+        ("raw_missing_new", audit.get("missing_rows", []), bool(include_raw_missing)),
+    ]
+    for label, items, authorized in candidates:
+        for item in items:
+            key=item["business_key"]
+            if key in prior:
+                counts[label+"_previous_campaign"]+=1
+            elif not authorized:
+                counts[label+"_requires_opt_in"]+=1
+            elif key not in selected:
+                chosen.append(item)
+                selected.add(key)
+                counts[label+"_selected"]+=1
+    for item in audit.get("error_rows", []):
+        key=item["business_key"]
+        is_serper_quota=(
+            safe(item.get("provider")).casefold()=="serper"
+            and safe(item.get("prior_state")).upper()=="REQUEST_ATTEMPTED_NO_AUTO_RETRY"
+            and "not enough credits" in safe(item.get("previous_error")).casefold()
+        )
+        if key in prior:
+            counts["prior_provider_error_previous_campaign"]+=1
+        elif not (allow_previous_errors or
+                  (allow_serper_quota_error and is_serper_quota)):
+            counts["prior_provider_error_requires_opt_in"]+=1
+        elif key not in selected:
+            chosen.append(item)
+            selected.add(key)
+            counts["prior_provider_error_selected"]+=1
+    counts["eligible_unique"] = len(chosen)
+    counts["historical_attempts_excluded_unique"] = len(prior)
+    return chosen,dict(sorted(counts.items()))
+
 
 def overnight_examine(run:Path):
     import pandas as pd
@@ -11678,15 +11745,21 @@ def create_run(cfg,args):
                     prior_attempts.update(history.get("cohort_keys",[]))
             except (OSError,ValueError,TypeError):
                 raise RuntimeError(f"Unreadable previous campaign report: {prior_report}")
-    eligible=[x for x in result["candidate_rows"] if x["business_key"] not in prior_attempts]
-    if args.allow_prior_serper_quota_error:
-        eligible.extend(x for x in result["error_rows"]
-                        if x["business_key"] not in prior_attempts
-                        and x["provider"].lower()=="serper"
-                        and x["prior_state"]=="REQUEST_ATTEMPTED_NO_AUTO_RETRY"
-                        and "not enough credits" in x["previous_error"].lower())
+    eligible, selection_stats=select_overnight_eligible(
+        result, prior_attempts,
+        include_raw_missing=bool(getattr(args,"night_include_raw_missing",False)),
+        allow_serper_quota_error=bool(args.allow_prior_serper_quota_error),
+        allow_previous_errors=bool(getattr(args,"night_allow_previous_errors",False)),
+    )
+    LOG.info("OVERNIGHT SELECTOR | %s",
+             " | ".join(f"{k}={v}" for k,v in selection_stats.items()))
     eligible=eligible[:args.search_budget]
-    if not eligible:raise RuntimeError("No eligible RAW_EMPTY candidates. Review raw_empty_audit.json")
+    if not eligible:
+        raise RuntimeError(
+            "NO_ELIGIBLE_UNATTEMPTED_PRODUCTS: "
+            + json.dumps({"source_states":result["summary"],
+                          "selection":selection_stats},ensure_ascii=False)
+        )
     run=OUT/(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")+"_"+uuid.uuid4().hex[:8])
     run.mkdir(parents=True,exist_ok=False)
     originals={k:{"path":str(p),"sha256":digest(p)} for k,p in sources.items() if p.is_file()}
@@ -11741,6 +11814,9 @@ def create_run(cfg,args):
            "cohort_keys":[r["business_key"] for r in eligible],
            "excluded_prior_pilot_cohorts":len(prior_attempts),
            "prior_reservation_stats":prior_reservation_stats,
+           "selection_stats":selection_stats,
+           "night_include_raw_missing":bool(getattr(args,"night_include_raw_missing",False)),
+           "night_allow_previous_errors":bool(getattr(args,"night_allow_previous_errors",False)),
            "prior_serper_quota_error_rescue_authorized":bool(args.allow_prior_serper_quota_error),
            "search_provider_exclusion":["serper"],
            "stages":{},"production_approved":False,"mass_approval":"BLOCKED_REVIEW_REQUIRED"}
@@ -12693,6 +12769,10 @@ def overnight_campaign(args, cfg, rules=None):
             raise ValueError("Resume must preserve review-before-promotion flag")
         if state.get("night_output_only", False) != bool(getattr(args, "night_output_only", False)):
             raise ValueError("Resume must preserve night-output-only mode")
+        if state.get("night_include_raw_missing", False) != bool(getattr(args, "night_include_raw_missing", False)):
+            raise ValueError("Resume must preserve raw-missing authorization")
+        if state.get("night_allow_previous_errors", False) != bool(getattr(args, "night_allow_previous_errors", False)):
+            raise ValueError("Resume must preserve previous-error retry authorization")
     else:
         root = OUT / "campaigns" / (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8])
@@ -12706,6 +12786,8 @@ def overnight_campaign(args, cfg, rules=None):
                  "serper_rescue": args.allow_prior_serper_quota_error,
                  "review_before_promotion": bool(getattr(args, "campaign_review_before_promotion", False)),
                  "night_output_only": bool(getattr(args, "night_output_only", False)),
+                 "night_include_raw_missing": bool(getattr(args, "night_include_raw_missing", False)),
+                 "night_allow_previous_errors": bool(getattr(args, "night_allow_previous_errors", False)),
                  "reserved_jev_calls": 0, "reserved_tokens": 0,
                  "audited_products": 0, "batches": [], "active_run": "",
                  "pending_run_creation": False}
