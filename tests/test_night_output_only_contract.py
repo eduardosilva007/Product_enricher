@@ -386,7 +386,7 @@ class ArchivedLauncherTests(unittest.TestCase):
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             repo = root / "original"
             snapshot = root / "snapshot"
             (repo / "piloto_argentina" / "controlled_night").mkdir(parents=True)
