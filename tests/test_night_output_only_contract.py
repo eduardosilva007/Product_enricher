@@ -220,6 +220,69 @@ class NightSelectionRegressionTests(unittest.TestCase):
         self.assertIn("core.select_overnight_eligible(", source)
 
 
+class ReviewedRulesPropagationTests(unittest.TestCase):
+    @staticmethod
+    def _build_run(tmp, *, sha_correct=True):
+        import hashlib
+        root=Path(tmp)
+        run=root/"controlled_night"/"test"
+        run.mkdir(parents=True)
+        rules=root/"reviewed_rules.json"
+        rules.write_text('{"VERSION":"approved-v3.0.21"}',encoding="utf-8")
+        digest=hashlib.sha256(rules.read_bytes()).hexdigest()
+        if not sha_correct:
+            digest="0"*64
+        isolated={"files":{
+            "input":str(run/"raw_empty_cohort.xlsx"),
+            "master":str(run/"source_master.xlsx"),
+            "final":str(run/"source_final.xlsx"),
+            "cache":str(run/"source_cache.sqlite"),
+            "classification_db":str(run/"source_db.sqlite"),
+            "output":str(run/"classification_output.xlsx"),
+            "inventory_output":str(run/"inventory_output.xlsx"),
+        },"_nightly_rules_path":str(rules),
+           "_nightly_rules_sha256":digest}
+        state={"stages":{},"budget":{"search":2,"jev_calls":3,"tokens":5000},
+               "cohort_count":2,"cohort_keys":["abc|1","abc|2"]}
+        return run,state,isolated,rules
+
+    def test_collect_and_classify_workers_receive_same_approved_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run,state,isolated,rules=self._build_run(tmp)
+            args=SimpleNamespace(execute_live=True,resume_dir="",
+                search_budget=2,llm_budget=3,token_budget=5000,timeout_minutes=5)
+            commands=[]
+            def stage(run_path,run_state,label,argv,timeout):
+                commands.append((label,list(argv)))
+                run_state["stages"][label]={"status":"PASS","attempts":1}
+                return True
+            with (patch.object(core,"gate"),
+                  patch.object(core,"create_run",return_value=(run,state,isolated)),
+                  patch.object(core,"protected_originals",return_value=[]),
+                  patch.object(core,"run_stage",side_effect=stage),
+                  patch.object(core,"outcome_audit",return_value=True)):
+                self.assertEqual(core.overnight_run_one(args,{}),0)
+            self.assertEqual([item[0] for item in commands],["collection","classification"])
+            for _,argv in commands:
+                self.assertEqual(argv[argv.index("--rules")+1],str(rules))
+                self.assertIn("--config",argv)
+
+    def test_changed_reviewed_rules_block_before_any_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run,state,isolated,_=self._build_run(tmp,sha_correct=False)
+            args=SimpleNamespace(execute_live=True,resume_dir="",
+                search_budget=2,llm_budget=3,token_budget=5000,timeout_minutes=5)
+            with (patch.object(core,"gate"),
+                  patch.object(core,"create_run",return_value=(run,state,isolated)),
+                  patch.object(core,"protected_originals",return_value=[]),
+                  patch.object(core,"run_stage") as paid):
+                with self.assertRaisesRegex(
+                    RuntimeError,"NIGHTLY_REVIEWED_RULES_CHANGED_SINCE_PREFLIGHT"
+                ):
+                    core.overnight_run_one(args,{})
+                paid.assert_not_called()
+
+
 class ArchivedLauncherTests(unittest.TestCase):
     def test_launcher_default_does_not_invoke_live_runtime(self):
         source = Path(__file__).resolve().parents[1] / "scripts" / "launch_night_output_only.py"
