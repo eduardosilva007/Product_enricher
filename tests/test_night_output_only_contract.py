@@ -61,6 +61,36 @@ class NightOutputOnlyModeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "OUTPUT_ONLY_ISOLATED_PATH_CONTRACT_FAILED"):
                 core.run_pipeline(args, cfg, rules=None)
 
+    def test_create_run_reads_reservations_from_live_history_not_snapshot_default(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            historical_root = root / "real_history"
+            historical_root.mkdir()
+            sources = {}
+            for label in ("input", "cache", "master", "final", "classification_db"):
+                path = root / (label + (".sqlite" if label in ("cache", "classification_db") else ".xlsx"))
+                path.write_bytes(b"test-stub")
+                sources[label] = path
+            audited = {
+                "candidate_rows": [{"brand": "ABC", "model": "ONE", "business_key": "abc|one"}],
+                "error_rows": [], "summary": {},
+            }
+            options = SimpleNamespace(
+                allow_prior_serper_quota_error=False, search_budget=1,
+                llm_budget=1, token_budget=2000, night_output_only=True,
+            )
+            with (patch.object(core, "OUT", historical_root),
+                  patch.object(core, "source_paths", return_value=sources),
+                  patch.object(core, "overnight_audit", return_value=audited),
+                  patch.object(core, "snapshot", side_effect=shutil.copy2),
+                  patch.object(core, "import_prior_reservations", return_value={}) as imported):
+                run, _, isolated = core.create_run({"files": {}}, options)
+            imported.assert_called_once()
+            self.assertEqual(imported.call_args.args[1], historical_root)
+            self.assertEqual(run.parent, historical_root)
+            self.assertTrue(isolated["_nightly_output_only"])
+
     def test_output_only_review_manifest_and_resume_check_are_present(self):
         from inspect import getsource
         create_run_source = getsource(core.create_run)
