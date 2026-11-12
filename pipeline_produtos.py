@@ -12042,7 +12042,18 @@ def overnight_run_one(args, cfg, on_run_created=None):
         on_run_created(run)
     altered=protected_originals(state)
     if altered:raise RuntimeError(f"Original source files changed since campaign started: {altered}")
+    # Every worker must load the same reviewed rules as the parent. The
+    # archive's bundled taxonomy can be older than the real approved one.
+    rules_file = Path(isolated.get("_nightly_rules_path", str(ROOT/"regras_negocio.json")))
+    expected_sha = isolated.get("_nightly_rules_sha256", "")
+    if expected_sha:
+        if not rules_file.is_file() or digest(rules_file) != expected_sha:
+            raise RuntimeError(
+                "NIGHTLY_REVIEWED_RULES_CHANGED_SINCE_PREFLIGHT: "
+                "refusing paid Search/JEV until exact taxonomy is restored"
+            )
     base=[sys.executable,str(ROOT/"pipeline_produtos.py"),"--config",str(run/"isolated_config.json"),
+          "--rules",str(rules_file),
           "--input",isolated["files"]["input"],"--cache",isolated["files"]["cache"],
           "--master",isolated["files"]["master"],"--final",isolated["files"]["final"],
           "--db",isolated["files"]["classification_db"],"--yes"]
