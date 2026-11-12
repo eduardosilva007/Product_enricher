@@ -4330,6 +4330,20 @@ class DeterministicEngine:
         fields: Dict[str, List[str]] = defaultdict(list)
         source_types = set(src.type_hits)
         output_voltage_context = bool(source_types.intersection(self.rules.output_voltage_not_input_power_types))
+        # An explicitly labelled input-power specification provides useful
+        # CORDED evidence; bare wattage or the adjective "electric" does NOT.
+        # Do not infer mains power in battery/charger contexts or for generators.
+        spec_input = re.search(
+            r"\\b(?:rated\\s+power\\s+input|power\\s+input|input)\\s*"
+            r"(?:\\(\\s*w\\s*\\))?\\s*[:=]?\\s*"
+            r"(?:\\(\\s*w\\s*\\)\\s*[:=]?\\s*)?"
+            r"(?:[0-9][0-9,. ]{0,8}\\s*w?\\b)",
+            combined,
+        )
+        battery_context = any(
+            contains_alias_prepared(combined, x)
+            for x in ("cordless", "lithium battery", "battery powered", "battery operated", "li-ion")
+        )
 
         for power, data in self.rules.power_rules.items():
             if any(contains_alias_prepared(combined, x) for x in (data.get("negative_keywords", []) or [])):
@@ -4349,6 +4363,20 @@ class DeterministicEngine:
                             fields[power].append("TITLE")
                         if in_body:
                             fields[power].append("BODY")
+            # This is an additive, model-anchored specification signal.
+            if (power == "CORDED" and spec_input and not battery_context
+                    and not output_voltage_context):
+                by_group["input_spec_keywords"].append("[RATED_INPUT_WATTS]")
+                # The field is BODY unless the label is genuinely in TITLE.
+                if re.search(
+                    r"\\b(?:rated\\s+power\\s+input|power\\s+input|input)\\s*"
+                    r"(?:\\(\\s*w\\s*\\))?\\s*[:=]?\\s*"
+                    r"(?:\\(\\s*w\\s*\\)\\s*[:=]?\\s*)?"
+                    r"[0-9][0-9,. ]{0,8}\\s*w?\\b", title_fold
+                ):
+                    fields[power].append("TITLE")
+                else:
+                    fields[power].append("BODY")
             positive = [x for vals in by_group.values() for x in vals]
             if not positive:
                 continue
@@ -4594,7 +4622,13 @@ def _combo_kit_components(rules: Rules, s1: Stage1Result) -> List[str]:
                  or "BODY" in (src.type_evidence_fields.get(t, []) or []))
         }
         distinct = _collapse_related_primary_types(rules, explicit)
-        if len(distinct) >= min_types:
+        # Multiple TYPE aliases on a product page do not prove the SKU
+        # is a kit (e.g. a JIGSAW page with an unrelated circular-saw advert).
+        # Require an explicit combo expression in target-anchored evidence.
+        terms = [safe(t) for t in (policy.get("combo_terms", []) or []) if safe(t)]
+        combo_explicit = any(contains_alias_prepared(norm_text(src.title), t)
+                             for t in terms)
+        if len(distinct) >= min_types and combo_explicit:
             return distinct
     return []
 
@@ -4616,7 +4650,9 @@ def choose_combo_title(rules: Rules, s1: Stage1Result) -> Tuple[str, str]:
             and ("TITLE" in (src.type_evidence_fields.get(t, []) or [])
                  or "BODY" in (src.type_evidence_fields.get(t, []) or []))
         }
-        if len(_collapse_related_primary_types(rules, explicit)) >= min_types:
+        terms = [safe(t) for t in (policy.get("combo_terms", []) or []) if safe(t)]
+        if (len(_collapse_related_primary_types(rules, explicit)) >= min_types
+                and any(contains_alias_prepared(norm_text(src.title), t) for t in terms)):
             candidates.append(src)
     if not candidates:
         return "", ""
