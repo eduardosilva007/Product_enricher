@@ -63,3 +63,6 @@ jobs:
 
       - name: Verify RAW_OK baseline synchronization on Windows
         run: python -m unittest discover -s tests -p "test_baseline_final_authority_regression.py" -v
+
+      - name: Verify physical BI lock audit on Windows
+        run: python -m unittest discover -s tests -p "test_940_exact_human_audit.py" -v
