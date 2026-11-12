@@ -71,8 +71,8 @@ def exact_human_rows(path):
 def human_examples(counter, limit=12):
     return [
         {"Marca": signature[0], "Modelo": signature[1],
-         "Status": signature[7], "Revisão": signature[8],
-         "Revisão B.I": signature[9], "occurrences": count}
+         **dict(zip(_HUMAN_FIELDS, signature[2:])),
+         "occurrences": count}
         for signature, count in list(counter.items())[:limit]
     ]
 
