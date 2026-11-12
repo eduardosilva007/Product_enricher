@@ -10650,7 +10650,10 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
                 return ws, h
         raise RuntimeError("PROMOTE10_BUSINESS_SHEET_NOT_FOUND")
 
-    def rows_by_key(ws, h):
+    def rows_by_key(ws, h, target_keys=None):
+        # Canonical workbooks may contain legacy duplicate keys unrelated to
+        # this ten-SKU promotion. Never repair or reject those unrelated rows.
+        # Duplicate keys for any promoted SKU remain a hard stop.
         out = {}
         for row_idx in range(2, ws.max_row + 1):
             brand = safe(ws.cell(row_idx, h["Marca"]).value)
@@ -10660,6 +10663,8 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
             if not brand or not model:
                 continue
             key = business_key(brand, model)
+            if target_keys is not None and key not in target_keys:
+                continue
             if key in out:
                 raise RuntimeError("PROMOTE10_DUPLICATE_BUSINESS_KEY:" + key)
             out[key] = row_idx
@@ -10707,8 +10712,8 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
 
         sws, sh = business_sheet(source_wb)
         ows, oh = business_sheet(official_wb)
-        source_rows = rows_by_key(sws, sh)
-        official_rows = rows_by_key(ows, oh)
+        source_rows = rows_by_key(sws, sh, set(results))
+        official_rows = rows_by_key(ows, oh, set(results))
         if not set(results).issubset(source_rows) or not set(results).issubset(official_rows):
             raise RuntimeError("PROMOTE10_MISSING_KEYS_IN_FINAL")
 
@@ -10763,7 +10768,7 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
         check_wb = load_workbook(tmp, read_only=True, data_only=False)
         try:
             check_ws, check_h = business_sheet(check_wb)
-            check_rows = rows_by_key(check_ws, check_h)
+            check_rows = rows_by_key(check_ws, check_h, set(results))
             if set(check_rows) != set(official_rows):
                 raise RuntimeError("PROMOTE10_STAGED_KEY_INTEGRITY")
             for key in results:
