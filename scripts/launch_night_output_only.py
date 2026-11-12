@@ -108,6 +108,10 @@ def main() -> int:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         if report.get("stages", {}).get("collection", {}).get("attempts", 0):
             prior_attempts.update(report.get("cohort_keys") or [])
+    # The canonical classification SQLite can contain Search reservations
+    # not represented by any controlled-night run_report. The real collector
+    # refuses those too: preflight MUST exclude the same SKUs.
+    prior_attempts.update(core.prior_attempts_in_database(sources["classification_db"]))
     available, selection = core.select_overnight_eligible(
         audit, prior_attempts,
         include_raw_missing=args.include_raw_missing,
