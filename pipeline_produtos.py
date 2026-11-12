@@ -6848,6 +6848,12 @@ def finalize_product(
 # -----------------------------------------------------------------------------
 # Baseline e exportação
 # -----------------------------------------------------------------------------
+BASELINE_PUBLIC_COLUMNS = [
+    "Marca", "Modelo", "O que é (Tipo)", "Alimentação",
+    "Category General", "FAMILY", "Título Real", "Próxima Ação",
+    "Status", "Revisão", "Revisão B.I",
+]
+
 BASELINE_FINAL_COLUMNS = [
     "Marca",
     "Modelo",
@@ -8426,7 +8432,10 @@ def _export_base_final(
     final_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
-            _excel_export_safe_frame(out).to_excel(writer, sheet_name="Base Final", index=False)
+            # Base Final is the 11-column business view only. Internal
+            # evidence/statuses remain on the Consolidado and SQLite cache.
+            _excel_export_safe_frame(out.loc[:, BASELINE_PUBLIC_COLUMNS]).to_excel(
+                writer, sheet_name="Base Final", index=False)
         os.replace(tmp, final_path)
     except PermissionError as exc:
         try:
