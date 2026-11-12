@@ -10244,7 +10244,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-promote", "overnight-reconcile-failed", "promote-isolated-ten"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-promote", "overnight-reconcile-failed", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -10862,6 +10862,107 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
                 pass
 
 
+def clean_final_business_schema(path: Path, *, commit: bool = False) -> Dict[str, Any]:
+    """Reduce the existing official Final worksheet to 11 user-facing columns.
+
+    Does not reclassify or alter row values; no search/LLM calls. Preserves
+    duplicate physical rows and human-approved data. Retains full untouched
+    workbook backup before atomic replacement. Default is a dry run.
+    """
+    from openpyxl import load_workbook
+    from tempfile import NamedTemporaryFile
+    from datetime import datetime
+    import hashlib
+    import shutil
+
+    path = Path(path).resolve()
+    if not path.is_file() or path.suffix.lower() != ".xlsx":
+        raise RuntimeError("FINAL_CLEAN_INVALID_XLSX_PATH")
+
+    def filehash(p):
+        h = hashlib.sha256()
+        with open(p, "rb") as stream:
+            for part in iter(lambda: stream.read(1024 * 1024), b""):
+                h.update(part)
+        return h.hexdigest()
+
+    original_hash = filehash(path)
+    book = load_workbook(path, read_only=False, data_only=False)
+    temp = None
+    try:
+        worksheet = book["Base Final"] if "Base Final" in book.sheetnames else next(
+            (ws for ws in book.worksheets
+             if {"Marca", "Modelo"}.issubset({
+                 safe(c.value) for c in ws[1]
+             })), None)
+        if worksheet is None:
+            raise RuntimeError("FINAL_CLEAN_BUSINESS_SHEET_MISSING")
+        headers = [safe(c.value) for c in worksheet[1]]
+        if len(headers) != len(set(x for x in headers if x)):
+            raise RuntimeError("FINAL_CLEAN_DUPLICATE_COLUMN_NAMES")
+        missing = [field for field in BASELINE_PUBLIC_COLUMNS if field not in headers]
+        if missing:
+            raise RuntimeError("FINAL_CLEAN_MISSING_FIELDS:" + ", ".join(missing))
+        existing = [headers.index(field) + 1 for field in BASELINE_PUBLIC_COLUMNS]
+        all_original = [
+            tuple(worksheet.cell(i, j).value for j in existing)
+            for i in range(2, worksheet.max_row + 1)
+        ]
+        row_count = len(all_original)
+        before_sheets = list(book.sheetnames)
+        removed_columns = [name for name in headers if name not in BASELINE_PUBLIC_COLUMNS]
+        # A fresh business-only worksheet avoids the fragile column-deletion
+        # behavior on formatted ranges and retains exact row order/duplicates.
+        new_sheet = book.create_sheet("_FinalBusinessStaging", index=book.sheetnames.index(worksheet.title))
+        new_sheet.append(BASELINE_PUBLIC_COLUMNS)
+        for row in all_original:
+            new_sheet.append(row)
+        original_name = worksheet.title
+        book.remove(worksheet)
+        new_sheet.title = original_name
+        with NamedTemporaryFile(prefix=".final_schema_",suffix=".xlsx",
+                                dir=path.parent,delete=False) as handle:
+            temp = Path(handle.name)
+        book.save(temp)
+    finally:
+        book.close()
+    try:
+        check = load_workbook(temp, read_only=True, data_only=False)
+        try:
+            if check.sheetnames != before_sheets:
+                raise RuntimeError("FINAL_CLEAN_SHEET_ORDER_CHANGED")
+            ws = check[original_name]
+            if [safe(c.value) for c in next(ws.iter_rows(min_row=1,max_row=1))] != BASELINE_PUBLIC_COLUMNS:
+                raise RuntimeError("FINAL_CLEAN_HEADER_VALIDATION_FAILED")
+            staged_rows = list(ws.iter_rows(min_row=2,values_only=True))
+            if staged_rows != all_original:
+                raise RuntimeError("FINAL_CLEAN_ROW_VALUES_CHANGED")
+        finally:
+            check.close()
+        result = {"status": "DRY_RUN_PASS", "rows": row_count, 
+                  "columns_before": len(headers), "columns_after": 11,
+                  "removed_columns": removed_columns, "official": str(path),
+                  "search_calls": 0, "jev_calls": 0}
+        if not commit:
+            return result
+        if filehash(path) != original_hash:
+            raise RuntimeError("FINAL_CLEAN_CONCURRENT_MODIFICATION")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = path.with_name(path.stem + ".backup_schema11_" + stamp + path.suffix)
+        shutil.copy2(path, backup)
+        if filehash(backup) != original_hash or filehash(path) != original_hash:
+            raise RuntimeError("FINAL_CLEAN_BACKUP_VERIFICATION_FAILED")
+        os.replace(temp,path)
+        temp = None
+        result.update(status="COMMITTED",backup=str(backup),
+                      verified_after_replace=filehash(path) != original_hash
+                      or not removed_columns)
+        return result
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
+
+
 def main() -> int:
     base = Path(__file__).resolve().parent
     args = interactive_menu(base) if len(sys.argv) == 1 else build_parser().parse_args()
@@ -10917,6 +11018,12 @@ def main() -> int:
         for e in errors[:50]:
             LOG.error(e)
         return 2
+    if args.mode == "final-schema-cleanup":
+        target = Path(args.final or cfg["files"]["final"]).resolve()
+        with exclusive_campaign_lock():
+            report = clean_final_business_schema(target, commit=args.yes)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
     if args.mode == "promote-isolated-ten":
         if not args.pilot_dir:
             raise ValueError("PROMOTE10_REQUIRES_PILOT_DIR")
