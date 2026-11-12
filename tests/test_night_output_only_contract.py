@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -84,6 +85,7 @@ class NightOutputOnlyModeTests(unittest.TestCase):
                   patch.object(core, "source_paths", return_value=sources),
                   patch.object(core, "overnight_audit", return_value=audited),
                   patch.object(core, "snapshot", side_effect=shutil.copy2),
+                  patch.object(core, "prior_attempts_in_database", return_value=set()),
                   patch.object(core, "import_prior_reservations", return_value={}) as imported):
                 run, _, isolated = core.create_run({"files": {}}, options)
             imported.assert_called_once()
@@ -149,6 +151,34 @@ class NightSelectionRegressionTests(unittest.TestCase):
         )
         self.assertEqual(audit["summary"]["raw_missing_hard_locked"], 1)
         self.assertEqual(audit["summary"]["raw_missing_processed"], 1)
+
+    def test_original_sqlite_reservation_ledger_is_readonly_and_excludes_prior(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "source.sqlite"
+            with sqlite3.connect(db) as conn:
+                conn.execute(
+                    "CREATE TABLE collection_attempt_reservations ("
+                    "business_key TEXT PRIMARY KEY, account TEXT, provider TEXT)"
+                )
+                conn.execute(
+                    "INSERT INTO collection_attempt_reservations VALUES (?,?,?)",
+                    ("SERPER", "serper:1", "serper"),
+                )
+            before=db.read_bytes()
+            keys=core.prior_attempts_in_database(db)
+            self.assertEqual(keys, {"SERPER"})
+            self.assertEqual(db.read_bytes(), before)
+            available, _=core.select_overnight_eligible(
+                self._sample(), keys, allow_previous_errors=True,
+            )
+            self.assertNotIn("SERPER", [x["business_key"] for x in available])
+
+    def test_corrupt_canonical_sqlite_fails_before_paid_search(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db=Path(tmp) / "invalid.sqlite"
+            db.write_bytes(b"invalid sqlite")
+            with self.assertRaisesRegex(RuntimeError, "ORIGINAL_SEARCH_RESERVATION_LEDGER_UNREADABLE"):
+                core.prior_attempts_in_database(db)
 
     def test_unattempted_clean_only_is_default(self):
         eligible, details = core.select_overnight_eligible(self._sample(), set())
@@ -218,6 +248,7 @@ class ArchivedLauncherTests(unittest.TestCase):
                 with (patch.object(mod, "SNAPSHOT", snapshot),
                       patch.object(core, "configured_slots", return_value=[object()]),
                       patch.object(core, "overnight_audit", return_value=fake_audit),
+                      patch.object(core, "prior_attempts_in_database", return_value=set()),
                       patch.object(core, "import_prior_reservations", return_value={}),
                       patch.object(core, "main") as paid):
                     sys.argv = ["launcher", "--repo", str(repo), "--target", "20"]
@@ -260,6 +291,7 @@ class ArchivedLauncherTests(unittest.TestCase):
                 with (patch.object(mod, "SNAPSHOT", snapshot),
                       patch.object(core, "configured_slots", return_value=[object()]),
                       patch.object(core, "overnight_audit", return_value=fake_audit),
+                      patch.object(core, "prior_attempts_in_database", return_value=set()),
                       patch.object(core, "import_prior_reservations", return_value={}),
                       patch.object(core, "main", return_value=0) as runtime):
                     sys.argv = ["launcher", "--repo", str(repo), "--target", "20",
