@@ -10749,15 +10749,19 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
             src_res = safe(sws.cell(src_row, sh["Resolution State"]).value) if "Resolution State" in sh else ""
             if src_res and src_res.upper() != "RESOLVED":
                 raise RuntimeError("PROMOTE10_SOURCE_NOT_RESOLVED:" + key)
-            # All isolated baseline duplicates must agree with the adjudicated
-            # classification result, or promotion is blocked.
-            for baseline_row in isolated_rows[key]:
-                for name in required:
-                    if name not in baseline_h:
-                        raise RuntimeError("PROMOTE10_ISOLATED_COLUMN_MISSING:" + name)
-                    value = baseline_ws.cell(baseline_row, baseline_h[name]).value
-                    if value is not None and safe(value) and safe(value) != safe(source_values[name]):
-                        raise RuntimeError("PROMOTE10_ISOLATED_CONFLICT:" + key + ":" + name)
+            # The adjudicated classification output is authoritative. The
+            # isolated baseline may still contain older duplicate rows; require
+            # at least one row to match all four approved classification fields,
+            # without rewriting or deleting any staging duplicates.
+            if not all(name in baseline_h for name in required):
+                raise RuntimeError("PROMOTE10_ISOLATED_COLUMNS_MISSING")
+            matching = [
+                idx for idx in isolated_rows[key]
+                if all(safe(baseline_ws.cell(idx, baseline_h[name]).value) == safe(source_values[name])
+                       for name in required)
+            ]
+            if not matching:
+                raise RuntimeError("PROMOTE10_NO_MATCHING_ISOLATED_RESULT:" + key)
             # Update every official occurrence, but abort if ANY has a human lock.
             for dst_row in official_rows[key]:
                 current_bi = safe(ows.cell(dst_row, oh["Revisão B.I"]).value) if "Revisão B.I" in oh else ""
