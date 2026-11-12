@@ -1,5 +1,6 @@
 """Contract tests for capped 1,130 RAW_EMPTY pilot. No network or model inference."""
 from __future__ import annotations
+from contextlib import closing
 import json,sqlite3,sys,tempfile,types,unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -99,7 +100,7 @@ class RawEmptyNightTests(unittest.TestCase):
             base=Path(folder); old=base/"history"/"run1"
             old.mkdir(parents=True)
             db=old/"prior.sqlite"
-            with sqlite3.connect(db) as cx:
+            with closing(sqlite3.connect(db)) as cx, cx:
                 cx.execute("CREATE TABLE collection_attempt_reservations "
                            "(business_key TEXT PRIMARY KEY,account TEXT,provider TEXT)")
                 cx.executemany("INSERT INTO collection_attempt_reservations VALUES (?,?,?)",
@@ -128,7 +129,7 @@ class RawEmptyNightTests(unittest.TestCase):
             old=base/"history"/"run1"
             old.mkdir(parents=True)
             db=old/"prior.sqlite"
-            with sqlite3.connect(db) as cx:
+            with closing(sqlite3.connect(db)) as cx, cx:
                 cx.execute("CREATE TABLE collection_attempt_reservations "
                            "(business_key TEXT PRIMARY KEY,account TEXT,provider TEXT)")
                 cx.execute("INSERT INTO collection_attempt_reservations VALUES (?,?,?)",
@@ -158,7 +159,7 @@ class RawEmptyNightTests(unittest.TestCase):
             base=Path(folder); old=base/"history"/"run1"
             old.mkdir(parents=True)
             db=old/"prior.sqlite"
-            with sqlite3.connect(db) as cx:
+            with closing(sqlite3.connect(db)) as cx, cx:
                 cx.execute("CREATE TABLE collection_attempt_reservations "
                            "(business_key TEXT PRIMARY KEY,account TEXT,provider TEXT)")
                 cx.execute("INSERT INTO collection_attempt_reservations VALUES (?,?,?)",
@@ -188,11 +189,11 @@ class RawEmptyNightTests(unittest.TestCase):
             official_db=root/"official_classification.sqlite"
             pilot_db=run/"source_classification.sqlite"
             for database in (official_cache,pilot_cache,official_db):
-                with sqlite3.connect(database) as cx:
+                with closing(sqlite3.connect(database)) as cx, cx:
                     cx.execute("CREATE TABLE IF NOT EXISTS tavily_cache "
                                "(cache_key TEXT PRIMARY KEY,brand TEXT,model TEXT,"
                                "response_json TEXT,created_at TEXT)")
-            with sqlite3.connect(pilot_cache) as cx:
+            with closing(sqlite3.connect(pilot_cache)) as cx, cx:
                 cx.execute("INSERT INTO tavily_cache VALUES (?,?,?,?,?)",(
                     "v3|cnh|123456","CNH","123456",
                     json.dumps({"results":[{"title":"CNH Product", "url":"https://example.com/p",
@@ -332,7 +333,7 @@ class RawEmptyNightTests(unittest.TestCase):
                 self.assertEqual(store.get("CNH","123456").state,"RAW_OK")
             finally:
                 store.close()
-            with sqlite3.connect(official_db) as conn:
+            with closing(sqlite3.connect(official_db)) as conn, conn:
                 migrated=conn.execute(
                     "SELECT result_json FROM classification_results WHERE checkpoint_id=?",
                     ("check-123456",)).fetchone()
