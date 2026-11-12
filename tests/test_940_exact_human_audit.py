@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from collections import Counter
 from pathlib import Path
+import sys
 
 import pandas as pd
 
-from tests.verify_baseline_940_isolated_write import exact_human_rows
+# unittest discover can import test modules without making tests/ a package.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from verify_baseline_940_isolated_write import exact_human_rows
 
 
 class ExactPhysicalHumanAuditTests(unittest.TestCase):
