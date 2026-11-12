@@ -11468,6 +11468,33 @@ def overnight_audit(input_path,cache_path,master_path,final_path):
             "interpretation":"RAW_EMPTY does not prove a completed Search, and requerying can incur charges.",
             "search_calls":0,"auto_approval":False}
 
+def prior_attempts_in_database(path: Path) -> set:
+    """Read original SQLite search reservations without creating or editing it.
+
+    Align candidate selection with collect_products(), which refuses any
+    business_key already reserved in the durable source classification DB.
+    """
+    path=Path(path)
+    if not path.is_file():
+        return set()
+    try:
+        with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro",uri=True)) as conn:
+            exists=conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='collection_attempt_reservations'"
+            ).fetchone()
+            if not exists:
+                return set()
+            return {str(row[0]) for row in conn.execute(
+                "SELECT business_key FROM collection_attempt_reservations"
+            ) if row[0]}
+    except sqlite3.Error as exc:
+        raise RuntimeError(
+            f"ORIGINAL_SEARCH_RESERVATION_LEDGER_UNREADABLE: {path}; "
+            "no new Search allowed until database is repaired"
+        ) from exc
+
+
 def select_overnight_eligible(audit, prior_attempts, *,
                               include_raw_missing=False,
                               allow_serper_quota_error=False,
@@ -11757,6 +11784,7 @@ def create_run(cfg,args):
                     prior_attempts.update(history.get("cohort_keys",[]))
             except (OSError,ValueError,TypeError):
                 raise RuntimeError(f"Unreadable previous campaign report: {prior_report}")
+    prior_attempts.update(prior_attempts_in_database(sources["classification_db"]))
     eligible, selection_stats=select_overnight_eligible(
         result, prior_attempts,
         include_raw_missing=bool(getattr(args,"night_include_raw_missing",False)),
