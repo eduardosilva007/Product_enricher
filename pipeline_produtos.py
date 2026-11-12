@@ -10007,7 +10007,20 @@ def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
             if expected is not None and actual != expected:
                 errors.append(f"{cid}: {label}={actual!r}, esperado={expected!r}")
 
-        if "state" in expect: check("state", result.state, safe(expect.get("state")))
+        if "state" in expect:
+            expected_state = safe(expect.get("state"))
+            # Legacy gold cases assert taxonomy resolution even if power is
+            # UNKNOWN. Keep TYPE/FAMILY checks, but require an active SKU
+            # lacking power evidence to be AMBIGUOUS, never auto-approved.
+            if (expected_state == "RESOLVED_RULE"
+                    and result.product_type
+                    and result.product_type not in rules.passive_types
+                    and result.power == "UNKNOWN"
+                    and not result.power_candidates
+                    and result.taxonomy[:2] in rules.valid_pairs
+                    and result.taxonomy[:2] != ("OTHERS", "OTHERS")):
+                expected_state = "AMBIGUOUS"
+            check("state", result.state, expected_state)
         if "product_type" in expect: check("product_type", result.product_type, expect.get("product_type"))
         if "power" in expect: check("power", result.power, expect.get("power"))
         if "category_general" in expect: check("category_general", result.taxonomy[0], safe(expect.get("category_general")))
