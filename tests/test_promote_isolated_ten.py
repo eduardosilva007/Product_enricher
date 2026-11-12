@@ -125,6 +125,19 @@ class PromoteIsolatedTenTests(unittest.TestCase):
         report=promote_isolated_ten(self.run,self.official,commit=True)
         self.assertEqual(report["status"],"COMMITTED")
 
+    def test_large_baseline_verifies_without_readonly_random_access(self):
+        # A staged workbook with many unrelated rows used to stall when
+        # verification indexed read_only cells one by one.
+        wb=load_workbook(self.official)
+        ws=wb.active
+        for i in range(1200):
+            ws.append(["OTHER",f"LEGACY-{i:05d}"])
+        wb.save(self.official)
+        wb.close()
+        report=promote_isolated_ten(self.run,self.official,commit=False)
+        self.assertEqual(report["status"],"DRY_RUN_PASS")
+        self.assertEqual(report["cohort"],10)
+
     def test_duplicate_target_human_lock_blocks_all(self):
         wb=load_workbook(self.official)
         ws=wb.active
