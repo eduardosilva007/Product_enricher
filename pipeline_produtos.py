@@ -4334,9 +4334,9 @@ class DeterministicEngine:
         # CORDED evidence; bare wattage or the adjective "electric" does NOT.
         # Do not infer mains power in battery/charger contexts or for generators.
         input_pattern = (
-            r"\\b(?:rated\\s+power\\s+input|power\\s+input|input)\\s*"
-            r"(?:w\\s+[0-9][0-9 ]{0,8}\\b"
-            r"|[0-9][0-9 ]{0,8}\\s*w\\b)"
+            r"\b(?:rated\s+power\s+input|power\s+input|input)\s*"
+            r"(?:w\s+[0-9][0-9 ]{0,8}\b"
+            r"|[0-9][0-9 ]{0,8}\s*w\b)"
         )
         spec_input = re.search(input_pattern, combined)
         battery_context = any(
