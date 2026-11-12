@@ -226,13 +226,26 @@ def main():
         [sys.executable, "tests/verify_baseline_940_isolated_write.py", str(run)],
         [sys.executable, "scripts/replay_failed_940_offline.py", str(run)],
     )
-    for command in tests:
-        print("\nTEST:", " ".join(command), flush=True)
-        done = subprocess.run(command, cwd=root, check=False)
-        if done.returncode:
-            abort("offline test failed (exit " + str(done.returncode) +
-                  "). Local source backup: " + str(folder / SOURCE) +
-                  ". No live campaign was started; do not rerun overnight.")
+    try:
+        for command in tests:
+            print("\nTEST:", " ".join(command), flush=True)
+            done = subprocess.run(command, cwd=root, check=False)
+            if done.returncode:
+                abort("offline test failed (exit " + str(done.returncode) +
+                      "). Local source backup: " + str(folder / SOURCE) +
+                      ". No live campaign was started; do not rerun overnight.")
+    except BaseException:
+        # Undo ONLY our exact file bytes. Never overwrite user edits performed
+        # after this patch was installed. Backup remains in Backups_Baseline.
+        if sha256(original_path.read_bytes()) == sha256(patched_bytes):
+            restore = folder / "pipeline_produtos.restore.py"
+            restore.write_bytes(original_bytes)
+            os.replace(restore, original_path)
+            print("PATCH_940_SOURCE_RESTORED_AFTER_TEST_FAILURE", flush=True)
+        else:
+            print("PATCH_940_SOURCE_CHANGED_EXTERNALLY: restore manually from backup",
+                  file=sys.stderr)
+        raise
     print("PATCH_940_OFFLINE_TESTS_PASS")
     print("BACKUP:", folder)
     print("NOTE: campaign checkpoint remains BLOCKED; no API calls or promotion.")
