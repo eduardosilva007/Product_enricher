@@ -41,5 +41,14 @@ jobs:
           planned, states = installer.patch_text(source)
           assert planned == source, states
           assert all(x == "ALREADY_PRESENT" for _, x in states), states
-          print("PATCH PLAN PASS", states)
+          # Reconstruct the pre-fix code and prove the installer re-creates
+          # exactly the reviewed source without modifying a file.
+          original = source
+          for label, old, new in installer.PATCHES:
+              assert original.count(new) == 1, label
+              original = original.replace(new, old, 1)
+          installed, actions = installer.patch_text(original)
+          assert installed == source, actions
+          assert all(action == "APPLY" for _, action in actions), actions
+          print("PATCH PLAN PASS", states, actions)
           PY
