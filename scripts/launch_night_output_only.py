@@ -68,7 +68,18 @@ def main() -> int:
         files[name] = str(resolved)
     cfg["files"] = files
 
-    env_path = args.env_file.resolve() if args.env_file else original / ".env"
+    env_path = (
+        args.env_file.resolve() if args.env_file else original / ".env"
+    )
+    if not env_path.is_file() and args.env_file is None:
+        # Existing project setup can keep .env under the OneDrive GitHub
+        # folder while Python sources live on C:\\p. Never copy or expose keys.
+        previous_env = (
+            Path.home() / "OneDrive - Husqvarna Group" / "Área de Trabalho"
+            / "GitHub" / "Product_enricher" / ".env"
+        )
+        if previous_env.is_file():
+            env_path = previous_env
     if env_path.is_file():
         core.load_env_file(env_path)
     if not core.configured_slots():
