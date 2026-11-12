@@ -89,7 +89,7 @@ class PromoteIsolatedTenTests(unittest.TestCase):
 
     def test_incomplete_result_blocks(self):
         wb=load_workbook(self.output)
-        wb.active.cell(2,12,"SIM")
+        wb.active.cell(2,11,"SIM")
         wb.save(self.output)
         wb.close()
         before=self.official.read_bytes()
