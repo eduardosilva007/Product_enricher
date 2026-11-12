@@ -13,6 +13,7 @@ import csv
 import json
 import sqlite3
 import sys
+from contextlib import closing
 from collections import Counter
 from pathlib import Path
 
@@ -102,7 +103,7 @@ def main():
         selected = {p.business_key(b, m): (b, m) for b, m in AUDITED_24}
     reservations, ledger_status = collect_reservations(paths["classification_db"])
     output = []
-    with p.TavilyReadOnlyStore(paths["cache"]) as store:
+    with closing(p.TavilyReadOnlyStore(paths["cache"])) as store:
         for key, (brand, model) in selected.items():
             source_row = by_key.get(key)
             row = source_row if source_row is not None else {}
