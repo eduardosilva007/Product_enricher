@@ -54,6 +54,12 @@ class OvernightQualityGatesTests(unittest.TestCase):
         accepted, reason = gate(values, {}, rules, state, {})
         self.assertFalse(accepted)
         self.assertTrue(reason.startswith("CLEF_TAX_PROB_LOW"))
+        # Passive products can legitimately have no applicable power source.
+        values["product_type"] = "PASSIVE"
+        values["power"] = "UNKNOWN"
+        accepted, reason = gate(values, {}, rules, state, {})
+        self.assertFalse(accepted)
+        self.assertNotEqual(reason, "CLEF_POWER_UNVERIFIED")
 
     def test_audit_checks_all_raw_and_output_integrity(self):
         src = function_source("outcome_audit")
