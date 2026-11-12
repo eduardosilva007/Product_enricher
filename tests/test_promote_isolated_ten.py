@@ -101,14 +101,40 @@ class PromoteIsolatedTenTests(unittest.TestCase):
         self.assertEqual(wb.active.cell(13,2).value,"KEEP-001")
         wb.close()
 
-    def test_duplicate_target_blocks(self):
+    def test_duplicate_target_updates_all_rows(self):
         wb=load_workbook(self.official)
         ws=wb.active
         ws.append([ws.cell(2,col).value for col in range(1,14)])
         wb.save(self.official)
         wb.close()
+        report=promote_isolated_ten(self.run,self.official,commit=True)
+        self.assertEqual(report["status"],"COMMITTED")
+        wb=load_workbook(self.official)
+        self.assertEqual(wb.active.cell(2,3).value,"DRILL")
+        self.assertEqual(wb.active.cell(13,3).value,"DRILL")
+        wb.close()
+
+    def test_duplicate_source_stale_row_preserves_canonical_result(self):
+        wb=load_workbook(self.source)
+        ws=wb.active
+        row=[ws.cell(2,col).value for col in range(1,14)]
+        row[2]="REVISAR"
+        ws.append(row)
+        wb.save(self.source)
+        wb.close()
+        report=promote_isolated_ten(self.run,self.official,commit=True)
+        self.assertEqual(report["status"],"COMMITTED")
+
+    def test_duplicate_target_human_lock_blocks_all(self):
+        wb=load_workbook(self.official)
+        ws=wb.active
+        duplicate=[ws.cell(2,col).value for col in range(1,14)]
+        duplicate[7]="Manual"
+        ws.append(duplicate)
+        wb.save(self.official)
+        wb.close()
         before=self.official.read_bytes()
-        with self.assertRaisesRegex(RuntimeError,"PROMOTE10_DUPLICATE_BUSINESS_KEY"):
+        with self.assertRaisesRegex(RuntimeError,"PROMOTE10_HUMAN_LOCK"):
             promote_isolated_ten(self.run,self.official,commit=True)
         self.assertEqual(self.official.read_bytes(),before)
 
