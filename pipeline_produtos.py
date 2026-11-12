@@ -4500,6 +4500,10 @@ class DeterministicEngine:
                 for src in sources
             ):
                 type_candidates.remove("TRIMMER")
+                # ROUTER is a lexical parent of ROUTER TOOL for this
+                # specific target-anchored woodworking context.
+                if "ROUTER" in type_candidates:
+                    type_candidates.remove("ROUTER")
 
         power_candidates = sorted(all_power_hits.keys())
         # Após especificidade, métricas só consideram candidatos sobreviventes.
