@@ -10,6 +10,7 @@ commit. Success here does not mean the campaign is resumed.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sys
@@ -20,6 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import pandas as pd
+
+# Reuse the same exact-physical-row proof as the no-results persistence test.
+# Do not rely on the normalized-key BI snapshot (collides across SKU aliases).
+sys.path.insert(0, str(ROOT / "tests"))
+from verify_baseline_940_isolated_write import exact_human_rows, human_examples
 
 from pipeline_produtos import (
     Rules, _accepted_keys_from_baseline_file, _expected_cohort_accepted_after_run,
@@ -63,7 +69,11 @@ def preview(run_dir: Path) -> dict:
 
     baseline_before = load_baseline_inventory(paths["master"], paths["final"])
     previous_accepted = baseline_before["processed"]
-    locked_before = _load_bi_lock_snapshot(paths["final"])
+    human_before = exact_human_rows(paths["final"])
+    source_sha = {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in paths.items()
+    }
     records = results.to_dict(orient="records")
 
     with tempfile.TemporaryDirectory(prefix="940_replay_no_api_") as temp:
@@ -94,9 +104,16 @@ def preview(run_dir: Path) -> dict:
         after = load_baseline_inventory(master, final)
         lost_accepted = previous_accepted - after["processed"]
         lost_from_final = previous_accepted - after["final_accepted"]
-        locked_after = _load_bi_lock_snapshot(final)
-        altered_bi = [key for key, fields in locked_before.items()
-                      if locked_after.get(key) != fields]
+        human_after = exact_human_rows(final)
+        missing_human = human_before - human_after
+        added_human = human_after - human_before
+        newly_accepted_outside_cohort = (
+            after["processed"] - previous_accepted - set(cohort_keys)
+        )
+        source_changed = [
+            name for name, path in paths.items()
+            if hashlib.sha256(path.read_bytes()).hexdigest() != source_sha[name]
+        ]
         # Verify that the cohort's accepted statuses match the actual classifier
         # output; unresolved proposals must not be silently promoted.
         expected_cohort = _expected_cohort_accepted_after_run(
@@ -107,19 +124,25 @@ def preview(run_dir: Path) -> dict:
         missing_accepted = expected_cohort - actual_cohort
         result = {
             "status": "PASS" if not (lost_accepted or lost_from_final
-                                   or altered_bi or unexpected_accepted
-                                   or missing_accepted) else "FAIL",
+                                   or missing_human or added_human
+                                   or newly_accepted_outside_cohort or source_changed
+                                   or unexpected_accepted or missing_accepted) else "FAIL",
             "input_cohort": 20,
             "result_rows": len(results),
             "accepted_before": len(previous_accepted),
             "accepted_after": len(after["processed"]),
             "lost_accepted": len(lost_accepted),
             "lost_from_final": len(lost_from_final),
-            "altered_bi": len(altered_bi),
+            "protected_human_original_rows_missing_or_modified": sum(missing_human.values()),
+            "protected_human_rows_newly_marked_or_modified": sum(added_human.values()),
+            "protected_missing_examples": human_examples(missing_human),
+            "protected_added_examples": human_examples(added_human),
+            "unexpected_noncohort_accepted": len(newly_accepted_outside_cohort),
+            "unexpected_noncohort_examples": sorted(newly_accepted_outside_cohort)[:20],
             "unexpected_cohort_accepted": len(unexpected_accepted),
             "missing_cohort_accepted": len(missing_accepted),
             "lost_examples": sorted(lost_accepted)[:20],
-            "changed_bi_examples": sorted(altered_bi)[:10],
+            "source_modified": source_changed,
             "persist_stats": stats,
             "search_calls": 0,
             "llm_calls": 0,
