@@ -300,6 +300,21 @@ class RawEmptyNightTests(unittest.TestCase):
             canonical_hashes={name:master.digest(path) for name,path in (
                 ("cache",official_cache),("master",consolidated),
                 ("final",final),("classification_db",official_db))}
+            # The samefile Windows 8.3 fix must NEVER disable SHA-256:
+            # a mismatched source hash remains a hard block before promotion.
+            corrupted={key:dict(value) for key,value in originals.items()}
+            corrupted["cache"]["sha256"]="0"*64
+            (backup_dir/"source_manifest.json").write_text(
+                json.dumps(corrupted),encoding="utf-8"
+            )
+            with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
+                with self.assertRaisesRegex(
+                    RuntimeError,"PROMOTION_SOURCE_CHANGED_SINCE_FAILED_STAGE: cache"
+                ):
+                    master.overnight_promote_campaign(campaign,cfg,rules,dry_run=True)
+            (backup_dir/"source_manifest.json").write_text(
+                json.dumps(originals),encoding="utf-8"
+            )
             with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
                 dry=master.overnight_promote_campaign(campaign,cfg,rules,dry_run=True)
             self.assertEqual(dry["status"],"DRY_RUN_PASS")
