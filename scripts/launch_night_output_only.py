@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -24,6 +25,8 @@ import pipeline_produtos as core
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, required=True)
+    parser.add_argument("--execute-live", action="store_true",
+                        help="Explicitly authorize paid Search/JEV; omit for no-API preflight")
     parser.add_argument("--target", type=int, default=20)
     parser.add_argument("--per-sublot", type=int, default=20)
     parser.add_argument("--llm-budget", type=int, default=20)
@@ -78,6 +81,40 @@ def main() -> int:
     historical_root = original / "piloto_argentina" / "controlled_night"
     if not historical_root.is_dir():
         raise RuntimeError("ORIGINAL_CONTROLLED_NIGHT_HISTORY_MISSING")
+    sources = {name: Path(files[name]) for name in required}
+    audit = core.overnight_audit(
+        sources["input"], sources["cache"], sources["master"], sources["final"]
+    )
+    history_reports = sorted(historical_root.glob("*/run_report.json"))
+    prior_attempts = set()
+    for report_path in history_reports:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        if report.get("stages", {}).get("collection", {}).get("attempts", 0):
+            prior_attempts.update(report.get("cohort_keys") or [])
+    available = [
+        row for row in audit["candidate_rows"]
+        if row["business_key"] not in prior_attempts
+    ]
+    # A temporary, disposable ledger exercises the complete historic
+    # reservation/account audit without modifying any real database.
+    with tempfile.TemporaryDirectory(prefix="night_preflight_") as temp:
+        reservation_audit = core.import_prior_reservations(
+            Path(temp) / "audit.sqlite", historical_root
+        )
+    print("NO-API ELIGIBILITY | raw_empty_new=%d | prior_attempted=%d | remaining=%d"
+          % (len(audit["candidate_rows"]), len(prior_attempts), len(available)), flush=True)
+    print("NO-API HISTORY |", json.dumps(reservation_audit, ensure_ascii=False), flush=True)
+    if len(available) < args.target:
+        raise RuntimeError(
+            "INSUFFICIENT_ELIGIBLE_UNTRIED_SKUS: "
+            f"requested={args.target}, available={len(available)}. "
+            "Use the exact remaining amount; never reissue prior Search."
+        )
+    if not args.execute_live:
+        print("NIGHT_PREFLIGHT_PASS_NO_APIS; zero paid calls. "
+              "Add --execute-live only after reviewing the budgets.", flush=True)
+        return 0
+
     # Important: the classifier executable is always from the archive, but
     # reservation and run reports must remain alongside previous real pilots.
     core.OUT = historical_root
