@@ -7861,6 +7861,35 @@ def _atomic_write_dataframe(df: Any, path: Path, sheet_name: str) -> None:
 
 
 
+def _cache_evidence_route(raw: RawEvidence) -> Tuple[str, str, str]:
+    """Single source of truth for RAW_OK pending actions (never approves a SKU).
+
+    Return (next_action, resolution_state, review). A Search hit is not
+    automatically a classifiable source; only curated target evidence or
+    explicitly eligible safe auxiliary evidence may be sent for classification.
+    """
+    if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+        raise ValueError("CACHE_ROUTE_REQUIRES_RAW_OK")
+    payload = raw.payload or {}
+    coll = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
+    state = safe(coll.get("state")).upper()
+    curated = [x for x in coll.get("curated_results", []) or [] if isinstance(x, dict)]
+    auxiliaries = [x for x in coll.get("evidence_cache", []) or [] if isinstance(x, dict)]
+    safe_aux = any(
+        safe(x.get("tier")).upper() == "AUXILIARY_REVIEW_ONLY"
+        and safe(x.get("identity")).upper() in {"STRONG", "PROBABLE"}
+        and x.get("eligible_for_llm_rescue", True) is not False
+        and safe(x.get("decision")).upper() not in {
+            "REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY"
+        }
+        for x in auxiliaries
+    )
+    # Source gate still applies in classify; this only opens the candidate queue.
+    if state not in {"LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"} and (curated or safe_aux):
+        return "CLASSIFICAR_CACHE", "PENDING_CLASSIFICATION", "PENDENTE_CLASSIFICACAO"
+    return "REVISAR_EVIDENCIA_CACHE", "REVIEW_CACHE_EVIDENCE", "REVISAR"
+
+
 def _manual_review_bundle(raw: RawEvidence) -> Dict[str, str]:
     """Exporta fontes do cache para revisão humana, mesmo rejeitadas; não aprova AUTO."""
     payload = raw.payload or {}
@@ -8355,10 +8384,10 @@ def _export_base_final(
                         if not safe(rec.get("Fonte URL")):
                             out.at[idx, "Fonte URL"] = bundle["Fonte Referência URL"]
                     if not classified(rec):
-                        requires_review = state in {"LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"}
-                        out.at[idx, "Revisão"] = "REVISAR" if requires_review else "PENDENTE_CLASSIFICACAO"
-                        out.at[idx, "Próxima Ação"] = "REVISAR_EVIDENCIA_CACHE" if requires_review else "CLASSIFICAR_CACHE"
-                        out.at[idx, "Resolution State"] = "REVIEW_CACHE_EVIDENCE" if requires_review else "PENDING_CLASSIFICATION"
+                        action, resolution, review = _cache_evidence_route(raw)
+                        out.at[idx, "Revisão"] = review
+                        out.at[idx, "Próxima Ação"] = action
+                        out.at[idx, "Resolution State"] = resolution
         finally:
             store.close()
 
@@ -8558,18 +8587,15 @@ def _hydrate_input_collection_from_cache(
             old_resolution = safe(old.get("Resolution State")).upper()
             pending = old_review in {"", "PENDENTE", "PENDENTE_COLETA", "PENDENTE_RECOLETA", "PENDENTE_CLASSIFICACAO"}
             pending = pending or old_process in {"PENDING_COLLECTION", "PENDING_RECOLLECTION", "PENDING_CLASSIFICATION"}
-            pending = pending or old_resolution in {"", "PENDING_EVIDENCE_CHECK", "PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "PENDING_CLASSIFICATION"}
+            pending = pending or old_resolution in {"", "PENDING_EVIDENCE_CHECK", "PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "PENDING_CLASSIFICATION", "REVIEW_NO_RESULTS"}
+            # RAW_OK supersedes stale RAW_EMPTY/no-results state after cache recovery.
+            pending = pending or safe(old.get("Próxima Ação")).upper() == "REVISAR_SEM_RESULTADOS"
             if pending and old_resolution not in {"CLASSIFIED_CLEF", "RESOLVED"}:
-                if state in {"NO_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE"}:
-                    master_df.at[idx, review_col] = "REVISAR"
-                    master_df.at[idx, "Resolution State"] = "REVIEW_CACHE_EVIDENCE"
-                    master_df.at[idx, "Status Processamento"] = "REVIEW_CACHE_EVIDENCE"
-                    master_df.at[idx, "Próxima Ação"] = "REVISAR_EVIDENCIA_CACHE"
-                else:
-                    master_df.at[idx, review_col] = "PENDENTE_CLASSIFICACAO"
-                    master_df.at[idx, "Resolution State"] = "PENDING_CLASSIFICATION"
-                    master_df.at[idx, "Status Processamento"] = "PENDING_CLASSIFICATION"
-                    master_df.at[idx, "Próxima Ação"] = "CLASSIFICAR_CACHE"
+                action, resolution, review = _cache_evidence_route(raw)
+                master_df.at[idx, review_col] = review
+                master_df.at[idx, "Resolution State"] = resolution
+                master_df.at[idx, "Status Processamento"] = resolution
+                master_df.at[idx, "Próxima Ação"] = action
                 stats["cache_pending_corrected"] += 1
             # Independente da classificação, todos os títulos e fontes
             # existentes no SQLite precisam ficar visíveis no Consolidado.
