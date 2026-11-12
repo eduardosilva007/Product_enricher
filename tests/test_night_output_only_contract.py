@@ -103,6 +103,43 @@ class NightOutputOnlyModeTests(unittest.TestCase):
 
 
 class ArchivedLauncherTests(unittest.TestCase):
+    def test_launcher_default_does_not_invoke_live_runtime(self):
+        source = Path(__file__).resolve().parents[1] / "scripts" / "launch_night_output_only.py"
+        spec = importlib.util.spec_from_file_location("launch_no_api_probe", source)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "original"
+            snapshot = root / "snapshot"
+            (repo / "piloto_argentina" / "controlled_night").mkdir(parents=True)
+            snapshot.mkdir()
+            (snapshot / "pipeline_produtos.py").write_text("# offline fake", encoding="utf-8")
+            files = {}
+            for name in ("input", "cache", "master", "final", "classification_db"):
+                path = repo / (name + ".xlsx")
+                path.write_bytes(b"dryrun-stub")
+                files[name] = path.name
+            (repo / "pipeline_config.json").write_text(
+                json.dumps({"files": files}), encoding="utf-8"
+            )
+            fake_audit = {"candidate_rows": [
+                {"business_key": "test|%d" % i} for i in range(20)
+            ], "error_rows": []}
+            argv = list(sys.argv)
+            try:
+                with (patch.object(mod, "SNAPSHOT", snapshot),
+                      patch.object(core, "configured_slots", return_value=[object()]),
+                      patch.object(core, "overnight_audit", return_value=fake_audit),
+                      patch.object(core, "import_prior_reservations", return_value={}),
+                      patch.object(core, "main") as paid):
+                    sys.argv = ["launcher", "--repo", str(repo), "--target", "20"]
+                    self.assertEqual(mod.main(), 0)
+                    paid.assert_not_called()
+                    self.assertFalse((snapshot / "night_output_only_local_config.json").exists())
+            finally:
+                sys.argv = argv
+
     def test_archived_code_preserves_real_history_and_config(self):
         source = Path(__file__).resolve().parents[1] / "scripts" / "launch_night_output_only.py"
         spec = importlib.util.spec_from_file_location("launch_night_output_only_test", source)
@@ -127,11 +164,21 @@ class ArchivedLauncherTests(unittest.TestCase):
             old_argv = list(sys.argv)
             previous_out = core.OUT
             try:
+                fake_audit = {
+                    "candidate_rows": [
+                        {"business_key": "test|%d" % i} for i in range(20)
+                    ],
+                    "error_rows": [],
+                }
                 with (patch.object(mod, "SNAPSHOT", snapshot),
                       patch.object(core, "configured_slots", return_value=[object()]),
-                      patch.object(core, "main", return_value=0)):
-                    sys.argv = ["launcher", "--repo", str(repo), "--target", "20"]
+                      patch.object(core, "overnight_audit", return_value=fake_audit),
+                      patch.object(core, "import_prior_reservations", return_value={}),
+                      patch.object(core, "main", return_value=0) as runtime):
+                    sys.argv = ["launcher", "--repo", str(repo), "--target", "20",
+                                "--execute-live"]
                     self.assertEqual(mod.main(), 0)
+                    runtime.assert_called_once()
                     self.assertEqual(core.OUT, repo / "piloto_argentina" / "controlled_night")
                     self.assertIn("--night-output-only", sys.argv)
                     self.assertIn("--campaign-review-before-promotion", sys.argv)
