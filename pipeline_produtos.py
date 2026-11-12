@@ -4336,7 +4336,7 @@ class DeterministicEngine:
         input_pattern = (
             r"\\b(?:rated\\s+power\\s+input|power\\s+input|input)\\s*"
             r"(?:w\\s+[0-9][0-9 ]{0,8}\\b"
-            r"|[0-9][0-9 ]{0,8}\\s+w\\b)"
+            r"|[0-9][0-9 ]{0,8}\\s*w\\b)"
         )
         spec_input = re.search(input_pattern, combined)
         battery_context = any(
