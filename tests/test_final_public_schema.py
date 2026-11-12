@@ -24,5 +24,39 @@ class FinalPublicSchemaTest(unittest.TestCase):
         self.assertIn('out.loc[:, BASELINE_PUBLIC_COLUMNS]',source)
         self.assertIn('sheet_name="Base Final"',source)
 
+
+    def test_native_cleanup_preserves_rows_and_human_locks_with_backup(self):
+        from openpyxl import Workbook, load_workbook
+        from tempfile import TemporaryDirectory
+        from pipeline_produtos import clean_final_business_schema, BASELINE_PUBLIC_COLUMNS
+        with TemporaryDirectory() as root:
+            path=Path(root)/"final.xlsx"
+            wb=Workbook()
+            ws=wb.active
+            ws.title="Base Final"
+            ws.append(BASELINE_PUBLIC_COLUMNS+["Status Coleta","Reason Code"])
+            ws.append(["DCA","AQF32","BLOWER","CORDED","CORDED PRODUCT",
+                       "CORDED BLOWER","DCA AQF32","CONCLUIDO","Script",
+                       "REVISAR","", "COLETA_VAZIA", "RULE_UNIQUE"])
+            ws.append(["DCA","AQF32","BLOWER","CORDED","CORDED PRODUCT",
+                       "CORDED BLOWER","DCA AQF32","CONCLUIDO","Manual",
+                       "VALIDADO_MANUAL","OK", "COLETA_VAZIA", "RULE_UNIQUE"])
+            wb.save(path)
+            wb.close()
+            previous=path.read_bytes()
+            dry=clean_final_business_schema(path,commit=False)
+            self.assertEqual(dry["status"],"DRY_RUN_PASS")
+            self.assertEqual(path.read_bytes(),previous)
+            report=clean_final_business_schema(path,commit=True)
+            self.assertEqual(report["status"],"COMMITTED")
+            self.assertEqual(Path(report["backup"]).read_bytes(),previous)
+            wb=load_workbook(path,read_only=True)
+            ws=wb.active
+            self.assertEqual(list(next(ws.values)),BASELINE_PUBLIC_COLUMNS)
+            self.assertEqual(ws.max_row,3)
+            self.assertEqual(ws.cell(3,10).value,"VALIDADO_MANUAL")
+            self.assertEqual(ws.cell(3,11).value,"OK")
+            wb.close()
+
 if __name__=="__main__":
     unittest.main()
