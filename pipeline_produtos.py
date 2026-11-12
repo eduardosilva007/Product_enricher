@@ -4333,13 +4333,12 @@ class DeterministicEngine:
         # An explicitly labelled input-power specification provides useful
         # CORDED evidence; bare wattage or the adjective "electric" does NOT.
         # Do not infer mains power in battery/charger contexts or for generators.
-        spec_input = re.search(
+        input_pattern = (
             r"\\b(?:rated\\s+power\\s+input|power\\s+input|input)\\s*"
-            r"(?:\\(\\s*w\\s*\\))?\\s*[:=]?\\s*"
-            r"(?:\\(\\s*w\\s*\\)\\s*[:=]?\\s*)?"
-            r"(?:[0-9][0-9,. ]{0,8}\\s*w?\\b)",
-            combined,
+            r"(?:\\(\\s*w\\s*\\)\\s*[:=]?\\s*[0-9][0-9,. ]{0,8}\\b"
+            r"|[:=]?\\s*[0-9][0-9,. ]{0,8}\\s*w\\b)"
         )
+        spec_input = re.search(input_pattern, combined)
         battery_context = any(
             contains_alias_prepared(combined, x)
             for x in ("cordless", "lithium battery", "battery powered", "battery operated", "li-ion")
@@ -4368,12 +4367,7 @@ class DeterministicEngine:
                     and not output_voltage_context):
                 by_group["input_spec_keywords"].append("[RATED_INPUT_WATTS]")
                 # The field is BODY unless the label is genuinely in TITLE.
-                if re.search(
-                    r"\\b(?:rated\\s+power\\s+input|power\\s+input|input)\\s*"
-                    r"(?:\\(\\s*w\\s*\\))?\\s*[:=]?\\s*"
-                    r"(?:\\(\\s*w\\s*\\)\\s*[:=]?\\s*)?"
-                    r"[0-9][0-9,. ]{0,8}\\s*w?\\b", title_fold
-                ):
+                if re.search(input_pattern, title_fold):
                     fields[power].append("TITLE")
                 else:
                     fields[power].append("BODY")
