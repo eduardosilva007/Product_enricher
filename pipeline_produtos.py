@@ -10676,6 +10676,7 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
                 h.update((repr((cell.coordinate, cell.data_type, value)) + "\n").encode("utf-8", errors="replace"))
         return h.hexdigest()
 
+    LOG.info("PROMOTE10 PHASE 1/5 | reading isolated and canonical workbooks")
     source_wb = load_workbook(source_final, read_only=False, data_only=False)
     result_wb = load_workbook(result_path, read_only=True, data_only=True)
     input_wb = load_workbook(input_path, read_only=True, data_only=True)
@@ -10776,13 +10777,18 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
                     if source_cell.value != dest_cell.value:
                         changes.append((key, name, dest_cell.value, source_cell.value))
                         dest_cell.value = source_cell.value
+        LOG.info("PROMOTE10 PHASE 2/5 | target_keys=%d | changed_cells=%d | staging Excel", len(results), len(changes))
         # Reopen and verify the full staged workbook before touching the original.
         from tempfile import NamedTemporaryFile
         with NamedTemporaryFile(prefix=".promote10_", suffix=".xlsx",
                                 dir=official_final.parent, delete=False) as handle:
             tmp = Path(handle.name)
         official_wb.save(tmp)
-        check_wb = load_workbook(tmp, read_only=True, data_only=False)
+        # Random .cell() access on openpyxl read_only worksheets reparses
+        # XML repeatedly and can take many minutes for large baselines.
+        # Use the indexed normal worksheet for the staged verification.
+        LOG.info("PROMOTE10 PHASE 3/5 | stage written; verifying targeted rows")
+        check_wb = load_workbook(tmp, read_only=False, data_only=False)
         try:
             check_ws, check_h = business_sheet(check_wb)
             check_rows = rows_by_key(check_ws, check_h, set(results))
@@ -10810,6 +10816,7 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
             "search_calls": 0, "jev_calls": 0,
         }
         if not commit:
+            LOG.info("PROMOTE10 DRY_RUN_PASS | cohort=%d | changes=%d | no official changes", len(results), len(changes))
             return report
         # Prevent accidental overwrite when Excel is open / another process wrote
         # the official workbook during staging.
@@ -10819,6 +10826,7 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
                 for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                     h.update(chunk)
             return h.hexdigest()
+        LOG.info("PROMOTE10 PHASE 4/5 | creating verified official backup")
         # Saving a backup uses copy2; the original remains untouched until replace.
         original_hash = digest_file(official_final)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -10826,6 +10834,7 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
         shutil.copy2(official_final, backup)
         if digest_file(backup) != original_hash or digest_file(official_final) != original_hash:
             raise RuntimeError("PROMOTE10_CONCURRENT_MODIFICATION")
+        LOG.info("PROMOTE10 PHASE 5/5 | replacing canonical Excel atomically")
         os.replace(tmp, official_final)
         tmp = None
         report["status"] = "COMMITTED"
