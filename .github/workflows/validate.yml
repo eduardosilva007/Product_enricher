@@ -31,6 +31,9 @@ jobs:
       - name: Run evidence cache regressions
         run: python -m unittest test_v407_evidence_cache.py test_v4071_identity_rescue.py test_v4072_identity_runtime_guard.py test_v4073_structural_sku_core.py -v
 
+      - name: Gate DCA taxonomy regressions first (9 cases)
+        run: python -m unittest tests.test_dca_evidence_regression -v
+
       - name: Run offline tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
 
@@ -57,6 +60,9 @@ jobs:
 
       - name: Verify history SQLite closes on Windows
         run: python -m unittest discover -s tests -p "test_overnight_history_and_power_support.py" -v
+
+      - name: Gate DCA taxonomy regressions first on Windows (9 cases)
+        run: python -m unittest tests.test_dca_evidence_regression -v
 
       - name: Verify existing overnight contracts on Windows
         run: python -m unittest discover -s tests -p "test_raw_empty_night_contract.py" -v
