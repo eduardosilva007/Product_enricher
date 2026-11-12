@@ -122,6 +122,34 @@ class NightSelectionRegressionTests(unittest.TestCase):
             "summary": {},
         }
 
+    def test_raw_missing_audit_filters_approved_and_manual(self):
+        rows = [
+            SimpleNamespace(valid=True, key="A", brand_original="BR", model_original="A"),
+            SimpleNamespace(valid=True, key="B", brand_original="BR", model_original="B"),
+            SimpleNamespace(valid=True, key="C", brand_original="BR", model_original="C"),
+        ]
+        class Cache:
+            def __init__(self, path):
+                pass
+            def get(self, brand, model):
+                return SimpleNamespace(state="RAW_MISSING", payload={})
+            def close(self):
+                pass
+        with (patch.object(core, "read_input_rows", return_value=rows),
+              patch.object(core, "load_baseline_inventory", return_value={
+                  "hard_lock": {"B"}, "processed": {"B", "C"}
+              }),
+              patch.object(core, "TavilyReadOnlyStore", Cache)):
+            audit = core.overnight_audit(
+                Path("input.xlsx"), Path("cache.sqlite"),
+                Path("master.xlsx"), Path("final.xlsx")
+            )
+        self.assertEqual(
+            [item["business_key"] for item in audit["missing_rows"]], ["A"]
+        )
+        self.assertEqual(audit["summary"]["raw_missing_hard_locked"], 1)
+        self.assertEqual(audit["summary"]["raw_missing_processed"], 1)
+
     def test_unattempted_clean_only_is_default(self):
         eligible, details = core.select_overnight_eligible(self._sample(), set())
         self.assertEqual([x["business_key"] for x in eligible], ["CLEAN"])
