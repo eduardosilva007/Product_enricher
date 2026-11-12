@@ -7,6 +7,7 @@ the original history without modifying working-tree source.
 from __future__ import annotations
 
 import importlib.util
+from contextlib import closing
 import json
 import sqlite3
 import sys
@@ -155,7 +156,7 @@ class NightSelectionRegressionTests(unittest.TestCase):
     def test_original_sqlite_reservation_ledger_is_readonly_and_excludes_prior(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "source.sqlite"
-            with sqlite3.connect(db) as conn:
+            with closing(sqlite3.connect(db)) as conn, conn:
                 conn.execute(
                     "CREATE TABLE collection_attempt_reservations ("
                     "business_key TEXT PRIMARY KEY, account TEXT, provider TEXT)"
