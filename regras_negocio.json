@@ -1,5 +1,5 @@
 {
-  "VERSION": "2026-10-13-v3.0.13-manual-taxonomy-gold-2",
+  "VERSION": "2026-11-09-v3.0.21-final-reviewed-taxonomy",
   "DESIGN_PRINCIPLES": [
     "SINGLE SOURCE OF TRUTH: semântica de negócio executável (tipos, aliases, power, taxonomia, componentes, especificidade, colisões e gates LLM) reside neste JSON; o Python executa essa política.",
     "Stage 1 determinístico usa aliases e regras do JSON sobre as fontes Tavily e restaura a semântica estável do R5/v3.7.1: candidato único só resolve com identidade de modelo explícita ou repetição independente.",
@@ -25,13 +25,19 @@
     "Stage 0 valida identidade/qualidade da evidência antes da classificação.",
     "Stage 1.5 reduz candidatos para a LLM por score, suporte e identidade; a LLM nunca recebe a taxonomia inteira.",
     "LOW_TARGET_EVIDENCE e TAXONOMY_GAP são estados distintos.",
-    "Category General e FAMILY podem usar TAXONOMY_EVIDENCE_RULES somente após TYPE resolvido e com evidência target-anchored; WATERPUMP/LIFT PUMP sem subtipo taxonômico comprovado devem permanecer em REVIEW, nunca cair em família genérica automática.",
+    "TAXONOMY_EVIDENCE_RULES refinam subtipos quando comprovados; WATERPUMP sem subtipo explícito pode cair em WATERPUMPS|WATERPUMP, enquanto famílias específicas nunca são inferidas sem evidência.",
     "Título Real é preservado na saída mesmo quando a classificação não fecha; Base Final exibe um único título útil, sem duplicar metadados de Título Referência.",
     "TAXONOMY_EVIDENCE_RULES podem gerar candidato de TYPE quando Brand/Model/alias já sustentam deterministicamente o mesmo tipo, evitando dead-end TAXONOMY_GAP_NO_ALIAS.",
     "AUTO_APROVADO exige identidade STRONG: Marca e Modelo devem estar ancorados no TITLE/URL da fonte que sustenta o TYPE; modelo isolado sem a marca pode gerar candidato/revisão, nunca aprovação automática.",
     "Ruído de importação de FAN/COOLER/BLOWER industrial é classificado como OTHERS na FAMILY física específica, evitando inflar PETROL/CORDED/BATTERY garden equipment.",
     "WATERPUMP não pode nascer de usos não-hídricos de pump (windscreen/windshield washer, ink, fuel, oil, vacuum, condensate); quando explícitos, esses produtos usam TYPE/FAMILY próprios em OTHERS.",
-    "Próxima Ação deve ser CONCLUIDO em todo registro realmente RESOLVED; AUTO_APROVADO nunca pode coexistir com ação de LLM/revisão."
+    "Próxima Ação deve ser CONCLUIDO em todo registro realmente RESOLVED; AUTO_APROVADO nunca pode coexistir com ação de LLM/revisão.",
+    "Reviewed FAMILY catalog from Base Final is authoritative for accepted Category General|FAMILY labels; WATERPUMPS|WATER PUMP is the canonical generic water-pump pair.",
+    "Canonical FAMILY labels may expose conservative orthographic aliases (hyphen/space, punctuation and terminal singular/plural) only when the alias is collision-free; aliases never override another canonical FAMILY.",
+    "OTHERS|OTHERS is forbidden as an executable taxonomy dead-end; reviewed legacy OTHERS labels remain manual/review-only and are not promoted to PRODUCT_TYPE.",
+    "Reviewed FAMILY expansion does not imply PRODUCT_TYPE expansion: FAMILY refinements remain taxonomy evidence under stable primary types unless the product class is independently meaningful.",
+    "Existing Stage-1 PRODUCT_TYPE aliases are frozen to the audited pre-expansion baseline; reviewed FAMILY growth must not broaden legacy type aliases implicitly.",
+    "Audited TAXONOMY_EVIDENCE_RULES are baseline-frozen; reviewed FAMILY expansion adds only explicit narrow refinements and never rewrites existing evidence aliases."
   ],
   "TAXONOMY_PAIRS": [
     {
@@ -688,7 +694,7 @@
     },
     {
       "category_general": "OTHERS",
-      "family": "POWER TOOL COMBO KIT"
+      "family": "COMBO KIT"
     },
     {
       "category_general": "OTHERS",
@@ -832,7 +838,7 @@
     },
     {
       "category_general": "WATERPUMPS",
-      "family": "WATERPUMP"
+      "family": "WATER PUMP"
     },
     {
       "category_general": "OTHERS",
@@ -849,6 +855,1734 @@
     {
       "category_general": "OTHERS",
       "family": "WATER PUMP"
+    },
+    {
+      "category_general": "ATOMIZER",
+      "family": "ATOMIZER"
+    },
+    {
+      "category_general": "BATTERY PRODUCT",
+      "family": "BATTERY TRACTOR"
+    },
+    {
+      "category_general": "ENGINE",
+      "family": "PETROL WALK BEHIND MOWER"
+    },
+    {
+      "category_general": "ENGINES",
+      "family": "ENGINES"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ABRASIVE BLASTING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ACCESS CONTROLLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ACTION FIGURE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ACTIVE HEAT SINK"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR COMPRESSOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR CONDITIONER FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR CONDITIONING FILTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR ELECTRIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR EVAPORATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR FILTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR FLOW FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR HUMIDIFIER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR RIFLE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR SYSTEM FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR WASHING GUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AIR-COOLED HEAT SINK"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ASPIRATED ENGINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ASSY FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AUTO SWATHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AUTOMAT LUBRICANT PU"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AUTOMATIC CORRUGATED PIPE CUTTING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AUTOMATIC HOSE REEL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AUTOMATIC WATER DISPENSER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AXIAL EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AXIAL EXPLOSION-PROOF"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AXIAL EXTRACTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AXIAL FAN ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "AXIAL FLOW FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BARREL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BATTERY BLENDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BEAD BREAKER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BELT DRYER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BENCH GRINDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BENCHTOP MICROMOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BENDABLE NECK HANGING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BENDING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLASTING BOOTH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOW GUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOW MOLDING UNIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER COMPLETE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER EVAPORATOR ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER FAN ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER MANUAL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BLOWER WHEEL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BOX FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BRIDGE SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "BRIDGE WET SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CABIN HEATER MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CABIN INTERIOR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CAMERA"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CASE FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CEILING EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CEILING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTER-PIVOT DISC MOWER-CONDITIONERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTER-PIVOT MOWER CONDITIONERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTRAL AIR DIFFUSER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL BOOSTER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL HYDRAULIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CERAMIC MUG"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CHAMFER PIPES"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CHARGE FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CINEMATIC LENS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CIP STATION"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CIRCULATION FAN MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CLEANING GUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CLEANING PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CLOSED CIRCUIT COOLING TOWERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CLUTCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COIL CLEANING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COMBINE HARVESTER HEADER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COMBUSTION BLOWER KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COMPRESSED-AIR CANNON"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONCRETE SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONCRETE SCARIFIER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONDENSER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONDENSER COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CONDENSER FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COOLER AXIAL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COOLER CPU"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COOLER FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COOLER PAD"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "COOLING RADIATOR GAMING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CORDED CHAINSAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CORE CUTTING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CROSS FLOW FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CRUSHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CULTICHISSEL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "CUT-OFF TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DC COOLING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DEBRIS BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DECIBEL METER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DEEP IMPACT SOCKET"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DENTAL ELECTRIC MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DESCALING PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DESOLDERING STATION"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DIAMOND CORE DRILL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DIAPHRAGM PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DIESEL ENGINE FIRE PUMP CONTROLLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DISC MOWER-CONDITIONER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DISCHARGE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DISPENSER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DISPLAY REFRIGERATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DOT PEEN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRAIN PUMP MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRILLING HAMMER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRILLING RIG"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRIVE RETAINER ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRUM MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRUM PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRY ICE BLASTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRY ICE PELLET BLASTING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRY ICE PELLETIZER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRY SANDBLAST MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DRYING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "DUSTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "EAR MUFFS AND FACE SCREEN SET"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC COLD FOGGER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC ENGRAVER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC GLUE REMOVER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC MICROMOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC REMOVE GLUE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC ROLLING MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC TOASTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRIC WELDING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELECTRODE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ELEVATOR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "EMERGENCY SHOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ENCLOSED GENERATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ENGINE BLOCK"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ENGINE-DRIVEN WELDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ENGINES"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ENGRAVER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ERGONOMIC SUPPORT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "EVAPORATOR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "EVAPORATOR UNIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "E-WRENCH CABLE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAIRWAY MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN BATTERY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN BOX"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN CLUTCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN COMPLETE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN ENGINE COOLING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN EXTRACTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN FILTER KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN HOUSING ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN RETAINER."
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN ROTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FAN TRAY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FILTERED FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FIRE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FIXTURED SPINDLE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FLAIL COLLECTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FLOATING WATER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FLY REPELLENT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FRONT-MOUNTED DISC MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "FRUIT HARVESTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GARDEN HOSE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GARDEN PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GARMENT STEAMER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GENERATOR ASSY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GLASS CURTAIN WALL CLEANING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GLASS CUT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GLASS-LINED STEEL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GLUE GUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GRILL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GRINDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GROUND POWER UNIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "GYM FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HAIRDRYER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HEAD COOLING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HEAT EXCHANGER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HEAT FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HEAT PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HEATER BLEND DOOR ACTUATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HELICAL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HERMETIC REFRIGERANT PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HIGH CAPACITY TORQUE MULTIPLJER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HIGH PRESSURE COMBUSTION BLOWER FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HIGH-PERFORMANCE BRUSH CUTTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HIGH-PERFORMANCE STEAM AND VACUUM MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HIGH-PRESSURE CLEANING ROBOT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HIGH-PRESSURE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HOME GENERATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HOSE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HOT AIR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HOT WATER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYBRID BIG-MOUTH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYBRID REMOTE CONTROL LAWN MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC AIR BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC BREAKER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC COPPER TUBE EXPANDER TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC DRIVE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC ENGINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC EXPANDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC EXTRACTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC HOLE PUNCHING TOOLS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC JACK"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC NUT SPLITTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC PIPE BENDERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC POWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC SHEET METAL PUNCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC TAMPER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC TOOLS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC TORQUE WRENCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "HYDRAULIC VALVE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "IMPACT TORQUE WRENCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INCUBATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL AIR CURTAIN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL AXIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL CENTRIFUGAL EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL CENTRIFUGAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL CENTRIFUGE FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL COOLING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL HEATER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL PARTS WASHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "IN-LINE BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INSULATION PUSHING DEVICE SET"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INTELLIGENT TOUCHLESS ROBOT CAR WASH MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INTERCOOLER ELECTRIC FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "INVERTER ELECTRIC WELDING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "IRON"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "JACKING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "KNOCKOUTPUNCHTOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LAPTOP COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LARGE AREA ROTARY MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LARGE WATER BASED PARTS WASHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LEVEL RULER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LOCKBOLT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "LUBRICATION PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MAGNETIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MANUAL BLOWER FIRE STARTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MANUAL RULER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MARINE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MASONRY SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MECHANICAL PRUNER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "METAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MICRO-PUNCHING TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MILK PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MINI FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MINI MANUAL SIDE SHIFT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MINI PULL STRETCHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MINI SCREWDRIVER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MODULE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MODULE COOLING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOTOR AXIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOTOR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOTOR KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOTOR-DRIVEN TANK CLEANER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOUNTED DISC MOWERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MOWER-CONDITIONER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MUD PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "MULTI-PURPOSE SANDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NAIL DRILL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NAIL SANDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NEBULIZER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NORM PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NOTEBOOK COOLING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "NUTRUNNER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ORGANOMINERAL FOLIAR FERTILIZER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "OSCILLATING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PEDESTAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PERMANENT MAGNETIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PET DRYER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PLUG FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "POLYMER BLOWGUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PORTABLE ACTUATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PORTABLE FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PORTABLE FIRE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PORTABLE SANDBLASTING"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PORTABLE SHOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "POSITIVE-PRESSURE VENTILATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "POTATO HARVESTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "POWER DRIVE PIPE THREADER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRECISION SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRE-PRUNER CRAWLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRESSURE CONTROLLER FOR WATER PUMPS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRESSURIZATION SYSTEM"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRESSURIZED CLEANING PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PRESSURIZER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PROFESSIONAL LAWN MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PULP PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PUMP KIT WITH THERMAL PROTECTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PUNCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PUNCHING TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "PYROGRAPHY TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "QUIET BLOWER PANEL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RADIAL BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RADIAL ENGINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RADIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RADIATOR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RADIATOR WATER RESERVOIR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RAIL CUTTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RATCHET SET"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "READ CABLE ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REAR DISC MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REAR DISC MOWER-CONDITIONER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RECIRCULATORS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REFRIGERATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REGENERATIVE EXHAUST"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REGENERATIVE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REGULAR AIRFLOW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REMOTE GRINDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REMOTE-OPERATED MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "REPEATER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RIGID DECK ROLLER MOWERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RING BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "RINSE BOOSTER PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROBOTIC LAWN MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROBOTIC NOZZLE CLEANING STATION"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROOF FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY ELECTRIC PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY HEADER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY LAWN MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY POSITIVE BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTARY TILLERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTATING SPRINKLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROTOR ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "ROUGH MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SANDBLASTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SANDBLASTING BOOTH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SANITARY PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SEALLESS MAGNETIC DRIVE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SELF-PROPELLED SPRAYER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SELF-PROPELLED WINDROWERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SERVICE KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SHEAR PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SHREDDING FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SHREDDING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SHROUD ASSEMBLY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SIDE BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SIDE-CHANNEL BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SIDE-CHANNEL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SLIDE HAMMER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SLOTTING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SLURRY TEST KIT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SMOKE EXHAUST FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SOLDERING STATION"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SOLUTION PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SPIRAL COMPRESSED AIR HOSE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SPLIT CASE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SPRAYING DRONE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SPRAYING SYSTEM"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SPREADING SYSTEM"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STABILIZERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STATIONARY ENGINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STATIONARY GENERATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STEAM CLEANER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STEAM JET DEVICE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STINGER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STONE CUTTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "STRAPPING TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SUBMERSIBLE CENTRIFUGAL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SUCTION CUP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SUCTION ELECTRIC FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SUCTION PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SURFACE BRUSH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SURFACE PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SURFACE SOLAR PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "SYSTEM PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TAMPING RAMMER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TANGENCIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TANGENTIAL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TENSIONER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "THREADED ROD CUTTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "THROTTLE BODY"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TILE CUTTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TILE VIBRATION MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TOOL HOLDER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TORQUE METER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TORQUE TOOL"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TORQUE WRENCH"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TRACKED REMOTE LAWN MOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TUBE BUNDLE CLEANER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TURBINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TURBINE FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "TYING MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "UNDER COATING GUN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "UNIVERSAL CUTTER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VACCINATION DEVICES"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VACUUM BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VACUUM CIRCUIT BREAKER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VACUUM MOTOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VARIATOR FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VERTICAL PROCESS PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VERTICAL PUMP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VIBRATING SUCTION CUP"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VIBRATORY PLATE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "VIBRATORY PLATE COMPACTOR FOR EXCAVATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WALK BEHIND SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WALL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WALNUT SAND DE-CARBON CLEANER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WASHER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WATER COOLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WEED WAND"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WHEEL BLOWER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WHEEL FAN"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WIND MACHINE"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WIND-POWERED VENTILATOR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WINDROWER HEADERS"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WINDSHIELD WASHER FLUID RESERVOIR"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WINE DISPENSER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WIRE SAW"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WIRELESS CONTROLLER"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WORK LIGHT"
+    },
+    {
+      "category_general": "OTHERS",
+      "family": "WORKSHOP CART"
+    },
+    {
+      "category_general": "PETROL TRACTOR",
+      "family": "PETROL WALK BEHIND MOWER"
     }
   ],
   "PRODUCT_TYPES": {
@@ -872,12 +2606,19 @@
         "esmerilhadeira",
         "esmerilhadeira angular",
         "amoladora angular",
-        "rebarbadora"
+        "rebarbadora",
+        "esmeril angular",
+        "esmeriladora",
+        "esmeriladora angular",
+        "amoladora"
       ],
       "negative_aliases": [
         "die grinder",
         "straight grinder",
-        "bench grinder"
+        "bench grinder",
+        "esmeril de banco",
+        "amoladora de banco",
+        "rectificadora recta"
       ]
     },
     "DIE GRINDER": {
@@ -1405,9 +3146,7 @@
         "router tool",
         "compact router",
         "trim router",
-        "laminate trimmer",
-        "wood trimmer",
-        "trimmer router"
+        "laminate trimmer"
       ]
     },
     "ROUTER": {
@@ -1697,8 +3436,8 @@
         "polvilhador"
       ],
       "fallback_pair": [
-        "MISTER/DUSTER",
-        "MISTER/DUSTER"
+        "OTHERS",
+        "DUSTER"
       ]
     },
     "PRESSURE WASHER": {
@@ -1795,6 +3534,10 @@
         "condensate pump",
         "condensation pump",
         "air conditioner condensate pump"
+      ],
+      "fallback_pair": [
+        "WATERPUMPS",
+        "WATER PUMP"
       ]
     },
     "ROBOTIC LAWN MOWER": {
@@ -2064,7 +3807,7 @@
       ],
       "fallback_pair": [
         "OTHERS",
-        "FLOOR INSTALLER"
+        "TILE VIBRATION MACHINE"
       ]
     },
     "HYDRAULIC SPRING COMPRESSOR": {
@@ -2969,7 +4712,7 @@
       ],
       "fallback_pair": [
         "OTHERS",
-        "POWER TOOL COMBO KIT"
+        "COMBO KIT"
       ]
     },
     "ROTARY TOOL": {
@@ -3283,6 +5026,147 @@
       "fallback_pair": [
         "OTHERS",
         "MIXER"
+      ]
+    },
+    "ATOMIZER": {
+      "aliases": [
+        "atomizer"
+      ],
+      "fallback_pair": [
+        "ATOMIZER",
+        "ATOMIZER"
+      ]
+    },
+    "AIR COMPRESSOR": {
+      "aliases": [
+        "air compressor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "AIR COMPRESSOR"
+      ]
+    },
+    "BENCH GRINDER": {
+      "aliases": [
+        "bench grinder"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "BENCH GRINDER"
+      ]
+    },
+    "CONCRETE SAW": {
+      "aliases": [
+        "concrete saw"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "CONCRETE SAW"
+      ]
+    },
+    "DRILLING RIG": {
+      "aliases": [
+        "drilling rig"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "DRILLING RIG"
+      ]
+    },
+    "HYDRAULIC BREAKER": {
+      "aliases": [
+        "hydraulic breaker"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC BREAKER"
+      ]
+    },
+    "HYDRAULIC JACK": {
+      "aliases": [
+        "hydraulic jack"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "HYDRAULIC JACK"
+      ]
+    },
+    "NUTRUNNER": {
+      "aliases": [
+        "nutrunner",
+        "nut runner",
+        "electric nutrunner"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "NUTRUNNER"
+      ]
+    },
+    "SANDBLASTER": {
+      "aliases": [
+        "sandblaster",
+        "sand blasting machine"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SANDBLASTER"
+      ]
+    },
+    "SPRAYING DRONE": {
+      "aliases": [
+        "spraying drone"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "SPRAYING DRONE"
+      ]
+    },
+    "TAMPING RAMMER": {
+      "aliases": [
+        "tamping rammer",
+        "rammer compactor"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TAMPING RAMMER"
+      ]
+    },
+    "TILE CUTTER": {
+      "aliases": [
+        "tile cutter"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TILE CUTTER"
+      ]
+    },
+    "TORQUE WRENCH": {
+      "aliases": [
+        "torque wrench",
+        "hydraulic torque wrench"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "TORQUE WRENCH"
+      ]
+    },
+    "WALK BEHIND SAW": {
+      "aliases": [
+        "walk behind saw",
+        "walk-behind saw"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WALK BEHIND SAW"
+      ]
+    },
+    "WIRE SAW": {
+      "aliases": [
+        "wire saw"
+      ],
+      "fallback_pair": [
+        "OTHERS",
+        "WIRE SAW"
       ]
     }
   },
@@ -4054,8 +5938,8 @@
     {
       "primary_type": "DUSTER",
       "power": "*",
-      "category_general": "MISTER/DUSTER",
-      "family": "MISTER/DUSTER",
+      "category_general": "OTHERS",
+      "family": "DUSTER",
       "priority": 155
     },
     {
@@ -4272,7 +6156,7 @@
       "primary_type": "TILE VIBRATION MACHINE",
       "power": "*",
       "category_general": "OTHERS",
-      "family": "FLOOR INSTALLER",
+      "family": "TILE VIBRATION MACHINE",
       "priority": 150
     },
     {
@@ -4559,7 +6443,7 @@
       "primary_type": "POWER TOOL COMBO KIT",
       "power": "*",
       "category_general": "OTHERS",
-      "family": "POWER TOOL COMBO KIT",
+      "family": "COMBO KIT",
       "priority": 230
     },
     {
@@ -4961,6 +6845,10 @@
       [
         "CONDENSATE PUMP",
         "PART"
+      ],
+      [
+        "MISTER",
+        "ATOMIZER"
       ]
     ],
     "output_voltage_not_input_power_types": [
@@ -5047,7 +6935,9 @@
       "dual action polisher": "POLISHER",
       "pulidora dual action": "POLISHER",
       "rotavator": "TILLER",
-      "rotovator": "TILLER"
+      "rotovator": "TILLER",
+      "atomizer": "ATOMIZER",
+      "concrete saw": "CONCRETE SAW"
     }
   },
   "CLASSIFICATION_POLICY": {
@@ -5318,8 +7208,8 @@
           "state": "RESOLVED_RULE",
           "product_type": "DUSTER",
           "power": "PETROL",
-          "category_general": "MISTER/DUSTER",
-          "family": "MISTER/DUSTER",
+          "category_general": "OTHERS",
+          "family": "DUSTER",
           "forbidden_type_candidates": [
             "MISTER"
           ]
@@ -5550,7 +7440,7 @@
           "state": "RESOLVED_RULE",
           "product_type": "TILE VIBRATION MACHINE",
           "category_general": "OTHERS",
-          "family": "FLOOR INSTALLER",
+          "family": "TILE VIBRATION MACHINE",
           "power": "UNKNOWN"
         }
       },
@@ -7270,7 +9160,10 @@
         "jet water pump",
         "jet pump"
       ],
-      "negative_aliases": [],
+      "negative_aliases": [
+        "self priming",
+        "self-priming"
+      ],
       "priority": 295
     },
     {
@@ -7796,7 +9689,7 @@
     {
       "primary_type": "WATERPUMP",
       "category_general": "WATERPUMPS",
-      "family": "WATERPUMP",
+      "family": "WATER PUMP",
       "brand": "CET",
       "model_regex": "^PFP\\ 9HP\\ DSL$",
       "aliases": [],
@@ -8233,6 +10126,164 @@
       "model_regex": "^41391/801/01$",
       "aliases": [],
       "priority": 925
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "FIRE PUMP",
+      "aliases": [
+        "fire pump",
+        "portable fire pump"
+      ],
+      "priority": 310
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "DIAPHRAGM PUMP",
+      "aliases": [
+        "diaphragm pump"
+      ],
+      "priority": 310
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "GARDEN PUMP",
+      "aliases": [
+        "garden pump"
+      ],
+      "priority": 300
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "HIGH-PRESSURE PUMP",
+      "aliases": [
+        "high pressure pump",
+        "high-pressure pump"
+      ],
+      "priority": 300
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "SUBMERSIBLE CENTRIFUGAL PUMP",
+      "aliases": [
+        "submersible centrifugal pump"
+      ],
+      "priority": 320
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "VERTICAL PUMP",
+      "aliases": [
+        "vertical pump"
+      ],
+      "priority": 300
+    },
+    {
+      "primary_type": "WATERPUMP",
+      "category_general": "OTHERS",
+      "family": "SURFACE PUMP",
+      "aliases": [
+        "surface pump"
+      ],
+      "priority": 300
+    },
+    {
+      "primary_type": "FAN",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL FAN",
+      "aliases": [
+        "centrifugal fan"
+      ],
+      "priority": 310
+    },
+    {
+      "primary_type": "FAN",
+      "category_general": "OTHERS",
+      "family": "RADIAL FAN",
+      "aliases": [
+        "radial fan"
+      ],
+      "priority": 310
+    },
+    {
+      "primary_type": "FAN",
+      "category_general": "OTHERS",
+      "family": "EXHAUST FAN",
+      "aliases": [
+        "exhaust fan"
+      ],
+      "priority": 300
+    },
+    {
+      "primary_type": "FAN",
+      "category_general": "OTHERS",
+      "family": "INDUSTRIAL FAN",
+      "aliases": [
+        "industrial fan"
+      ],
+      "priority": 300
+    },
+    {
+      "primary_type": "INDUSTRIAL BLOWER",
+      "category_general": "OTHERS",
+      "family": "CENTRIFUGAL BLOWER",
+      "aliases": [
+        "centrifugal blower"
+      ],
+      "priority": 320
+    },
+    {
+      "primary_type": "INDUSTRIAL BLOWER",
+      "category_general": "OTHERS",
+      "family": "SIDE-CHANNEL BLOWER",
+      "aliases": [
+        "side-channel blower",
+        "side channel blower"
+      ],
+      "priority": 320
+    },
+    {
+      "primary_type": "GENERATOR",
+      "category_general": "OTHERS",
+      "family": "STATIONARY GENERATOR",
+      "aliases": [
+        "stationary generator"
+      ],
+      "priority": 300
+    },
+    {
+      "primary_type": "DISC MOWER",
+      "category_general": "OTHERS",
+      "family": "DISC MOWER-CONDITIONER",
+      "aliases": [
+        "disc mower-conditioner",
+        "disc mower conditioner"
+      ],
+      "priority": 320
+    },
+    {
+      "primary_type": "DISC MOWER",
+      "category_general": "OTHERS",
+      "family": "REAR DISC MOWER",
+      "aliases": [
+        "rear disc mower"
+      ],
+      "priority": 320
+    },
+    {
+      "primary_type": "DISC MOWER",
+      "category_general": "OTHERS",
+      "family": "MOWER-CONDITIONER",
+      "aliases": [
+        "mower-conditioner",
+        "mower conditioner"
+      ],
+      "priority": 300
     }
   ],
   "COMBO_KIT_POLICY": {
@@ -8249,7 +10300,11 @@
       "kit de herramientas",
       "kit de ferramentas",
       "combo taladro",
-      "combo furadeira"
+      "combo furadeira",
+      "kit herramientas",
+      "kit taladro",
+      "kit furadeira",
+      "kit combinado de herramientas"
     ],
     "eligible_primary_types": [
       "DRILL",
