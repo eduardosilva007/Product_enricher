@@ -10673,7 +10673,7 @@ def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool 
                 h.update((repr((cell.coordinate, cell.data_type, value)) + "\n").encode("utf-8", errors="replace"))
         return h.hexdigest()
 
-    source_wb = load_workbook(source_final, read_only=True, data_only=False)
+    source_wb = load_workbook(source_final, read_only=False, data_only=False)
     result_wb = load_workbook(result_path, read_only=True, data_only=True)
     input_wb = load_workbook(input_path, read_only=True, data_only=True)
     official_wb = load_workbook(official_final, read_only=False, data_only=False)
