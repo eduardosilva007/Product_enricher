@@ -23,7 +23,7 @@ class NoApiCentralizedAuditTests(unittest.TestCase):
             previous = pd.DataFrame([{
                 "Marca": "FIXTEC", "Modelo": "X-1",
                 "O que é (Tipo)": "", "Alimentação": "",
-                "Category General": "", "FAMILY": "",
+                "Category General": "", "FAMILY": "", "Título Real": "",
                 "Status": "Script", "Revisão": "REVISAR", "Revisão B.I": "",
             }])
             for name in ("master", "final"):
