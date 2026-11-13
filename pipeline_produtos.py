@@ -10305,8 +10305,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout-minutes", type=int, default=120)
     p.add_argument("--resume-dir", default="")
     p.add_argument("--campaign-total", type=int, default=0)
-    p.add_argument("--campaign-review-before-promotion", action="store_true",
-                   help="Complete and audit isolated batches, NEVER auto-promote to canonical files; explicit promotion remains separate")
+    p.add_argument("--campaign-review-before-promotion", dest="campaign_review_before_promotion",
+                   action="store_true", default=True,
+                   help="SAFE DEFAULT: stop after isolated collection/classification/audit; never auto-promote")
+    p.add_argument("--campaign-auto-promote", dest="campaign_review_before_promotion",
+                   action="store_false",
+                   help="EXPLICIT LEGACY OPT-IN: promote structural audit PASS without human taxonomy review (not recommended)")
     p.add_argument("--campaign-jev-budget", type=int, default=0)
     p.add_argument("--campaign-token-budget", type=int, default=0)
     p.add_argument("--campaign-resume-dir", default="", help="Existing campaign manifest directory; never starts new unaudited work")
