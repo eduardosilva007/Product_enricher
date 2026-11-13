@@ -10385,7 +10385,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -10502,6 +10502,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
     print("7 - EXPORTAR EVIDENCE BUNDLE (SEM BUSCA / 0 CRÉDITOS)")
     print("8 - SAIR")
+    print("9 - CENTRALIZAR CACHE DOS PILOTOS E GRAVAR BASE FINAL (0 APIS)")
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
@@ -10561,6 +10562,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         if limite:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
+    if op == "9":
+        return parser.parse_args(["--mode", "overnight-centralize"])
     raise SystemExit(0)
 
 
@@ -11195,6 +11198,32 @@ def main() -> int:
                 Path(args.campaign_resume_dir),cfg,rules)
             print(json.dumps(result,ensure_ascii=False,indent=2,default=str))
             return 0
+    if args.mode == "overnight-centralize":
+        # One VS Code menu operation: dry-run all canonical workbooks/cache,
+        # then explicit GRAVAR. Never calls Search or JEV.
+        with exclusive_campaign_lock():
+            pending = _night_pending_centralization()
+            if not pending:
+                print("CACHE CENTRAL SINCRONIZADO: nenhuma campanha pendente.")
+                return 0
+            print("\nCAMPANHAS COMPLETAS A CENTRALIZAR (SEM SEARCH/JEV):")
+            for index, (folder, data) in enumerate(pending, 1):
+                print(f"{index} - {folder.name} | SKUs={data.get('audited_products')}")
+            choice = input("Numero (ENTER = ultima campanha): ").strip()
+            number = int(choice) if choice else len(pending)
+            if not 1 <= number <= len(pending):
+                raise ValueError("CAMPANHA_FORA_DA_LISTA")
+            folder, _ = pending[number - 1]
+            preview = overnight_promote_campaign(folder, cfg, rules, dry_run=True)
+            print(json.dumps(preview, indent=2, ensure_ascii=False, default=str))
+            if preview.get("status") != "DRY_RUN_PASS":
+                raise RuntimeError("CENTRALIZE_DRY_RUN_FAILED")
+            if input("Confirma gravacao oficial cache+Master+Final? Digite GRAVAR: ").strip() != "GRAVAR":
+                print("NAO_GRAVADO: somente dry-run, zero APIs.")
+                return 0
+            report = overnight_promote_campaign(folder, cfg, rules, dry_run=False)
+            print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+            return 0
     if args.mode == "overnight-promote":
         if bool(args.campaign_resume_dir) == bool(args.legacy_run_dir):
             raise ValueError("Provide exactly one: --campaign-resume-dir OR two --legacy-run-dir")
@@ -11231,6 +11260,14 @@ def main() -> int:
             "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
             "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
         )
+    if args.mode in {"collect", "full", "classify", "recover", "overnight"}:
+        pending_cache = _night_pending_centralization()
+        if pending_cache:
+            LOG.error(
+                "CACHE CENTRAL PENDENTE: %d campanha(s) COMPLETE ainda isolada(s). "
+                "Execute opcao 9 antes de novas chamadas Search/JEV.",
+                len(pending_cache))
+            return 2
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
     if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and args.auto_providers):
@@ -12447,6 +12484,164 @@ def _overnight_scoped_excel_overlay(original_path: Path, generated_path: Path,
             "original_rows_preserved":len(old)}
 
 
+
+def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, records, rules):
+    """Project all audited SKU rows onto official staged Excel, without Search/JEV.
+
+    Do not globally rebuild/deduplicate legacy baselines. Only exact cohort
+    identities may change; preserve all other rows and every accepted/human lock.
+    No classification output means explicit PENDING, never an approved label.
+    """
+    from openpyxl import load_workbook
+    cache = {}
+    for brand, model, payload in raw_items:
+        key = business_key(brand, model)
+        if key in cache:
+            raise RuntimeError("CENTRALIZE_DUPLICATE_RAW:" + key)
+        cache[key] = payload
+    if set(cache) != set(pairs):
+        raise RuntimeError("CENTRALIZE_RAW_KEYS_DIFFER")
+    proposals = {}
+    for rec in records:
+        pair = (safe(rec.get("Marca")), safe(rec.get("Modelo")))
+        key = business_key(*pair)
+        if key not in pairs or key in proposals or pair != tuple(pairs[key]):
+            raise RuntimeError("CENTRALIZE_INVALID_PROPOSAL:" + key)
+        proposals[key] = rec
+    fields = (
+        "O que é (Tipo)", "Alimentação", "Category General", "FAMILY",
+        "Título Real", "Fonte URL", "Título Referência", "Fonte Referência URL",
+        "Título Referência Identity", "Próxima Ação", "Status", "Revisão",
+        "Revisão B.I", "Status Processamento", "Status Coleta",
+        "Status Classificação", "Raw State", "Collection State",
+        "Resolution State", "Classification Identity", "Review Required",
+        "Auto Eligible", "Motivo", "Reason Code", "Rules Version",
+        "Rules Hash", "Pipeline Version",
+    )
+    result = {"cohort": len(pairs), "classification_rows": len(proposals),
+              "pending_classification": len(pairs) - len(proposals),
+              "search_calls": 0, "llm_calls": 0}
+    for name in ("master", "final"):
+        before, sheetname = _read_business_sheet(Path(originals[name]["path"]))
+        book = load_workbook(staged[name])
+        if sheetname not in book.sheetnames:
+            raise RuntimeError("CENTRALIZE_SHEET_MISMATCH:" + name)
+        sheet = book[sheetname]
+        headers = {safe(cell.value): cell.column for cell in sheet[1]
+                   if safe(cell.value)}
+        bc = find_col(before, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        mc = find_col(before, ["Modelo", "Model", "SKU", "Part Number"])
+        if bc not in headers or mc not in headers:
+            raise RuntimeError("CENTRALIZE_MISSING_IDENTITY_COLUMN:" + name)
+        exact, by_key = {}, {}
+        for pos, row in before.iterrows():
+            pair = (safe(row.get(bc)), safe(row.get(mc)))
+            exact.setdefault(pair, []).append((pos + 2, row))
+            by_key.setdefault(business_key(*pair), set()).add(pair)
+        for key, pair in pairs.items():
+            pair = tuple(map(safe, pair))
+            if key != business_key(*pair) or len(exact.get(pair, [])) > 1:
+                raise RuntimeError("CENTRALIZE_INVALID_EXACT_IDENTITY:" + key)
+            if not exact.get(pair) and any(p != pair for p in by_key.get(key, ())):
+                raise RuntimeError("CENTRALIZE_NORMALIZED_ALIAS_COLLISION:" + key)
+        for field in fields:
+            if field not in headers:
+                col = sheet.max_column + 1
+                sheet.cell(1, col, field)
+                headers[field] = col
+        counts = {"new": 0, "updated_pending": 0,
+                  "existing_accepted_unchanged": 0}
+        for key, pair in pairs.items():
+            pair = tuple(map(safe, pair))
+            matches = exact.get(pair, [])
+            if matches:
+                pos, row = matches[0]
+                status_col = find_col(before, ["Status"], required=False)
+                if (_row_bi_locked(row, before) or _baseline_row_accepted(row, before)
+                        or (status_col and _is_manual_status(row.get(status_col)))):
+                    counts["existing_accepted_unchanged"] += 1
+                    continue
+                counts["updated_pending"] += 1
+            else:
+                pos = sheet.max_row + 1
+                sheet.cell(pos, headers[bc], pair[0])
+                sheet.cell(pos, headers[mc], pair[1])
+                counts["new"] += 1
+            payload = cache[key] or {}
+            coll = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
+            sources = list(coll.get("curated_results") or []) + list(payload.get("results") or [])
+            reference = next((s for s in sources if isinstance(s, dict) and safe(s.get("title"))), {})
+            rec = proposals.get(key)
+            updates = {
+                "Status": "Script", "Revisão": "REVISAR",
+                "Próxima Ação": "REVISAR_EVIDENCIA_CACHE",
+                "Status Processamento": "PENDENTE",
+                "Status Coleta": "COLETADO_RAW_DISPONIVEL",
+                "Status Classificação": "PENDENTE_CLASSIFICACAO",
+                "Raw State": "RAW_OK", "Collection State": safe(coll.get("state")),
+                "Resolution State": "REVIEW_CACHE_EVIDENCE",
+                "Review Required": "SIM", "Auto Eligible": "NÃO",
+                "Motivo": "RAW disponível; sem classificação exportada. Verificar evidências.",
+                "Reason Code": "NIGHTLY_NO_CLASSIFICATION_OUTPUT",
+                "Rules Version": rules.version, "Rules Hash": rules.hash,
+                "Pipeline Version": PIPELINE_VERSION,
+            }
+            if reference:
+                updates.update({
+                    "Título Referência": safe(reference.get("title")),
+                    "Fonte Referência URL": safe(reference.get("url")),
+                    "Título Referência Identity": safe(reference.get("identity")),
+                })
+            if rec is None:
+                updates.update({"O que é (Tipo)": None, "Alimentação": "UNKNOWN",
+                                "Category General": None, "FAMILY": None})
+            else:
+                for col in fields:
+                    if col in rec and col not in {"Status", "Revisão B.I"}:
+                        value = rec[col]
+                        if value is None or isinstance(value, (str, int, float, bool)):
+                            updates[col] = value
+                state = safe(rec.get("Resolution State")).upper()
+                updates["Status Processamento"] = "PROCESSADO"
+                updates["Revisão"] = "PROVÁVEL" if state in {"RESOLVED", "CLASSIFIED_CLEF"} else "REVISAR"
+                updates["Próxima Ação"] = "DOUBLE_CHECK" if state in {"RESOLVED", "CLASSIFIED_CLEF"} else "REVISAR_EVIDENCIA_CACHE"
+                updates["Status Classificação"] = (
+                    "COMPLETA_NAO_HOMOLOGADA" if state in {"RESOLVED", "CLASSIFIED_CLEF"}
+                    else "PENDENTE_CLASSIFICACAO"
+                )
+                # No imported proposal is a human decision or automatically
+                # accepted baseline until explicit B.I review.
+                updates["Review Required"] = "SIM"
+                updates["Auto Eligible"] = "NÃO"
+            for column, val in updates.items():
+                if column != "Revisão B.I":
+                    sheet.cell(pos, headers[column],
+                               _excel_export_safe_value(val) if isinstance(val, str) else val)
+            if not matches:
+                sheet.cell(pos, headers["Revisão B.I"], None)
+        book.save(staged[name])
+        book.close()
+        after, _ = _read_business_sheet(staged[name])
+        if len(after) < len(before):
+            raise RuntimeError("CENTRALIZE_ROWS_DROPPED:" + name)
+        for pos, old in before.iterrows():
+            pair = (safe(old.get(bc)), safe(old.get(mc)))
+            now = after.iloc[pos]
+            if pair != (safe(now.get(bc)), safe(now.get(mc))):
+                raise RuntimeError("CENTRALIZE_ROWS_REORDERED:" + name)
+            k = business_key(*pair)
+            protected = (k not in pairs or _row_bi_locked(old, before)
+                         or _baseline_row_accepted(old, before))
+            if protected:
+                for field in before.columns:
+                    if safe(old.get(field)) != safe(now.get(field)):
+                        raise RuntimeError(
+                            f"CENTRALIZE_PROTECTED_CHANGED:{name}:{pos+2}:{field}"
+                        )
+        result[name] = counts
+    return result
+
+
 def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: Rules, dry_run: bool = False) -> Dict[str, Any]:
     """Commit verified isolated RAW + classifications into canonical cache/Excel.
 
@@ -12463,12 +12658,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         return state["promotion"]
     if state.get("promotion", {}).get("status") in {"PROMOTING", "RECOVERY_REQUIRED"}:
         raise RuntimeError("PROMOTION_RECOVERY_REQUIRED: inspect immutable backup before trying again")
-    if state.get("night_output_only", False):
-        raise RuntimeError(
-            "PROMOTION_BLOCKED_OUTPUT_ONLY: classifier results were stored only "
-            "in output XLSX/SQLite; a separately audited cohort-scoped Excel "
-            "projection is required before any canonical promotion."
-        )
+    output_only = bool(state.get("night_output_only", False))
     if state.get("status") != "COMPLETE" or not state.get("batches"):
         raise RuntimeError("PROMOTION_BLOCKED: requires COMPLETE audited campaign")
     if state.get("active_run") or state.get("pending_run_creation"):
@@ -12679,17 +12869,19 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         ])).to_excel(promotion_input, index=False)
         # Existing vetted/up-to-date official rows dominate historical proposals.
         # The canonical master routine contains locks for Manual and BI_OK.
-        stats = persist_baseline_excels(
-            rows=records, master_path=staged["master"],
-            final_path=staged["final"], input_path=promotion_input,
-            rules=rules, cache_path=staged["cache"], cfg=cfg,
-        )
-        # The legacy exporter reorders/deduplicates unrelated lines. Rewrite
-        # staged workbooks as an exact cohort overlay of the canonical originals.
-        stats["master_scoped_overlay"] = _overnight_scoped_excel_overlay(
-            canonical["master"],staged["master"],cohort_pairs)
-        stats["final_scoped_overlay"] = _overnight_scoped_excel_overlay(
-            canonical["final"],staged["final"],cohort_pairs)
+        if output_only:
+            stats = _night_stage_output_only_canonical(
+                originals, staged, cohort_pairs, raw_items, records, rules)
+        else:
+            stats = persist_baseline_excels(
+                rows=records, master_path=staged["master"],
+                final_path=staged["final"], input_path=promotion_input,
+                rules=rules, cache_path=staged["cache"], cfg=cfg,
+            )
+            stats["master_scoped_overlay"] = _overnight_scoped_excel_overlay(
+                canonical["master"], staged["master"], cohort_pairs)
+            stats["final_scoped_overlay"] = _overnight_scoped_excel_overlay(
+                canonical["final"], staged["final"], cohort_pairs)
         final, _ = _read_business_sheet(staged["final"])
         fb = find_col(final, ["Marca", "Fabricante", "Brand", "Manufacturer"])
         fm = find_col(final, ["Modelo", "Model", "SKU", "Part Number"])
@@ -12987,6 +13179,18 @@ def overnight_recover_prepared_twenty(manifest_path: Path, *, commit: bool = Fal
     result["status"] = "COMMITTED"
     result["canonical_modified"] = True
     return result
+
+def _night_pending_centralization():
+    """No paid Search/classification with a COMPLETE uncentralized cache."""
+    pending = []
+    for manifest in sorted((OUT / "campaigns").glob("*/campaign.json")):
+        state = read_json(manifest)
+        if (state.get("status") == "COMPLETE"
+                and state.get("night_output_only")
+                and (state.get("promotion") or {}).get("status") != "COMMITTED"):
+            pending.append((manifest.parent, state))
+    return pending
+
 
 def overnight_campaign(args, cfg, rules=None):
     """One master entrypoint: collect -> classify -> audit in <=20 SKU sublots.
