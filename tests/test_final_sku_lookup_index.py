@@ -82,6 +82,27 @@ class FinalSkuIndexTests(unittest.TestCase):
                 [c.value for c in wb["Base Final"][1]], p.BASELINE_PUBLIC_COLUMNS)
             wb.close()
 
+
+    def test_ambiguous_blank_original_roundtrips_in_real_xlsx(self):
+        # 503 ambiguous keys exist in real baseline. openpyxl writes "" as a
+        # blank cell and read_only yields None, not "". This caused the failed
+        # staging validation despite all 50 committed SKUs already being found.
+        with tempfile.TemporaryDirectory() as tmp:
+            final = Path(tmp) / "final.xlsx"
+            self.make_final(final)
+            wb = load_workbook(final)
+            ws = wb["Base Final"]
+            ws.append(["FIXTEC", "FCD12L06UL", "ENGINE", "PETROL",
+                       "OTHERS", "ENGINE", "Other", "REVISAR",
+                       "Script", "REVISAR", ""])
+            wb.save(final)
+            wb.close()
+            p._write_final_sku_index_to_stage(final)
+            _, report = p._final_sku_index_state(final, {"fmwpower|mcwg100"})
+            self.assertEqual(report["status"], "INDEX_ALIGNED")
+            self.assertEqual(report["ambiguous_keys"], 1)
+            self.assertEqual(report["campaign_keys_found"], 1)
+
     def test_variant_collisions_are_marked_ambiguous(self):
         with tempfile.TemporaryDirectory() as tmp:
             final = Path(tmp) / "final.xlsx"
@@ -107,14 +128,30 @@ class FinalSkuIndexTests(unittest.TestCase):
             campaign = root / "piloto_argentina" / "controlled_night" / "campaigns" / "c1"
             campaign.mkdir(parents=True)
             (campaign / "campaign.json").write_text(
-                json.dumps({"status":"COMPLETE","promotion":{"status":"COMMITTED"},
+                json.dumps({"status":"COMPLETE","night_output_only":True,
+                            "audited_products":50,"promotion":{"status":"COMMITTED"},
                             "batches":[{"cohort_keys":["fixtec|fcd12l06ul",
                                                        "fmwpower|mcwg100"]}]}),
+                encoding="utf-8")
+            wb = load_workbook(final)
+            for i in range(46):
+                wb["Base Final"].append(["ACME", f"P{i:04d}", "", "", "", "", "",
+                                          "REVISAR", "Script", "REVISAR", ""])
+            wb.save(final)
+            wb.close()
+            keys = ["fixtec|fcd12l06ul", "flex|pe142150230cee",
+                    "fmwpower|mcwg100", "foton|5417272"] + [
+                        f"acme|p{i:04d}" for i in range(46)]
+            (campaign / "campaign.json").write_text(
+                json.dumps({"status":"COMPLETE", "night_output_only":True,
+                            "audited_products":50,"promotion":{"status":"COMMITTED"},
+                            "batches":[{"cohort_keys":keys}]}),
                 encoding="utf-8")
             cfg = {"files":{"final":str(final),"baseline_backup_dir":str(root/"backups")}}
             with patch.object(p, "OUT", root/"piloto_argentina"/"controlled_night"), patch.object(p, "ROOT", root):
                 first = p.reconcile_final_sku_index(cfg)
-                self.assertEqual(first["campaign_keys_found"], 2)
+                self.assertEqual(first["expected_campaign_keys"], 50)
+                self.assertEqual(first["campaign_keys_found"], 50)
                 self.assertEqual(first["status"], "INDEX_REQUIRED")
                 done = p.reconcile_final_sku_index(cfg, commit=True)
                 self.assertEqual(done["status"], "INDEX_COMMITTED")
@@ -122,7 +159,7 @@ class FinalSkuIndexTests(unittest.TestCase):
                 repeat = p.reconcile_final_sku_index(cfg)
                 self.assertEqual(repeat["status"], "INDEX_ALIGNED")
                 wb = load_workbook(final)
-                self.assertEqual(len(wb["Base Final"]["A"]), 5)
+                self.assertEqual(len(wb["Base Final"]["A"]), 51)
                 wb.close()
 
 

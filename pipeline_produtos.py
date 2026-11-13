@@ -8045,8 +8045,15 @@ def _final_sku_index_state(final_path: Path, campaign_keys=None):
                 bool(current)
                 and tuple(current[0]) == tuple(FINAL_SKU_INDEX_COLUMNS)
                 and len(current) == len(rows) + 1
-                and all(tuple(actual) == tuple(wanted)
-                        for actual, wanted in zip(current[1:], rows))
+                # Excel persists empty strings as blank cells (None). Every
+                # ambiguous normalized SKU deliberately has an empty original
+                # and must roundtrip through Excel without a false mismatch.
+                and all(
+                    len(actual) == len(wanted)
+                    and all(safe(value) == safe(expected)
+                            for value, expected in zip(actual, wanted))
+                    for actual, wanted in zip(current[1:], rows)
+                )
             )
             found = len(current) - 1
         report = {
@@ -8103,14 +8110,28 @@ def reconcile_final_sku_index(cfg, *, commit=False):
     path = (ROOT / str(cfg["files"]["final"])).resolve()
     if not path.is_file():
         raise RuntimeError("SKU_INDEX_OFFICIAL_FINAL_NOT_FOUND")
-    expected = set()
+    # This operator closes the most recent COMPLETE, COMMITTED 50-SKU
+    # campaign. Earlier 20/legacy campaigns are not the requested cohort.
+    eligible = []
     for manifest in sorted((OUT / "campaigns").glob("*/campaign.json")):
         state = read_json(manifest)
         if ((state.get("promotion") or {}).get("status") == "COMMITTED"
-                and state.get("status") == "COMPLETE"):
-            for batch in state.get("batches", []):
-                expected.update(batch.get("cohort_keys", []))
+                and state.get("status") == "COMPLETE"
+                and state.get("night_output_only")
+                and state.get("audited_products") == 50):
+            eligible.append((manifest, state))
+    if not eligible:
+        raise RuntimeError("SKU_INDEX_COMMITTED_50_CAMPAIGN_NOT_FOUND")
+    campaign_manifest, campaign = eligible[-1]
+    expected = set()
+    for batch in campaign.get("batches", []):
+        expected.update(batch.get("cohort_keys", []))
+    if len(expected) != 50:
+        raise RuntimeError(
+            f"SKU_INDEX_EXPECTED_50_DIFFERENT_COUNT:{len(expected)}")
     _, report = _final_sku_index_state(path, expected)
+    report["campaign"] = campaign_manifest.parent.name
+    report["scope"] = "LAST_COMMITTED_50_SKUS"
     if report["status"] != "INDEX_REQUIRED" or not commit:
         return report
     before, _ = _read_business_sheet(path)
