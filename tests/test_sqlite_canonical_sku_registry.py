@@ -1,5 +1,6 @@
 """Verify one canonical SQLite lookup is merged from official workbook only."""
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from pathlib import Path
@@ -55,7 +56,7 @@ class SqliteRegistryMergeTests(unittest.TestCase):
             self.assertEqual(done["status"],"SQLITE_MERGED")
             self.assertEqual(final.read_bytes(),before)
             self.assertEqual(set(p.iterdir()),{final,master,db})
-            with sqlite3.connect(db) as con:
+            with closing(sqlite3.connect(db)) as con:
                 self.assertEqual(con.execute(
                     "SELECT count(*) FROM sku_registry_lookup_v1").fetchone()[0],50)
                 self.assertEqual(con.execute(
@@ -74,9 +75,10 @@ class SqliteRegistryMergeTests(unittest.TestCase):
             rows=[("FIXTEC","FCD12L06 UL","","","","","","REVISAR","Script","REVISAR","")]
             write_excel(final,"Base Final",rows)
             write_excel(master,"Consolidado",rows)
-            with sqlite3.connect(db) as c:
+            with closing(sqlite3.connect(db)) as c:
                 c.execute("CREATE TABLE classification_results(id TEXT PRIMARY KEY)")
                 c.execute("INSERT INTO classification_results VALUES ('prior')")
+                c.commit()
             cfg={"files":{"classification_db":str(db)}}
             first=pipe._refresh_sqlite_sku_registry(master,final,cfg)
             self.assertEqual(first["lookup_pending"],1)
@@ -89,7 +91,7 @@ class SqliteRegistryMergeTests(unittest.TestCase):
             self.assertEqual(second["status"],"SQLITE_MERGED")
             self.assertEqual(second["campaign_found_in_final"],1)
             self.assertEqual(second["lookup_proposals"],1)
-            with sqlite3.connect(db) as c:
+            with closing(sqlite3.connect(db)) as c:
                 result=c.execute("SELECT product_type, classification_state "
                     "FROM sku_registry_lookup_v1 WHERE sku_key='fixtec|fcd12l06ul'").fetchone()
                 self.assertEqual(result,("DRILL","COMPLETE_PROPOSAL"))
@@ -124,7 +126,7 @@ class SqliteRegistryMergeTests(unittest.TestCase):
             report=audit_sqlite_merge(f,m,db,{"fixtec|fcd12l06ul"},commit=True)
             self.assertEqual(report["status"],"BLOCKED_MISSING_OR_AMBIGUOUS")
             self.assertEqual(report["global_ambiguous"],1)
-            with sqlite3.connect(db) as con:
+            with closing(sqlite3.connect(db)) as con:
                 self.assertFalse(con.execute(
                     "SELECT 1 FROM sqlite_master WHERE name='sku_registry_lookup_v1'"
                 ).fetchone())
