@@ -7958,6 +7958,191 @@ def _manual_review_bundle(raw: RawEvidence) -> Dict[str, str]:
 
 
 
+
+FINAL_SKU_INDEX_SHEET = "_Indice_SKU"
+FINAL_SKU_INDEX_COLUMNS = [
+    "Chave Normalizada", "Marca|Modelo Original", "Marca", "Modelo",
+    "Linha Base Final", "Ocorrencias", "Situacao",
+]
+
+
+def _final_sku_lookup_rows(sheet):
+    """One row per compact business key, preserving every original Excel SKU."""
+    header = {safe(cell.value): cell.column for cell in sheet[1] if safe(cell.value)}
+    if any(x not in header for x in BASELINE_PUBLIC_COLUMNS):
+        raise RuntimeError("SKU_INDEX_FINAL_MISSING_PUBLIC_COLUMNS")
+    groups = {}
+    physical = 0
+    for idx in range(2, sheet.max_row + 1):
+        brand = safe(sheet.cell(idx, header["Marca"]).value)
+        model = safe(sheet.cell(idx, header["Modelo"]).value)
+        if not brand or not model:
+            continue
+        key = business_key(brand, model)
+        if not key or key == "|":
+            raise RuntimeError("SKU_INDEX_EMPTY_NORMALIZED_KEY")
+        physical += 1
+        signature = tuple(safe(sheet.cell(idx, header[c]).value) for c in BASELINE_PUBLIC_COLUMNS)
+        groups.setdefault(key, []).append((idx, brand, model, signature))
+    rows, stats = [], {
+        "physical_rows": physical, "normalized_keys": len(groups),
+        "exact_duplicates": 0, "ambiguous_keys": 0, "rows_indexed": 0,
+    }
+    for key in sorted(groups):
+        entries = groups[key]
+        variants = {(b, m) for _, b, m, _ in entries}
+        signatures = {signature for _, _, _, signature in entries}
+        if len(variants) != 1 or len(signatures) != 1:
+            stats["ambiguous_keys"] += 1
+            # No misleading match on conflicting normalized identities.
+            original = ""
+            state = "AMBIGUO:VARIANTES_OU_CLASSIFICACAO"
+        else:
+            _, brand, model, _ = entries[0]
+            original = brand + "|" + model
+            state = "OK"
+            stats["rows_indexed"] += 1
+            stats["exact_duplicates"] += len(entries) - 1
+        first, brand, model, _ = entries[0]
+        rows.append((key, original, brand, model, first, len(entries), state))
+    return rows, stats
+
+
+def _final_sku_index_state(final_path: Path, campaign_keys=None):
+    """Compare physical Base Final rows and same-workbook normalized lookup."""
+    from openpyxl import load_workbook
+    book = load_workbook(final_path, read_only=True, data_only=True)
+    try:
+        if "Base Final" not in book.sheetnames:
+            raise RuntimeError("SKU_INDEX_BASE_FINAL_SHEET_MISSING")
+        rows, stats = _final_sku_lookup_rows(book["Base Final"])
+        expected = {r[0]: r for r in rows}
+        lookup_keys = set(campaign_keys or [])
+        missing = sorted(lookup_keys - set(expected))
+        mismatches = sorted(
+            key for key in lookup_keys & set(expected)
+            if expected[key][6] == "OK"
+            and expected[key][1].casefold() != key.casefold()
+        )
+        ambiguous_campaign = sorted(
+            key for key in lookup_keys & set(expected) if expected[key][6] != "OK")
+        found = 0
+        index_correct = False
+        if FINAL_SKU_INDEX_SHEET in book.sheetnames:
+            ws = book[FINAL_SKU_INDEX_SHEET]
+            current = list(ws.values)
+            index_correct = (
+                bool(current)
+                and tuple(current[0]) == tuple(FINAL_SKU_INDEX_COLUMNS)
+                and len(current) == len(rows) + 1
+                and all(tuple(actual) == tuple(wanted)
+                        for actual, wanted in zip(current[1:], rows))
+            )
+            found = len(current) - 1
+        report = {
+            "status": (
+                "BLOCKED_MISSING_COHORT_KEYS" if missing
+                else "INDEX_ALIGNED" if index_correct else "INDEX_REQUIRED"
+            ),
+            "official_file": str(final_path),
+            "expected_campaign_keys": len(lookup_keys),
+            "campaign_keys_found": len(lookup_keys) - len(missing),
+            "campaign_keys_missing": missing[:20],
+            "campaign_keys_with_original_format_difference": len(mismatches),
+            "format_difference_examples": [
+                {"key": key, "original": expected[key][1]}
+                for key in mismatches[:12]
+            ],
+            "campaign_ambiguous_keys": ambiguous_campaign[:20],
+            "index_rows_current": found,
+            "index_rows_expected": len(rows),
+            "index_hidden_sheet": FINAL_SKU_INDEX_SHEET,
+            **stats, "search_calls": 0, "llm_calls": 0,
+        }
+        return rows, report
+    finally:
+        book.close()
+
+
+def _write_final_sku_index_to_stage(path: Path):
+    """Index in SAME final workbook; no extra final files or business columns."""
+    from openpyxl import load_workbook
+    book = load_workbook(path)
+    try:
+        if "Base Final" not in book.sheetnames:
+            raise RuntimeError("SKU_INDEX_FINAL_SHEET_MISSING")
+        rows, summary = _final_sku_lookup_rows(book["Base Final"])
+        if FINAL_SKU_INDEX_SHEET in book.sheetnames:
+            book.remove(book[FINAL_SKU_INDEX_SHEET])
+        lookup = book.create_sheet(FINAL_SKU_INDEX_SHEET)
+        lookup.append(FINAL_SKU_INDEX_COLUMNS)
+        for row in rows:
+            lookup.append(row)
+        lookup.sheet_state = "hidden"
+        book.save(path)
+        return summary
+    finally:
+        book.close()
+
+
+def reconcile_final_sku_index(cfg, *, commit=False):
+    """Offline, transactional 70-SKU lookup gate + scalable 18k PROCV index."""
+    import tempfile
+    import shutil
+
+    path = (ROOT / str(cfg["files"]["final"])).resolve()
+    if not path.is_file():
+        raise RuntimeError("SKU_INDEX_OFFICIAL_FINAL_NOT_FOUND")
+    expected = set()
+    for manifest in sorted((OUT / "campaigns").glob("*/campaign.json")):
+        state = read_json(manifest)
+        if ((state.get("promotion") or {}).get("status") == "COMMITTED"
+                and state.get("status") == "COMPLETE"):
+            for batch in state.get("batches", []):
+                expected.update(batch.get("cohort_keys", []))
+    _, report = _final_sku_index_state(path, expected)
+    if report["status"] != "INDEX_REQUIRED" or not commit:
+        return report
+    before, _ = _read_business_sheet(path)
+    previous_hash = digest(path)
+    fd, tmp = tempfile.mkstemp(prefix=".sku_index_", suffix=".xlsx",
+                               dir=path.parent)
+    os.close(fd)
+    stage = Path(tmp)
+    try:
+        shutil.copy2(path, stage)
+        _write_final_sku_index_to_stage(stage)
+        after, _ = _read_business_sheet(stage)
+        if len(after) != len(before) or list(after.columns) != list(before.columns):
+            raise RuntimeError("SKU_INDEX_BUSINESS_SCHEMA_CHANGED")
+        for idx, old in before.iterrows():
+            for col in before.columns:
+                if safe(old.get(col)) != safe(after.iloc[idx].get(col)):
+                    raise RuntimeError(
+                        f"SKU_INDEX_BUSINESS_VALUE_CHANGED:{idx+2}:{col}"
+                    )
+        _, verify = _final_sku_index_state(stage, expected)
+        if verify["status"] != "INDEX_ALIGNED":
+            raise RuntimeError("SKU_INDEX_STAGING_VERIFICATION_FAILED")
+        if digest(path) != previous_hash:
+            raise RuntimeError("SKU_INDEX_CONCURRENT_FINAL_MODIFICATION")
+        backup_root = (ROOT / str(cfg["files"].get(
+            "baseline_backup_dir", "Backups_Baseline"))).resolve()
+        backup_dir = _backup_baseline_files(None, path, backup_root)
+        if not backup_dir or digest(backup_dir / path.name) != previous_hash:
+            raise RuntimeError("SKU_INDEX_BACKUP_HASH_MISMATCH")
+        os.replace(stage, path)
+        _, verified = _final_sku_index_state(path, expected)
+        if verified["status"] != "INDEX_ALIGNED":
+            shutil.copy2(backup_dir / path.name, path)
+            raise RuntimeError("SKU_INDEX_POSTCOMMIT_NOT_ALIGNED")
+        verified.update(status="INDEX_COMMITTED", backup=str(backup_dir),
+                        final_business_columns=len(before.columns))
+        return verified
+    finally:
+        stage.unlink(missing_ok=True)
+
+
 def input_cache_readiness(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Zero-cost scoped pilot readiness; RAW_EMPTY is NOT a fresh Search quota.
 
@@ -8866,6 +9051,7 @@ def _export_base_final(
             # evidence/statuses remain on the Consolidado and SQLite cache.
             _excel_export_safe_frame(out.loc[:, BASELINE_PUBLIC_COLUMNS]).to_excel(
                 writer, sheet_name="Base Final", index=False)
+        _write_final_sku_index_to_stage(tmp)
         os.replace(tmp, final_path)
     except PermissionError as exc:
         try:
@@ -10731,7 +10917,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "final-lookup-index", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -10852,6 +11038,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print("9 - CENTRALIZAR CACHE DOS PILOTOS E GRAVAR BASE FINAL (0 APIS)")
     print("10 - LIMPAR BASE FINAL: 11 COLUNAS (SEM BUSCA / SEM CLASSIFICACAO)")
     print("11 - AUDITAR / RECUPERAR CLASSIFICACOES JA COLETADAS (0 APIS)")
+    print("12 - VALIDAR CHAVES / PROCV NA BASE FINAL (0 APIS)")
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
@@ -10918,6 +11105,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
                                   "--final-schema-interactive"])
     if op == "11":
         return parser.parse_args(["--mode", "audit-central-cache"])
+    if op == "12":
+        return parser.parse_args(["--mode", "final-lookup-index"])
     raise SystemExit(0)
 
 
@@ -11457,6 +11646,7 @@ def clean_final_business_schema(path: Path, *, commit: bool = False) -> Dict[str
         shutil.copy2(path, backup)
         if filehash(backup) != original_hash or filehash(path) != original_hash:
             raise RuntimeError("FINAL_CLEAN_BACKUP_VERIFICATION_FAILED")
+        _write_final_sku_index_to_stage(temp)
         os.replace(temp,path)
         temp = None
         result.update(status="COMMITTED",backup=str(backup),
@@ -11523,6 +11713,21 @@ def main() -> int:
         for e in errors[:50]:
             LOG.error(e)
         return 2
+    if args.mode == "final-lookup-index":
+        with exclusive_campaign_lock():
+            preview = reconcile_final_sku_index(cfg, commit=False)
+            print(json.dumps(preview, ensure_ascii=False, indent=2))
+            if preview["status"] == "BLOCKED_MISSING_COHORT_KEYS":
+                LOG.error("SKU physically missing in Base Final; block all paid work")
+                return 2
+            if preview["status"] == "INDEX_REQUIRED":
+                if input("Criar indice DENTRO da Base Final sem alterar produtos? Digite GRAVAR: ").strip() != "GRAVAR":
+                    print("NAO_GRAVADO: indice em dry-run.")
+                    return 2
+                report = reconcile_final_sku_index(cfg, commit=True)
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+                return 0 if report["status"] == "INDEX_COMMITTED" else 2
+            return 0 if preview["status"] == "INDEX_ALIGNED" else 2
     if args.mode == "audit-central-cache":
         with exclusive_campaign_lock():
             report = audit_committed_classifications(cfg, commit=False)
@@ -13079,6 +13284,8 @@ def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, reco
             if count != len(BASELINE_PUBLIC_COLUMNS):
                 raise RuntimeError("CENTRALIZE_FINAL_PUBLIC_SCHEMA_INVALID")
             result["final_business_columns"] = count
+            result["sku_lookup_index"] = _write_final_sku_index_to_stage(
+                staged[name])
         result[name] = counts
     return result
 
