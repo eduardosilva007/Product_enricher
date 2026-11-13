@@ -7955,6 +7955,66 @@ def _manual_review_bundle(raw: RawEvidence) -> Dict[str, str]:
     }
 
 
+
+def _restore_missing_final_proposal_fields(master_df: Any, proposed_final: Any) -> Dict[str, int]:
+    """Keep completed, unapproved classification proposals across full export.
+
+    Never use a normalized business key to overwrite an exact SKU. Existing
+    B.I=OK and Manual rows win. Missing fields can be filled from the canonical
+    Consolidado; contradictory nonempty values block the write. No API calls.
+    """
+    import pandas as pd
+    brand = find_col(master_df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    model = find_col(master_df, ["Modelo", "Model", "SKU", "Part Number"])
+    final_exact = {}
+    for idx, row in proposed_final.iterrows():
+        key = (safe(row.get("Marca")), safe(row.get("Modelo")))
+        final_exact.setdefault(key, []).append(idx)
+    fields = ("O que é (Tipo)", "Alimentação", "Category General", "FAMILY", "Título Real")
+    stats = {"proposals_checked": 0, "fields_restored": 0,
+             "human_locks_skipped": 0, "conflicts": 0}
+    for _, source in master_df.iterrows():
+        if (safe(source.get("Resolution State")).upper() not in
+                {"CLASSIFIED_CLEF", "RESOLVED"}
+                or safe(source.get("Review Required")).upper() != "SIM"):
+            continue
+        if not all(safe(source.get(field)) for field in
+                   ("O que é (Tipo)", "Category General", "FAMILY")):
+            continue
+        if _row_bi_locked(source, master_df) or _is_manual_status(source.get("Status")):
+            continue
+        pair = (safe(source.get(brand)), safe(source.get(model)))
+        indexes = final_exact.get(pair, [])
+        if not indexes:
+            raise RuntimeError("BASE_FINAL_PROPOSAL_ROW_MISSING:" + repr(pair))
+        if len(indexes) > 1:
+            raise RuntimeError("BASE_FINAL_PROPOSAL_EXACT_DUPLICATE:" + repr(pair))
+        idx = indexes[0]
+        dest = proposed_final.loc[idx]
+        if _row_bi_locked(dest, proposed_final) or _is_manual_status(dest.get("Status")):
+            stats["human_locks_skipped"] += 1
+            continue
+        stats["proposals_checked"] += 1
+        for field in fields:
+            expected = safe(source.get(field))
+            if not expected or expected.upper() == "UNKNOWN":
+                continue
+            actual = safe(dest.get(field))
+            if actual and actual != expected:
+                stats["conflicts"] += 1
+                raise RuntimeError(
+                    f"BASE_FINAL_PROPOSAL_CONFLICT:{pair}:{field}:{actual!r}!={expected!r}")
+            if not actual:
+                proposed_final.at[idx, field] = expected
+                stats["fields_restored"] += 1
+        # Only proposals that still need B.I. approval. Never forge B.I=OK.
+        if safe(dest.get("Revisão")).upper() in {
+                "", "PENDENTE", "PENDENTE_CLASSIFICACAO", "REVISAR"}:
+            proposed_final.at[idx, "Revisão"] = "PROVÁVEL"
+            proposed_final.at[idx, "Próxima Ação"] = "DOUBLE_CHECK"
+    return stats
+
+
 def _export_base_final(
     master_df: Any,
     final_path: Path,
@@ -8511,6 +8571,12 @@ def _export_base_final(
             "BASE_FINAL_STALE_NO_RESULTS_ON_RAW_OK: "
             f"rows={len(stale_raw_ok)} examples={examples}"
         )
+
+    # Final-authoritative full rebuild MUST NOT drop pending but complete
+    # classification proposals already saved in the Consolidado.
+    proposal_integrity = _restore_missing_final_proposal_fields(master_df, out)
+    LOG.info("BASE FINAL PROPOSAL INTEGRITY | %s",
+             " | ".join(f"{k}={v}" for k, v in proposal_integrity.items()))
 
     tmp = final_path.with_name(final_path.stem + f".tmp_{os.getpid()}" + final_path.suffix)
     final_path.parent.mkdir(parents=True, exist_ok=True)
