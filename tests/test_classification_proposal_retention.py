@@ -47,6 +47,26 @@ class ClassificationRetentionTests(unittest.TestCase):
             _restore_missing_final_proposal_fields(master, final)
         self.assertEqual(final.loc[0, "O que é (Tipo)"], "CHAINSAW")
 
+
+    def test_exact_duplicate_rows_preserved_no_procv_loss(self):
+        master = pd.DataFrame([{
+            "Marca": "FLEX", "Modelo": "PE 14-2 150",
+            "O que é (Tipo)": "POLISHER", "Alimentação": "CORDED",
+            "Category General": "OTHERS", "FAMILY": "POLISHER",
+            "Resolution State": "CLASSIFIED_CLEF", "Review Required": "SIM",
+            "Status": "Script",
+        }])
+        final = pd.DataFrame([{
+            "Marca": "FLEX", "Modelo": "PE 14-2 150",
+            "O que é (Tipo)": "", "Category General": "", "FAMILY": "",
+            "Status": "Script", "Revisão": "REVISAR",
+        } for _ in range(2)], dtype=object)
+        stats = _restore_missing_final_proposal_fields(master, final)
+        self.assertEqual(stats["proposals_checked"], 2)
+        self.assertEqual(final.loc[0, "FAMILY"], "POLISHER")
+        self.assertEqual(final.loc[1, "FAMILY"], "POLISHER")
+        self.assertEqual(len(final), 2)
+
     def test_exact_pair_not_alias_and_human_lock(self):
         master = pd.DataFrame([{
             "Marca": "A", "Modelo": "AB-01",

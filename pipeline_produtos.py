@@ -8217,31 +8217,31 @@ def _restore_missing_final_proposal_fields(master_df: Any, proposed_final: Any) 
         indexes = final_exact.get(pair, [])
         if not indexes:
             raise RuntimeError("BASE_FINAL_PROPOSAL_ROW_MISSING:" + repr(pair))
-        if len(indexes) > 1:
-            raise RuntimeError("BASE_FINAL_PROPOSAL_EXACT_DUPLICATE:" + repr(pair))
-        idx = indexes[0]
-        dest = proposed_final.loc[idx]
-        if _row_bi_locked(dest, proposed_final) or _is_manual_status(dest.get("Status")):
-            stats["human_locks_skipped"] += 1
-            continue
-        stats["proposals_checked"] += 1
-        for field in fields:
-            expected = safe(source.get(field))
-            if not expected or expected.upper() == "UNKNOWN":
+        # Physical duplicates may be intentional for the input/PROCV.
+        # Audit each exact row; NEVER collapse them into one normalized key.
+        for idx in indexes:
+            dest = proposed_final.loc[idx]
+            if _row_bi_locked(dest, proposed_final) or _is_manual_status(dest.get("Status")):
+                stats["human_locks_skipped"] += 1
                 continue
-            actual = safe(dest.get(field))
-            if actual and actual != expected:
-                stats["conflicts"] += 1
-                raise RuntimeError(
-                    f"BASE_FINAL_PROPOSAL_CONFLICT:{pair}:{field}:{actual!r}!={expected!r}")
-            if not actual:
-                proposed_final.at[idx, field] = expected
-                stats["fields_restored"] += 1
-        # Only proposals that still need B.I. approval. Never forge B.I=OK.
-        if safe(dest.get("Revisão")).upper() in {
-                "", "PENDENTE", "PENDENTE_CLASSIFICACAO", "REVISAR"}:
-            proposed_final.at[idx, "Revisão"] = "PROVÁVEL"
-            proposed_final.at[idx, "Próxima Ação"] = "DOUBLE_CHECK"
+            stats["proposals_checked"] += 1
+            for field in fields:
+                expected = safe(source.get(field))
+                if not expected or expected.upper() == "UNKNOWN":
+                    continue
+                actual = safe(dest.get(field))
+                if actual and actual != expected:
+                    stats["conflicts"] += 1
+                    raise RuntimeError(
+                        f"BASE_FINAL_PROPOSAL_CONFLICT:{pair}:{field}:{actual!r}!={expected!r}")
+                if not actual:
+                    proposed_final.at[idx, field] = expected
+                    stats["fields_restored"] += 1
+            # Only proposals that still need B.I. approval. Never forge B.I=OK.
+            if safe(dest.get("Revisão")).upper() in {
+                    "", "PENDENTE", "PENDENTE_CLASSIFICACAO", "REVISAR"}:
+                proposed_final.at[idx, "Revisão"] = "PROVÁVEL"
+                proposed_final.at[idx, "Próxima Ação"] = "DOUBLE_CHECK"
     return stats
 
 
