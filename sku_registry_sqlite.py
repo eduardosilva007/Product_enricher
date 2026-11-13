@@ -46,9 +46,16 @@ def _rows(path, preferred, source):
     from openpyxl import load_workbook
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
-        ws = wb[preferred] if preferred in wb.sheetnames else next(
-            (tab for tab in wb.worksheets if tab.title in ("Base Final", "Consolidado")),
-            None)
+        ws = wb[preferred] if preferred in wb.sheetnames else None
+        if ws is None:
+            # Legacy/staged baseline sheets can have arbitrary names.
+            # Select by the ACTUAL business columns, never worksheet title.
+            for candidate in wb.worksheets:
+                headers = next(candidate.iter_rows(min_row=1, max_row=1,
+                                                   values_only=True), ())
+                if {"Marca", "Modelo"}.issubset({_clean(x) for x in headers}):
+                    ws = candidate
+                    break
         if ws is None:
             raise RuntimeError("SQLITE_MERGE_BUSINESS_SHEET_MISSING:" + source)
         values = iter(ws.iter_rows(values_only=True))

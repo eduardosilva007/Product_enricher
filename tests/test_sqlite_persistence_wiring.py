@@ -14,7 +14,7 @@ class PersistenceIntegrationTests(unittest.TestCase):
     def test_overnight_registry_sync_is_pre_commit(self):
         src=inspect.getsource(p.overnight_promote_campaign)
         self.assertLess(src.index("stage_registry = _refresh_sqlite_sku_registry("),
-                        src.index('for k in ("cache", "master", "final", "classification_db"):'))
+                        src.index('        replaced = []'))
         self.assertIn('stats["sqlite_registry_campaign_keys"]', src)
 
 

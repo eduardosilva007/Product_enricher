@@ -95,6 +95,20 @@ class SqliteRegistryMergeTests(unittest.TestCase):
                 self.assertEqual(result,("DRILL","COMPLETE_PROPOSAL"))
                 self.assertEqual(c.execute("SELECT COUNT(*) FROM classification_results").fetchone()[0],1)
 
+    def test_master_sheet_with_generic_name_still_merges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)
+            final,master,db=p/"final.xlsx",p/"master.xlsx",p/"pipeline_v3.sqlite"
+            row=[("FIXTEC","FCD12L06 UL","DRILL","BATTERY","OTHERS",
+                  "POWER TOOLS","Drill","DOUBLE_CHECK","Script","PROVÁVEL","")]
+            write_excel(final,"Base Final",row)
+            write_excel(master,"Sheet1",row)
+            sqlite3.connect(db).close()
+            from sku_registry_sqlite import audit_sqlite_merge
+            r=audit_sqlite_merge(final,master,db,{"fixtec|fcd12l06ul"},commit=True)
+            self.assertEqual(r["status"],"SQLITE_MERGED")
+            self.assertEqual(r["campaign_found_in_final"],1)
+
     def test_alias_collision_is_blocked_on_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp);f=p/"final.xlsx";m=p/"master.xlsx";db=p/"pipeline_v3.sqlite"
