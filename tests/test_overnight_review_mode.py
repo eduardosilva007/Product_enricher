@@ -6,13 +6,15 @@ import unittest
 SRC=Path(__file__).resolve().parents[1]/"pipeline_produtos.py"
 
 class OvernightReviewBeforePromotionTest(unittest.TestCase):
-    def test_review_flag_default_off_and_opt_in(self):
+    def test_review_flag_default_on_and_explicit_legacy_opt_in(self):
         from pipeline_produtos import build_parser
         parser=build_parser()
         original=parser.parse_args(["--mode","overnight"])
         safe=parser.parse_args(["--mode","overnight","--campaign-review-before-promotion"])
-        self.assertFalse(original.campaign_review_before_promotion)
+        legacy=parser.parse_args(["--mode","overnight","--campaign-auto-promote"])
+        self.assertTrue(original.campaign_review_before_promotion)
         self.assertTrue(safe.campaign_review_before_promotion)
+        self.assertFalse(legacy.campaign_review_before_promotion)
 
     def test_promotion_guard_respects_saved_campaign_review_setting(self):
         tree=ast.parse(SRC.read_text(encoding="utf-8-sig"))
