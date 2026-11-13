@@ -10385,7 +10385,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-promote", "overnight-reconcile-failed", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -10435,6 +10435,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--campaign-token-budget", type=int, default=0)
     p.add_argument("--campaign-resume-dir", default="", help="Existing campaign manifest directory; never starts new unaudited work")
     p.add_argument("--campaign-pause-after-sublots", type=int, default=0, help="Safety test: pause a campaign after N audited sublots; resume with the same campaign directory and zero pause")
+    p.add_argument("--recovery-manifest", default="", help="Prepared 20-SKU recovery manifest; offline only")
     p.add_argument("--legacy-run-dir", action="append", default=[], help="Two historical audited run folders for offline-only 40-SKU promotion")
     p.add_argument("--promotion-dry-run", action="store_true", help="Build and verify staging without replacing any canonical data")
     p.add_argument("--pilot-dir", default="", help="Isolated ten-SKU pilot folder for targeted official promotion")
@@ -11178,6 +11179,13 @@ def main() -> int:
         with exclusive_campaign_lock():
             report = promote_isolated_ten(Path(args.pilot_dir), official, commit=args.yes)
             print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    if args.mode == "overnight-recover-20":
+        if not args.recovery_manifest or args.execute_live:
+            raise ValueError("RECOVERY20_REQUIRES_MANIFEST_AND_FORBIDS_LIVE_APIS")
+        result = overnight_recover_prepared_twenty(
+            Path(args.recovery_manifest), commit=args.yes, cfg=cfg)
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0
     if args.mode == "overnight-reconcile-failed":
         if not args.campaign_resume_dir or args.legacy_run_dir:
@@ -12776,6 +12784,209 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         # Existing backups remain available; never auto-delete on failure.
         raise
 
+
+
+def overnight_recover_prepared_twenty(manifest_path: Path, *, commit: bool = False,
+                                      cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Audit and optionally commit an existing offline 20-SKU recovery manifest.
+
+    Never calls Search or JEV, never reruns classification, and never invokes
+    the global baseline exporter. The manifest must have been prepared from
+    the existing isolated cohort and 4 canonical sources with immutable backups.
+    The old worker failure remains in the historical report for forensics.
+    """
+    import pandas as pd
+
+    path = Path(manifest_path).resolve()
+    job = path.parent
+    run = job.parent
+    if (path.name != "promotion_manifest.json"
+            or not job.name.startswith("recovery_promotion_20_")
+            or run.parent != OUT.resolve()):
+        raise RuntimeError("RECOVERY20_INVALID_MANIFEST_LOCATION")
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    state = read_json(path)
+    if state.get("status") != "PREPARED_NOT_COMMITTED":
+        raise RuntimeError("RECOVERY20_NOT_PREPARED_OR_ALREADY_COMMITTED")
+    if (state.get("cohort_count") != 20 or state.get("calls_search") != 0
+            or state.get("calls_jev") != 0 or state.get("human_taxonomy_approved") is not False):
+        raise RuntimeError("RECOVERY20_MANIFEST_CONTRACT_INVALID")
+    if Path(state.get("run", "")).resolve() != run:
+        raise RuntimeError("RECOVERY20_WRONG_RUN")
+    original = read_json(run / "original_sources.json")
+    history = read_json(run / "run_report.json")
+    isolated = read_json(run / "isolated_config.json")
+    stages = history.get("stages", {})
+    if not (history.get("cohort_count") == 20
+            and stages.get("collection", {}).get("status") == "PASS"
+            and stages.get("classification", {}).get("status") == "FAIL"
+            and stages.get("classification", {}).get("attempts") == 1):
+        raise RuntimeError("RECOVERY20_HISTORICAL_RUN_MISMATCH")
+    keys = history.get("cohort_keys", [])
+    if len(keys) != 20 or len(set(keys)) != 20:
+        raise RuntimeError("RECOVERY20_COHORT_KEYS_INVALID")
+    keyset = set(keys)
+    output = pd.read_excel(isolated["files"]["output"], sheet_name="Resultados",
+                           dtype=object, keep_default_na=False)
+    if len(output) != 20 or not {"Marca", "Modelo"}.issubset(output.columns):
+        raise RuntimeError("RECOVERY20_OUTPUT_COUNT_OR_SCHEMA_CHANGED")
+    actual_keys = [business_key(safe(r["Marca"]), safe(r["Modelo"]))
+                   for _, r in output.iterrows()]
+    if set(actual_keys) != keyset or len(set(actual_keys)) != 20:
+        raise RuntimeError("RECOVERY20_OUTPUT_COHORT_CHANGED")
+
+    names = ("master", "final", "cache", "classification_db")
+    source = {}
+    stage = {}
+    backups = {}
+    for name in names:
+        recorded = state.get("canonical", {}).get(name, {})
+        staged = state.get("staged", {}).get(name, {})
+        backup = state.get("backup", {}).get(name, {})
+        candidate = Path(recorded.get("path", "")).resolve()
+        s = Path(staged.get("path", "")).resolve()
+        b = Path(backup.get("path", "")).resolve()
+        if (candidate != Path(original[name]["path"]).resolve()
+                or (cfg is not None and candidate != source_paths(cfg)[name])
+                or recorded.get("sha256") != original[name]["sha256"]
+                or s.parent != (job / "stage").resolve()
+                or b.parent != (job / "backup").resolve()
+                or not all(p.is_file() for p in (candidate, s, b))):
+            raise RuntimeError(f"RECOVERY20_SOURCE_PATH_OR_HASH_CONTRACT:{name}")
+        for label, item, meta in (("canonical", candidate, recorded),
+                                  ("stage", s, staged), ("backup", b, backup)):
+            if digest(item) != meta.get("sha256"):
+                raise RuntimeError(f"RECOVERY20_HASH_DRIFT:{name}:{label}")
+        source[name], stage[name], backups[name] = candidate, s, b
+
+    # Preserve every unrelated physical row, including same-normalized-key
+    # variants; neither BI_OK, Manual nor previously accepted rows may change.
+    for name in ("master", "final"):
+        with pd.ExcelFile(source[name]) as book:
+            if len(book.sheet_names) != 1:
+                raise RuntimeError(f"RECOVERY20_MULTISHEET_BLOCK:{name}")
+        before, _ = _read_business_sheet(source[name])
+        after, _ = _read_business_sheet(stage[name])
+        if len(after) < len(before) or not set(before.columns).issubset(after.columns):
+            raise RuntimeError(f"RECOVERY20_BASELINE_STRUCTURE_CHANGED:{name}")
+        brand = find_col(before, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        model = find_col(before, ["Modelo", "Model", "SKU", "Part Number"])
+        nbrand = find_col(after, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        nmodel = find_col(after, ["Modelo", "Model", "SKU", "Part Number"])
+        bi = find_col(before, ["Revisão B.I", "Revisao B.I"], required=False)
+        stat = find_col(before, ["Status"], required=False)
+        for index, (_, old) in enumerate(before.iterrows()):
+            new = after.iloc[index]
+            pair = (safe(old[brand]), safe(old[model]))
+            new_pair = (safe(new[nbrand]), safe(new[nmodel]))
+            if pair != new_pair:
+                raise RuntimeError(f"RECOVERY20_ORIGINAL_ROW_REORDERED:{name}:{index+2}")
+            locked = ((bi is not None and _is_bi_ok_value(old.get(bi)))
+                      or (stat is not None and _is_manual_status(old.get(stat))))
+            if locked or _baseline_row_accepted(old, before) or business_key(*pair) not in keyset:
+                for column in before.columns:
+                    if safe(old.get(column)) != safe(new.get(column)):
+                        raise RuntimeError(
+                            f"RECOVERY20_UNRELATED_OR_PROTECTED_ROW_CHANGED:{name}:{index+2}:{column}")
+        for index in range(len(before), len(after)):
+            new = after.iloc[index]
+            if business_key(safe(new[nbrand]), safe(new[nmodel])) not in keyset:
+                raise RuntimeError(f"RECOVERY20_FOREIGN_ROW_APPENDED:{name}:{index+2}")
+
+    before = load_baseline_inventory(source["master"], source["final"])
+    after = load_baseline_inventory(stage["master"], stage["final"])
+    if (before["processed"] - after["processed"]
+            or before["final_accepted"] - after["final_accepted"]
+            or (after["processed"] - before["processed"] - keyset)
+            or (after["bi_locked"] - before["bi_locked"])
+            or (after["manual"] - before["manual"])
+            or len(before["processed"]) != state.get("accepted_before")
+            or len(after["processed"]) != state.get("accepted_after")):
+        raise RuntimeError("RECOVERY20_ACCEPTANCE_OR_HUMAN_LOCK_DRIFT")
+
+    # Search, classification and quota reservations survive in the staged
+    # SQLite, so the recovered cohort cannot accidentally be billed twice.
+    with closing(TavilyReadOnlyStore(stage["cache"])) as store:
+        for _, item in output.iterrows():
+            raw = store.get(safe(item["Marca"]), safe(item["Modelo"]))
+            if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+                raise RuntimeError("RECOVERY20_STAGED_RAW_MISSING")
+    with closing(sqlite3.connect(stage["classification_db"].as_uri() + "?mode=ro", uri=True)) as db:
+        if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("RECOVERY20_STAGED_DB_INVALID")
+        for table in ("collection_attempt_reservations", "classification_results"):
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                              (table,)).fetchone():
+                raise RuntimeError(f"RECOVERY20_DB_TABLE_MISSING:{table}")
+            stored = {row[0] for row in db.execute(f"SELECT DISTINCT business_key FROM {table}")}
+            if not keyset.issubset(stored):
+                raise RuntimeError(f"RECOVERY20_DB_COHORT_INCOMPLETE:{table}")
+
+    result = {"status": "INTEGRATED_RECOVERY20_VALIDATED_NOT_COMMITTED",
+              "cohort": 20, "new_accepted": len(after["processed"] - before["processed"]),
+              "accepted_before": len(before["processed"]),
+              "accepted_after": len(after["processed"]),
+              "search_calls": 0, "jev_calls": 0,
+              "manifest": str(path), "canonical_modified": False}
+    if not commit:
+        return result
+
+    # Existing prepared snapshots are the only source for the commit; never
+    # regenerate them under a fresh, silently different set of inputs.
+    with exclusive_campaign_lock():
+        state = read_json(path)
+        if state.get("status") != "PREPARED_NOT_COMMITTED":
+            raise RuntimeError("RECOVERY20_COMMIT_NOT_PREPARED")
+        for name in names:
+            if digest(source[name]) != state["canonical"][name]["sha256"]:
+                raise RuntimeError(f"RECOVERY20_SOURCE_CHANGED_BEFORE_COMMIT:{name}")
+            if digest(stage[name]) != state["staged"][name]["sha256"]:
+                raise RuntimeError(f"RECOVERY20_STAGING_CHANGED_BEFORE_COMMIT:{name}")
+            if digest(backups[name]) != state["backup"][name]["sha256"]:
+                raise RuntimeError(f"RECOVERY20_BACKUP_CHANGED_BEFORE_COMMIT:{name}")
+        # Refuse replacement while SQLite WAL contains uncheckpointed changes.
+        for name in ("cache", "classification_db"):
+            wal = Path(str(source[name]) + "-wal")
+            if wal.is_file() and wal.stat().st_size:
+                raise RuntimeError(f"RECOVERY20_SQLITE_WAL_ACTIVE:{name}")
+        for name in ("master", "final"):
+            try:
+                with source[name].open("r+b"):
+                    pass
+            except PermissionError as exc:
+                raise RuntimeError(f"RECOVERY20_CLOSE_EXCEL_FIRST:{name}") from exc
+
+        state["status"] = "COMMITTING_MANUAL_RECOVERY_ON_FAILURE"
+        state.setdefault("journal", [])
+        atomic_json(path, state)
+        try:
+            for name in names:
+                target = source[name]
+                pending = target.with_name(target.name + ".recovery_20_next")
+                if pending.exists():
+                    raise RuntimeError(f"RECOVERY20_UNFINISHED_PENDING_FILE:{name}")
+                shutil.copyfile(stage[name], pending)
+                if digest(pending) != state["staged"][name]["sha256"]:
+                    raise RuntimeError(f"RECOVERY20_PENDING_HASH_MISMATCH:{name}")
+                if digest(target) != state["canonical"][name]["sha256"]:
+                    raise RuntimeError(f"RECOVERY20_SOURCE_DRIFT_DURING_COMMIT:{name}")
+                os.replace(pending, target)
+                if digest(target) != state["staged"][name]["sha256"]:
+                    raise RuntimeError(f"RECOVERY20_COMMITTED_HASH_MISMATCH:{name}")
+                state["journal"].append({"file": name, "committed": True})
+                atomic_json(path, state)
+            state["status"] = "COMMITTED"
+            state["official_files_modified"] = True
+            atomic_json(path, state)
+        except BaseException:
+            # Cross-file commit is not atomic. Preserve immutable backups and
+            # the journal; manual reconciliation is mandatory if interrupted.
+            atomic_json(path, state)
+            raise
+    result["status"] = "COMMITTED"
+    result["canonical_modified"] = True
+    return result
 
 def overnight_campaign(args, cfg, rules=None):
     """One master entrypoint: collect -> classify -> audit in <=20 SKU sublots.
