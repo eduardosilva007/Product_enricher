@@ -66,6 +66,35 @@ class SqliteRegistryMergeTests(unittest.TestCase):
                 ).fetchone(),("BI_OK_LOCK","OK"))
                 self.assertEqual(con.execute("SELECT count(*) FROM classification_results").fetchone()[0],1)
 
+    def test_refresh_sqlite_projection_after_final_changes(self):
+        import pipeline_produtos as pipe
+        with tempfile.TemporaryDirectory() as d:
+            base=Path(d); final=base/"final.xlsx"; master=base/"master.xlsx"
+            db=base/"pipeline_v3.sqlite"
+            rows=[("FIXTEC","FCD12L06 UL","","","","","","REVISAR","Script","REVISAR","")]
+            write_excel(final,"Base Final",rows)
+            write_excel(master,"Consolidado",rows)
+            with sqlite3.connect(db) as c:
+                c.execute("CREATE TABLE classification_results(id TEXT PRIMARY KEY)")
+                c.execute("INSERT INTO classification_results VALUES ('prior')")
+            cfg={"files":{"classification_db":str(db)}}
+            first=pipe._refresh_sqlite_sku_registry(master,final,cfg)
+            self.assertEqual(first["lookup_pending"],1)
+            updated=[("FIXTEC","FCD12L06 UL","DRILL","BATTERY","OTHERS",
+                      "POWER TOOLS","Real title","DOUBLE_CHECK","Script","PROVÁVEL","")]
+            write_excel(final,"Base Final",updated)
+            write_excel(master,"Consolidado",updated)
+            second=pipe._refresh_sqlite_sku_registry(
+                master,final,cfg,{"fixtec|fcd12l06ul"})
+            self.assertEqual(second["status"],"SQLITE_MERGED")
+            self.assertEqual(second["campaign_found_in_final"],1)
+            self.assertEqual(second["lookup_proposals"],1)
+            with sqlite3.connect(db) as c:
+                result=c.execute("SELECT product_type, classification_state "
+                    "FROM sku_registry_lookup_v1 WHERE sku_key='fixtec|fcd12l06ul'").fetchone()
+                self.assertEqual(result,("DRILL","COMPLETE_PROPOSAL"))
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM classification_results").fetchone()[0],1)
+
     def test_alias_collision_is_blocked_on_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp);f=p/"final.xlsx";m=p/"master.xlsx";db=p/"pipeline_v3.sqlite"

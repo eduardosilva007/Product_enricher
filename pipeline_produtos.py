@@ -9255,6 +9255,36 @@ def _hydrate_input_collection_from_cache(
     return stats
 
 
+def _refresh_sqlite_sku_registry(master_path: Path, final_path: Path,
+                                 cfg: Optional[Dict[str, Any]],
+                                 cohort_keys: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+    """Keep existing SQLite SKU lookup aligned after canonical Excel exports.
+
+    This is a synchronized registry/projection until SQLite-authoritative
+    Excel exports are separately implemented and tested. Zero paid APIs.
+    """
+    files = (cfg or {}).get("files") or {}
+    db_name = safe(files.get("classification_db"))
+    if not db_name:
+        return {"status": "SKIPPED_NO_DATABASE_CONFIG"}
+    db_path = (ROOT / db_name).resolve()
+    if not db_path.is_file():
+        raise RuntimeError(f"SQLITE_REGISTRY_DB_MISSING:{db_path}")
+    from sku_registry_sqlite import audit_sqlite_merge
+    result = audit_sqlite_merge(
+        final_path, master_path, db_path, set(cohort_keys or ()), commit=True)
+    if result["status"] != "SQLITE_MERGED":
+        raise RuntimeError(
+            "SQLITE_REGISTRY_NOT_SYNCHRONIZED:"
+            + json.dumps(result, ensure_ascii=False, default=str))
+    LOG.info("SQLITE REGISTRY SYNC OK | keys=%d | safe=%d | "
+             "ambiguous=%d | campaign=%d/%d | api_calls=0",
+             result["unique_final_keys"], result["lookup_safe_keys"],
+             result["global_ambiguous"], result["campaign_found_in_final"],
+             result["campaign_expected"])
+    return result
+
+
 def persist_baseline_excels(
     rows: List[Dict[str, Any]],
     master_path: Optional[Path],
@@ -9409,6 +9439,11 @@ def persist_baseline_excels(
     stats["baseline_union_total"] = len(inv_after["processed"])
     stats["bi_ok_hard_lock_total"] = len(inv_after["bi_locked"])
     stats["baseline_missing_in_final"] = len(inv_after["processed"] - inv_after["final_accepted"])
+    if master_path and final_path:
+        registry = _refresh_sqlite_sku_registry(master_path, final_path, cfg)
+        stats["sqlite_registry_status"] = registry["status"]
+        if registry["status"] == "SQLITE_MERGED":
+            stats["sqlite_registry_keys"] = registry["unique_final_keys"]
     return stats
 
 def reconcile_baseline_before_run(
@@ -13632,6 +13667,15 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         # For promotion, compare EVERY original BI_OK row by its exact pair;
         # never relax the eight protected human fields.
         _overnight_assert_exact_human_locks(original_final, final)
+
+        # Refresh the registry on the STAGED database so either all four
+        # official files are promoted consistently or none are changed.
+        stage_registry = _refresh_sqlite_sku_registry(
+            staged["master"], staged["final"],
+            {"files": {"classification_db": str(staged["classification_db"])}},
+            keys)
+        stats["sqlite_registry_status"] = stage_registry["status"]
+        stats["sqlite_registry_campaign_keys"] = stage_registry["campaign_found_in_final"]
 
         # The physical-row gate above protects ALL original BI_OK/Manual
         # rows including historic exact duplicates. The old grouped forensic
