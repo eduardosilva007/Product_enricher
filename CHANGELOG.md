@@ -1,5 +1,51 @@
 # CHANGELOG
 
+## 2026-11-11 — Controlled overnight interruption and durable resume
+
+- `--campaign-pause-after-sublots 1` checkpoints a running campaign after its first fully audited sublot, without promoting an incomplete campaign or issuing any more API calls.
+- Resume uses the same `campaign.json` directory via `--campaign-resume-dir`, original target and global/sub-batch limits; the second batch consumes only its own reserved allowances.
+- Offline regression covers 5+5 SKU continuity, unique cohort keys, reserved call/token ledger, delayed promotion and `COMPLETE` after resume.
+- A separate interruption regression verifies JEV classifications that have started are **not** automatically retried: `JEV_INCOMPLETE_REQUIRES_AUDIT` remains fail-closed. The checkpoint test does not claim mid-request crash recovery.
+- User acceptance: pause at 5, observe `PAUSED_FOR_RESUME_TEST`, resume exact campaign, observe 10 unique audited products and `production_persisted=true`.
+
+## 2026-11-11 — Canonical promotion: exact human-lock validation
+
+- Corrected false `BI_OK_HARD_LOCK_VIOLATION` in a completed 50-SKU offline promotion. The erroneous comparison matched human-reviewed records solely by normalized `business_key`, conflating historic ANNOVI/BOSCH Brand+Model variants and comparing their different `Status` / `Revisão` values.
+- Promotion now checks each protected physical row in its original position, including exact Brand+Model, type, power, Category General, FAMILY, title, Status, Revisão and Revisão B.I. Historic duplicate exact pairs are compared separately. Any real protected-field alteration remains blocking.
+- Removed redundant promotion-only forensic diff grouped by normalized key. Original non-cohort rows remain checked individually and untouched by the input-scoped overlay.
+- Added real negative tests for human revision mutation, exact-pair mutation and end-to-end promotion with colliding BI-approved variants, including immutable pre-commit backup recovery. No Search or JEV calls.
+
+## 2026-11-11 — Canonical Base Final persistence for overnight campaigns
+
+- Introduces offline `--mode overnight-promote --campaign-resume-dir <ID>` to import the previous completed 50-SKU campaign into the official Search cache, Consolidado and Base Final without new API calls.
+- New `--mode overnight` campaigns automatically promote audited `COMPLETE` outputs into the same canonical files before returning success. A failed promotion makes overnight fail rather than silently reporting complete and persisted.
+- Canonical `persist_baseline_excels` remains responsible for status, `Category General`, `FAMILY`, revision metadata and the absolute Manual / Revisão B.I=OK protection. The promotion routine does not designate proposals as human-approved.
+- Promotions require matching sublot cohorts, PASS collection/classification/audits, all RAW_OK, and only in-cohort classification outputs. Missing classification rows remain measurable as pending rather than being invented.
+- Source files are backed up before staged cache/Excel generation; source hashes, protected manual cells, final cohort coverage and cache persistence are checked before swapping canonical artifacts.
+- The campaign manifest records `promotion.status=COMMITTED` and imported/missing classification counts, or fail-closed recovery state. Backups remain under the campaign for disaster recovery.
+- Adds a real offline regression fixture covering canonical Final+cache persistence, protection of a BI-reviewed record and idempotent promotion.
+- Synchronization is cohort-scoped and blocks any change to an unrelated Base Final record, including unreviewed rows; classifications and LLM checkpoints are also merged into the official SQLite.
+
+## 2026-11-11 — Master overnight stabilization (branch: feature/overnight-master-stabilization-20261111)
+
+- Centralizes the runnable overnight pipeline, provider account router, RAW_EMPTY cohort audit, protected-human-record forensic diff and campaign orchestration inside `pipeline_produtos.py`.
+- Adds `--mode overnight` with `--campaign-total` (50, 100, 250, 500 or remaining SKU count), independent Search sublots capped at 20 SKUs, and explicit cumulative JEV-request/token budgets.
+- Persists campaign progress and exact active-sublot resume in `campaign.json`; reserves upper-bound JEV usage before a new sublot, so failures cannot reissue a new budget for the same sublot.
+- Carries forward prior SQLite Search reservations and disabled provider accounts across isolated sublots; duplicate SKUs, conflicting ledgers, quota exhausted and inconsistent RAW coverage block subsequent sublots.
+- Runs `collect -> classify -> protected-source/coverage audit` for every sublot; never promotes unreviewed results to production.
+- Retains `nightly_provider_router.py` and `run_controlled_night_pilot.py` solely as compatibility import/CLI shims; business rules and campaign logic reside in the master.
+- Adds offline regression tests for cumulative quotas, disabled providers, master 50-SKU campaign budgeting and checkpoint/resume.
+- The master migration is verified by GitHub Actions; first live 50-SKU assisted run remains a separate release gate.
+
+## 2026-11-11 — Controlled nightly readiness and review safety
+
+- Fixed `CLEF_INSUFFICIENT` returning `Review Required = NÃO` even when `Classification Outcome = REVIEW_CACHE_EVIDENCE`; now requires human review and blocks automatic approval.
+- Historical impact: three rows in the first isolated 20-SKU pilot (CNH 47507106, 47945518 and 48137950) were flagged incorrectly. Their original Excel files remain unchanged as audit evidence; no automatic taxonomy or production-data backfill is authorized.
+- The full `tests/` suite now runs in GitHub Actions with offline dependencies, including regression guards for the review states, Excel sanitization and account quotas.
+- The multiprovider router is integrated into `collect_products` with SQLite reservations before HTTP. `billing_group` conflicting limits now fail closed.
+- Isolated pilots now import preceding reservation ledgers into each new copied SQLite before collection so account usage does not reset between pilot runs; missing/conflicting prior reservations block new execution.
+- Operational limits remain 20 Search SKUs per run, with no automatic promotion to production; taxonomy and historical-data remediation require separate audited approval.
+
 ## R9.6p7 — Import Noise Taxonomy + Strong Identity (2026-09-29)
 - Requires STRONG Brand+Model identity for deterministic, funnel, combo-kit, and LLM final approval.
 - Keeps PROBABLE sources available for evidence/review but blocks them from `AUTO_APROVADO`.
