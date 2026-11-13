@@ -105,6 +105,7 @@ class Nightly50AuditTests(unittest.TestCase):
     def test_no_result_is_visible_not_silently_passed_as_classified(self):
         self.change_result(3, lambda ws: ws.delete_rows(ws.max_row))
         summary, rows = audit(self.root)
+        self.assertEqual(summary["status"], "BLOCKED_CLASSIFICATION_GAPS")
         self.assertEqual(summary["classification_results"], 49)
         self.assertEqual(summary["missing_classification_results"], 1)
         self.assertTrue(any(x["Status de Auditoria"] == "SEM_SAIDA_DE_CLASSIFICACAO"
