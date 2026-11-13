@@ -10948,7 +10948,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "final-lookup-index", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "final-lookup-index", "sqlite-sku-merge", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -11070,6 +11070,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print("10 - LIMPAR BASE FINAL: 11 COLUNAS (SEM BUSCA / SEM CLASSIFICACAO)")
     print("11 - AUDITAR / RECUPERAR CLASSIFICACOES JA COLETADAS (0 APIS)")
     print("12 - VALIDAR CHAVES / PROCV NA BASE FINAL (0 APIS)")
+    print("13 - UNIFICAR IDENTIDADES E CLASSIFICACOES NO SQLITE CENTRAL (0 APIS)")
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
@@ -11138,6 +11139,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(["--mode", "audit-central-cache"])
     if op == "12":
         return parser.parse_args(["--mode", "final-lookup-index"])
+    if op == "13":
+        return parser.parse_args(["--mode", "sqlite-sku-merge"])
     raise SystemExit(0)
 
 
@@ -11744,6 +11747,39 @@ def main() -> int:
         for e in errors[:50]:
             LOG.error(e)
         return 2
+    if args.mode == "sqlite-sku-merge":
+        from sku_registry_sqlite import audit_sqlite_merge
+        with exclusive_campaign_lock():
+            campaigns = []
+            for manifest in sorted((OUT / "campaigns").glob("*/campaign.json")):
+                state = read_json(manifest)
+                if (state.get("status") == "COMPLETE"
+                        and state.get("night_output_only")
+                        and (state.get("promotion") or {}).get("status") == "COMMITTED"
+                        and state.get("audited_products") == 50):
+                    campaigns.append((manifest, state))
+            if not campaigns:
+                raise RuntimeError("SQLITE_MERGE_COMMITTED_50_CAMPAIGN_NOT_FOUND")
+            manifest, campaign = campaigns[-1]
+            keys = [key for batch in campaign["batches"] for key in batch["cohort_keys"]]
+            if len(keys) != 50 or len(set(keys)) != 50:
+                raise RuntimeError("SQLITE_MERGE_INVALID_50_COHORT")
+            file_cfg = cfg["files"]
+            final = (ROOT / str(file_cfg["final"])).resolve()
+            master = (ROOT / str(file_cfg["master"])).resolve()
+            db = (ROOT / str(file_cfg["classification_db"])).resolve()
+            preview = audit_sqlite_merge(final, master, db, keys, commit=False)
+            preview["campaign"] = manifest.parent.name
+            print(json.dumps(preview, indent=2, ensure_ascii=False))
+            if preview["status"] != "DRY_RUN_PASS":
+                return 2
+            if input("Confirmar MERGE na base pipeline_v3.sqlite (0 APIs)? Digite GRAVAR: ").strip() != "GRAVAR":
+                print("SQLITE_MERGE_NOT_COMMITTED: dry-run apenas.")
+                return 0
+            report = audit_sqlite_merge(final, master, db, keys, commit=True)
+            report["campaign"] = manifest.parent.name
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+            return 0 if report["status"] == "SQLITE_MERGED" else 2
     if args.mode == "final-lookup-index":
         with exclusive_campaign_lock():
             preview = reconcile_final_sku_index(cfg, commit=False)
