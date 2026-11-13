@@ -7957,6 +7957,56 @@ def _manual_review_bundle(raw: RawEvidence) -> Dict[str, str]:
 
 
 
+
+def input_cache_readiness(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Zero-cost scoped pilot readiness; RAW_EMPTY is NOT a fresh Search quota.
+
+    Reports the real configured input cohort rather than promising a '900 SKUs'
+    run that silently has only a few RAW_OK classification candidates.
+    """
+    source = (ROOT / str(cfg["files"]["input"])).resolve()
+    cache = (ROOT / str(cfg["files"]["cache"])).resolve()
+    if not source.is_file():
+        return {"status": "INPUT_FILE_MISSING", "path": str(source)}
+    seen = {}
+    valid = 0
+    for row in read_input_rows(source):
+        if row.valid:
+            valid += 1
+            seen.setdefault(row.key, (row.brand_original, row.model_original))
+    baseline = load_baseline_inventory(
+        (ROOT / str(cfg["files"]["master"])).resolve(),
+        (ROOT / str(cfg["files"]["final"])).resolve(),
+    )
+    counts = defaultdict(int)
+    counts["input_rows_valid"] = valid
+    counts["input_unique_skus"] = len(seen)
+    counts["input_duplicate_skus"] = valid - len(seen)
+    if not cache.is_file():
+        counts["RAW_MISSING"] = len(seen)
+    else:
+        with closing(TavilyReadOnlyStore(cache)) as store:
+            for key, (brand, model) in seen.items():
+                raw = store.get(brand, model)
+                counts[raw.state] += 1
+                if key in baseline["processed"]:
+                    counts["already_accepted_or_human"] += 1
+                elif raw.state in {"RAW_OK", "RAW_OK_MERGED"}:
+                    counts["unaccepted_with_raw_ok"] += 1
+                elif raw.state == "RAW_EMPTY":
+                    counts["raw_empty_requires_explicit_recollection_approval"] += 1
+                elif raw.state == "RAW_MISSING":
+                    counts["raw_missing_fresh_collection_candidates"] += 1
+    return {
+        "status": "READ_ONLY_NO_APIS",
+        "input": str(source), "counts": dict(counts),
+        "warning": "RAW_OK may still lack classifiable curated evidence. RAW_EMPTY is "
+                   "historically attempted: no automatic paid retry. Any 900-SKU "
+                   "run requires explicit Search/JEV budgets and coverage audit.",
+        "search_calls": 0, "llm_calls": 0,
+    }
+
+
 def audit_committed_classifications(cfg: Dict[str, Any], *, commit: bool = False) -> Dict[str, Any]:
     """Audit/recover previously paid nightly proposals in the ONE canonical baseline.
 
@@ -11481,6 +11531,9 @@ def main() -> int:
                 if input("Restaurar somente campos ausentes na Base Final e Consolidado? Digite GRAVAR: ").strip() == "GRAVAR":
                     report = audit_committed_classifications(cfg, commit=True)
                     print(json.dumps(report, ensure_ascii=False, indent=2))
+            if report["status"] in {"ALIGNED", "RESTORED_AND_AUDITED"}:
+                print("READINESS DO ARQUIVO DE ENTRADA / PILOTO 900:")
+                print(json.dumps(input_cache_readiness(cfg), ensure_ascii=False, indent=2))
             return 0 if report["status"] in {"ALIGNED", "RESTORED_AND_AUDITED"} else 2
     if args.mode == "final-schema-cleanup":
         target = Path(args.final or cfg["files"]["final"]).resolve()
