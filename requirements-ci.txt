@@ -1,0 +1,8 @@
+# Lightweight offline test dependencies. Do not install GPU/LLM inference stacks in CI.
+pandas>=2.0
+openpyxl>=3.1
+numpy>=1.26
+requests>=2.31
+truststore>=0.10
+trafilatura>=1.12
+scikit-learn>=1.5

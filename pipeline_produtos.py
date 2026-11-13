@@ -48,13 +48,18 @@ import sqlite3
 import sys
 import time
 import unicodedata
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote, unquote, urlencode, urlparse
+import shutil
+import subprocess
+import uuid
+from contextlib import closing, contextmanager
+from datetime import timezone
 
 PIPELINE_VERSION = "4.0.7.3.1-input-scoped-recuration"
 PROMPT_VERSION = "2026-10-13-v19-clef-joint-repair-identity-guard"
@@ -1167,6 +1172,7 @@ def build_precollection_plan(
     cfg: Optional[Dict[str, Any]] = None,
     max_tavily_new: int = 0,
     preserve_keys: Optional[set] = None,
+    exclude_attempted_keys: Optional[set] = None,
 ) -> PreCollectionPlan:
     """Normaliza/deduplica/cruza cache sem rede.
 
@@ -1261,6 +1267,13 @@ def build_precollection_plan(
         if store:
             store.close()
 
+    for rep in representatives:
+        if rep.key in (exclude_attempted_keys or set()) and rep.action in {
+            "NOVA_COLETA", "RECOLETAR", "RECOLETAR_LOW_EVIDENCE"
+        }:
+            rep.action = "TENTATIVA_ANTERIOR_PRESERVADA"
+            rep.reason = "Tentativa Search registrada em SQLite; não repetir automaticamente"
+
     candidates_all = [r for r in representatives if r.action in {"NOVA_COLETA", "RECOLETAR", "RECOLETAR_LOW_EVIDENCE"}]
     candidates = candidates_all[:max_tavily_new] if max_tavily_new else list(candidates_all)
 
@@ -1289,6 +1302,7 @@ def build_precollection_plan(
         "Recoleta LOW_TARGET_EVIDENCE": action_counts["RECOLETAR_LOW_EVIDENCE"],
         "RAW vazio pulado": action_counts["RAW_EMPTY_PULADO"],
         "Erros Search pulados": action_counts["RAW_ERROR_PULADO"],
+        "Tentativas Search anteriores preservadas": action_counts["TENTATIVA_ANTERIOR_PRESERVADA"],
         "Fila real Tavily antes do limite": len(candidates_all),
         "Fila Tavily desta execução": len(candidates),
         "Business key": "AGRESSIVA_ESTRUTURAL_SEM_FUZZY",
@@ -1350,10 +1364,10 @@ def export_precollection_report(plan: PreCollectionPlan) -> None:
     )
 
     with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
-        pd.DataFrame(resumo).to_excel(writer, sheet_name="Resumo", index=False)
-        pd.DataFrame(normalizacao).to_excel(writer, sheet_name="Normalizacao", index=False)
-        pd.DataFrame(fila).to_excel(writer, sheet_name="Fila_Coleta", index=False)
-        pd.DataFrame(duplicados).to_excel(writer, sheet_name="Duplicidades", index=False)
+        _excel_export_safe_frame(pd.DataFrame(resumo)).to_excel(writer, sheet_name="Resumo", index=False)
+        _excel_export_safe_frame(pd.DataFrame(normalizacao)).to_excel(writer, sheet_name="Normalizacao", index=False)
+        _excel_export_safe_frame(pd.DataFrame(fila)).to_excel(writer, sheet_name="Fila_Coleta", index=False)
+        _excel_export_safe_frame(pd.DataFrame(duplicados)).to_excel(writer, sheet_name="Duplicidades", index=False)
 
     os.replace(tmp, plan.report_path)
 
@@ -1902,9 +1916,9 @@ def validate_collection_cost_policy(cfg: Dict[str, Any]) -> List[str]:
 
     bright = _provider_cfg(cfg, "brightdata")
     if bright:
-        response_format = safe(bright.get("format", "json")).casefold() or "json"
-        if response_format != "json":
-            errors.append(f"BRIGHTDATA_CONFIG: format deve ser json; recebido={response_format}")
+        response_format = safe(bright.get("format", "raw")).casefold() or "raw"
+        if response_format not in {"raw", "json"}:
+            errors.append(f"BRIGHTDATA_CONFIG: format deve ser raw ou json; recebido={response_format}")
         fmt = safe(bright.get("data_format", "parsed_light")).casefold() or "parsed_light"
         if fmt != "parsed_light":
             errors.append(f"BRIGHTDATA_CONFIG: somente parsed_light permitido; recebido={fmt}")
@@ -1913,6 +1927,9 @@ def validate_collection_cost_policy(cfg: Dict[str, Any]) -> List[str]:
 
 def _provider_credentials(provider: str, cfg: Dict[str, Any]) -> Dict[str, str]:
     pcfg = _provider_cfg(cfg, provider)
+    active_slot = cfg.get("_active_search_slot") or {}
+    if active_slot.get("provider") == provider:
+        pcfg = {**pcfg, "api_key_env": active_slot["key_env"], "zone_env": active_slot.get("zone_env", "")}
     if provider == "tavily":
         key_env = safe(pcfg.get("api_key_env")) or "TAVILY_API_KEY"
         api_key = os.getenv(key_env, "").strip()
@@ -1978,6 +1995,10 @@ def _provider_post_once(
         return payload
 
     msg = safe(response.text)[:1200]
+    # Serper may report exhausted balance as HTTP 400 instead of HTTP 429.
+    # Never retry this SKU; disable only the affected account for subsequent SKUs.
+    if provider == "serper" and status == 400 and "not enough credits" in msg.casefold():
+        raise OperationalPause("SERPER_LIMIT", "SERPER HTTP 400: insufficient credits")
     if status in {401, 403}:
         raise OperationalPause(f"{provider.upper()}_AUTH", f"{provider.upper()} HTTP {status}: autenticação/permissão")
     if status in {429, 432, 433}:
@@ -2040,14 +2061,21 @@ def _normalize_serper_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _normalize_brightdata_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Bright Data: SOMENTE Google Light JSON / parsed_light.
+    """Normalize only parsed_light organic results, including Bright's JSON wrapper.
 
-    Não existe fallback para Full JSON, Bing, Markdown, HTML ou outro schema.
-    A documentação do Light JSON garante organic[] em respostas válidas.
+    Never interpret wrapper metadata or errors as search evidence.
     """
-    rows = payload.get("organic")
+    body = payload.get("body", payload)
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: body JSON invalid") from exc
+    if not isinstance(body, dict):
+        raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: body not an object")
+    rows = body.get("organic")
     if not isinstance(rows, list):
-        raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: organic[] ausente")
+        raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: organic[] absent in parsed response")
     out: List[Dict[str, Any]] = []
     for idx, row in enumerate(rows, 1):
         if not isinstance(row, dict):
@@ -2067,8 +2095,15 @@ def _normalize_brightdata_results(payload: Dict[str, Any]) -> List[Dict[str, Any
 
 
 def _brightdata_query_meta(payload: Dict[str, Any], submitted_query: str) -> Dict[str, Any]:
-    general = payload.get("general", {}) if isinstance(payload.get("general"), dict) else {}
-    spelling = payload.get("spelling", {}) if isinstance(payload.get("spelling"), dict) else {}
+    body = payload.get("body", payload)
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+    body = body if isinstance(body, dict) else {}
+    general = body.get("general", {}) if isinstance(body.get("general"), dict) else {}
+    spelling = body.get("spelling", {}) if isinstance(body.get("spelling"), dict) else {}
     return {
         "submitted_query": submitted_query,
         "effective_query": safe(general.get("query")) or submitted_query,
@@ -2813,11 +2848,16 @@ def _provider_request_once(
             "url": google_url,
             # Bright Data SERP API contract for parsed Light JSON.
             # Hardcoded fail-closed: no Raw HTML / Full JSON / Bing / Markdown fallback.
-            "format": "json",
+            # Docs: raw + parsed_light delivers the structured JSON body directly.
+            # Old config "json" wrapper remains readable by the strict adapter.
+            "format": "raw",
             "data_format": "parsed_light",
         }
         payload = _provider_post_once(provider, url, headers, body, timeout, limiter, budget)
-        results = _normalize_brightdata_results(payload)
+        try:
+            results = _normalize_brightdata_results(payload)
+        except RuntimeError as exc:
+            raise OperationalPause("BRIGHTDATA_SCHEMA", safe(exc)) from exc
         return results, {
             "requests": budget.used,
             "provider_units": 1,
@@ -2939,9 +2979,21 @@ def search_product_once(
             })
 
     curated = _dedupe_curated(curated)
+    # TF-IDF char 2-5 is ONLY a tie-breaker among structurally approved
+    # evidence. It can never promote a rejected/weak-identity candidate.
+    if bool((cfg.get("identity", {}) or {}).get("char_tfidf_enabled", False)) and curated:
+        from identity_ranking_experiment import tfidf_cosine
+        corpus = [f"{brand} {search_model}"] + [
+            f"{safe(r.get('title'))} {safe(r.get('url'))}" for r in curated
+        ]
+        for r in curated:
+            r["_char_tfidf_score"] = float(tfidf_cosine(
+                corpus[0], f"{safe(r.get('title'))} {safe(r.get('url'))}", corpus
+            ))
     id_rank = {"WEAK": 0, "CONTEXTUAL": 1, "PROBABLE": 2, "STRONG": 3}
     curated.sort(key=lambda r: (
         -id_rank.get(safe(r.get("_collection_identity")), 0),
+        -float(r.get("_char_tfidf_score", 0) or 0),
         -float(r.get("score", 0) or 0),
         _url_key(r.get("url", "")),
     ))
@@ -3222,10 +3274,10 @@ def _export_collection_quality_report(products: List[Dict[str, Any]], sources: L
     resumo += [{"Indicador": f"STATE::{k}", "Valor": v} for k, v in sorted(state_counts.items()) if k]
     resumo += [{"Indicador": f"SOURCE::{k}", "Valor": v} for k, v in sorted(decision_counts.items()) if k]
     with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
-        pd.DataFrame(resumo).to_excel(writer, sheet_name="Resumo", index=False)
-        pd.DataFrame(products).to_excel(writer, sheet_name="Produtos", index=False)
-        pd.DataFrame(sources).to_excel(writer, sheet_name="Fontes", index=False)
-        pd.DataFrame(queries).to_excel(writer, sheet_name="Queries", index=False)
+        _excel_export_safe_frame(pd.DataFrame(resumo)).to_excel(writer, sheet_name="Resumo", index=False)
+        _excel_export_safe_frame(pd.DataFrame(products)).to_excel(writer, sheet_name="Produtos", index=False)
+        _excel_export_safe_frame(pd.DataFrame(sources)).to_excel(writer, sheet_name="Fontes", index=False)
+        _excel_export_safe_frame(pd.DataFrame(queries)).to_excel(writer, sheet_name="Queries", index=False)
     os.replace(tmp, path)
 
 
@@ -3281,25 +3333,79 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     policy_errors = validate_collection_cost_policy(cfg)
     if policy_errors:
         raise CollectionCostPolicyError(" | ".join(policy_errors))
-    _provider_credentials(provider, cfg)  # preflight antes da primeira request
+    auto_route = bool(getattr(args, "auto_providers", False))
+    if not auto_route:
+        _provider_credentials(provider, cfg)  # preflight antes da primeira request
 
     input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
     cache_path = Path(args.cache or cfg["files"]["cache"])
     db_path = Path(args.db or cfg["files"]["classification_db"])
     pre_report = Path(args.precollection_output or cfg.get("files", {}).get("precollection_report", "Pre_Coleta_R9_6.xlsx"))
     report_path = Path(cfg.get("files", {}).get("collection_report", "Coleta_Search_R9_6.xlsx"))
+    if auto_route:
+        report_path = pre_report.with_name("Coleta_Argentina_Piloto.xlsx")
 
     files_cfg = cfg.get("files", {}) or {}
     master = Path(args.master or files_cfg.get("master", "")) if (args.master or files_cfg.get("master")) else None
     final = Path(args.final or files_cfg.get("final", "")) if (args.final or files_cfg.get("final")) else None
     protected_keys = load_baseline_inventory(master, final)["processed"]
+    # Separate operational attempt history from the evidence cache, regardless
+    # of auto-routing. Reserve BEFORE HTTP; never requery after a crash.
+    from contextlib import closing
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(db_path, timeout=30)) as attempt_db:
+        attempt_db.execute("PRAGMA busy_timeout=30000")
+        attempt_db.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
+            business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
+            provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        attempt_db.commit()
+        attempted_keys = {row[0] for row in attempt_db.execute(
+            "SELECT business_key FROM collection_attempt_reservations"
+        )}
+    LOG.info("SEARCH ATTEMPT LEDGER | attempts=%d | SQLite=%s", len(attempted_keys), db_path)
     plan = build_precollection_plan(
         input_path=input_path, cache_path=cache_path, report_path=pre_report,
         recollect_empty=bool(args.recollect_empty), recollect_low_evidence=bool(args.recollect_low_evidence),
         cfg=cfg, max_tavily_new=int(args.max_tavily_new or 0),
-        preserve_keys=protected_keys,
+        preserve_keys=protected_keys, exclude_attempted_keys=attempted_keys,
     )
+    # RAW_EMPTY é um estado sem evidência, NÃO comprovação de Search concluída.
+    # Não transformar 1.030 RAW_EMPTY em consultas pagas sem consentimento explícito.
+    raw_empty_count = int(plan.summary.get("RAW_EMPTY", 0) or 0)
+    if raw_empty_count and not bool(args.recollect_empty):
+        limit = int(args.max_tavily_new or 0)
+        print()
+        print(f"ALERTA RAW_EMPTY: {raw_empty_count} SKU(s) sem resultados Search no cache.")
+        print("Esses registros podem conter consultas antigas, falhas ou ausência de histórico.")
+        print("Não serão pesquisados automaticamente. Uma recoleta pode consumir novos créditos.")
+        print(f"Limite por execução: {limit if limit > 0 else 'SEM LIMITE (NÃO RECOMENDADO)'} request(s).")
+        print("Opções: [S] autorizar uma recoleta limitada | [N] manter cache e não consultar.")
+        while True:
+            decision = input("Autorizar recoleta de RAW_EMPTY nesta execução? (S/N): ").strip().upper()
+            if decision in {"S", "N"}:
+                break
+            print("Informe S ou N.")
+        if decision == "S":
+            if limit <= 0:
+                raise RuntimeError(
+                    "RECOLLECT_EMPTY_LIMIT_REQUIRED: defina --max-search-new N positivo antes de autorizar a recoleta."
+                )
+            # Planejar novamente, mantendo bloqueios de SKUs revisados e limite global.
+            plan = build_precollection_plan(
+                input_path=input_path, cache_path=cache_path, report_path=pre_report,
+                recollect_empty=True,
+                recollect_low_evidence=bool(args.recollect_low_evidence),
+                cfg=cfg, max_tavily_new=limit,
+                preserve_keys=protected_keys,
+                exclude_attempted_keys=attempted_keys,
+            )
+            print(f"RECOLETA AUTORIZADA | RAW_EMPTY={raw_empty_count} | fila limitada={len(plan.candidates)}")
+        else:
+            print("RECOLETA RAW_EMPTY RECUSADA. Nenhuma request por estes registros.")
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
+    slots = configured_slots() if auto_route and candidates else []
+    if auto_route and candidates and not slots:
+        raise RuntimeError("AUTO_PROVIDERS: configure ao menos um *_LIMIT_1 positivo e credencial no .env")
 
     print()
     print("=" * 86)
@@ -3339,6 +3445,8 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
 
     pcfg = _provider_cfg(cfg, provider)
     limiter = RateLimiter(float(pcfg.get("requests_per_minute", 30) or 30))
+    limiters = {p: RateLimiter(float(_provider_cfg(cfg,p).get("requests_per_minute",30) or 30)) for p in ("tavily","brightdata","serper")} if auto_route else {}
+    router = DurableRouter(db_path, slots) if auto_route else None
     db = ClassificationDB(db_path)
     run_id = db.start_run("collect", rules.hash, f"SEARCH_{COLLECTION_LABEL}:{provider}")
     writer = TavilyWritableStore(cache_path)  # nome legado; payload agora registra provider explicitamente
@@ -3350,6 +3458,38 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     try:
         for idx, (brand, model, prior_state) in enumerate(candidates, 1):
             key = business_key(brand, model)
+            active_slot = None
+            if not router:
+                # Commit independent of the HTTP transaction. A failed request
+                # stays in SQLite history, NOT in tavily_cache RAW evidence.
+                with closing(sqlite3.connect(db_path, timeout=30)) as attempt_db:
+                    attempt_db.execute("PRAGMA busy_timeout=30000")
+                    reserved = attempt_db.execute(
+                        "INSERT OR IGNORE INTO collection_attempt_reservations "
+                        "(business_key,account,provider) VALUES(?,?,?)",
+                        (key,"single:"+provider,provider)
+                    ).rowcount
+                    attempt_db.commit()
+                if not reserved:
+                    LOG.warning("SEARCH ATTEMPT LEDGER | already attempted; skipping %s", key)
+                    continue
+            if router:
+                active_slot = router.reserve(key)
+                if active_slot is None:
+                    # A SKU já reservada não pode ser solicitada novamente.
+                    if router.already_reserved(key):
+                        LOG.warning("ROUTER | SKU já tentado em execução anterior; sem retry | %s", key)
+                        continue
+                    LOG.error("ROUTER | esgotaram as cotas disponíveis no produto %d/%d", idx, len(candidates))
+                    completed = False
+                    break
+                provider = active_slot.provider
+                cfg["_active_search_slot"] = {
+                    "provider": provider, "key_env": active_slot.key_env,
+                    "zone_env": active_slot.zone_env,
+                }
+                limiter = limiters[provider]
+                LOG.info("ROUTER | produto=%d/%d provider=%s conta=%s", idx, len(candidates), provider, active_slot.account)
             try:
                 payload = search_product_once(brand, model, cfg, limiter, provider)
                 coll = payload.get("_collection", {}) or {}
@@ -3426,25 +3566,29 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 break
             except OperationalPause as exc:
                 db.event(run_id, key, exc.code, safe(exc))
+                # Falha depois da tentativa fica auditada, sem apagar cache útil prévio.
+                # API errors are NOT RAW evidence. Durable attempt ledger and
+                # classification DB events prevent retries; preserve cache unchanged.
+                db.event(run_id, key, "SEARCH_ERROR_NOT_CACHED", safe(exc))
+                total_requests += 1
                 product_rows.append({
                     "Marca": brand, "Modelo": model, "Provider": provider,
                     "Estado Anterior": prior_state, "Collection State": exc.code,
                     "Provider Requests": 1, "Data": now_iso(),
                 })
+                if router and active_slot and (exc.code.endswith("_LIMIT") or exc.code.endswith("_AUTH") or exc.code.endswith("_SCHEMA")):
+                    router.disable(active_slot.account, exc.code)
+                    LOG.warning("ROUTER | conta desabilitada=%s; segue no próximo SKU", active_slot.account)
+                    continue
                 LOG.error("%s. Coleta pausada; tudo salvo até aqui permanece persistido.", exc)
                 completed = False
                 break
             except Exception as exc:
                 # Fail-closed e sem retry. Persiste tombstone para o mesmo item não voltar
                 # silenciosamente à fila em uma nova execução e potencialmente gastar de novo.
-                failure = _failed_collection_payload(
-                    brand, model, provider, cfg, "REQUEST_ATTEMPTED_NO_AUTO_RETRY", safe(exc)
-                )
-                if prior_state in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
-                    # Uma falha de recoleta não pode substituir material já existente.
-                    db.event(run_id, key, "RECOLLECTION_ERROR_OLD_CACHE_PRESERVED", safe(exc))
-                else:
-                    writer.put(brand, model, failure, archive_reason=f"{provider.upper()}_REQUEST_ERROR_{COLLECTION_LABEL}")
+                # Do not poison the RAW cache with provider errors. The
+                # pre-HTTP reservation survives process exit and blocks retry.
+                db.event(run_id, key, "SEARCH_ERROR_NOT_CACHED", safe(exc))
                 total_requests += 1
                 db.event(run_id, key, f"SEARCH_{COLLECTION_LABEL}_ERROR_NO_RETRY", safe(exc))
                 product_rows.append({
@@ -3477,6 +3621,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     finally:
         writer.close()
         db.close()
+        cfg.pop("_active_search_slot", None)
+        if router:
+            router.close()
 
 
 def curate_cache_without_tavily(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> None:
@@ -3633,6 +3780,7 @@ class Stage1Result:
     type_margin: float = 0.0
     type_support: Dict[str, int] = field(default_factory=dict)
     power_scores: Dict[str, float] = field(default_factory=dict)
+    power_support: Dict[str, int] = field(default_factory=dict)
     power_share: float = 0.0
     power_margin: float = 0.0
     best_source_score: int = 0
@@ -4183,6 +4331,19 @@ class DeterministicEngine:
         fields: Dict[str, List[str]] = defaultdict(list)
         source_types = set(src.type_hits)
         output_voltage_context = bool(source_types.intersection(self.rules.output_voltage_not_input_power_types))
+        # An explicitly labelled input-power specification provides useful
+        # CORDED evidence; bare wattage or the adjective "electric" does NOT.
+        # Do not infer mains power in battery/charger contexts or for generators.
+        input_pattern = (
+            r"\b(?:rated\s+power\s+input|power\s+input|input)\s*"
+            r"(?:w\s+[0-9][0-9 ]{0,8}\b"
+            r"|[0-9][0-9 ]{0,8}\s*w\b)"
+        )
+        spec_input = re.search(input_pattern, combined)
+        battery_context = any(
+            contains_alias_prepared(combined, x)
+            for x in ("cordless", "lithium battery", "battery powered", "battery operated", "li-ion")
+        )
 
         for power, data in self.rules.power_rules.items():
             if any(contains_alias_prepared(combined, x) for x in (data.get("negative_keywords", []) or [])):
@@ -4202,6 +4363,15 @@ class DeterministicEngine:
                             fields[power].append("TITLE")
                         if in_body:
                             fields[power].append("BODY")
+            # This is an additive, model-anchored specification signal.
+            if (power == "CORDED" and spec_input and not battery_context
+                    and not output_voltage_context):
+                by_group["input_spec_keywords"].append("[RATED_INPUT_WATTS]")
+                # The field is BODY unless the label is genuinely in TITLE.
+                if re.search(input_pattern, title_fold):
+                    fields[power].append("TITLE")
+                else:
+                    fields[power].append("BODY")
             positive = [x for vals in by_group.values() for x in vals]
             if not positive:
                 continue
@@ -4286,6 +4456,56 @@ class DeterministicEngine:
                 all_power_hits[power].append(src.source_id)
 
         type_candidates = self._apply_specificity(all_type_hits.keys())
+        # Source pages may mention unrelated products in BODY (related items,
+        # advertisements, reviews). Two independent STRONG titles agreeing on
+        # one TYPE outweigh BODY-only competing candidates. Never use this
+        # shortcut when distinct types each have STRONG TITLE support.
+        title_support = {
+            typ: {
+                src.source_id for src in sources
+                if src.relevance == "STRONG"
+                and typ in src.type_scores
+                and "TITLE" in (src.type_evidence_fields.get(typ, []) or [])
+            }
+            for typ in type_candidates
+        }
+        strong_title_types = [t for t in type_candidates if len(title_support[t]) >= 2]
+        if len(strong_title_types) == 1:
+            winner = strong_title_types[0]
+            other_titles = [
+                t for t in type_candidates if t != winner and title_support[t]
+            ]
+            if not other_titles:
+                type_candidates = [winner]
+
+        # Wood/laminate edge trimmers are ROUTER TOOLS, not grass trimmers.
+        # Guard against broad "trimmer" lexical matches by requiring two
+        # STRONG SKU-anchored wood-router titles, without lawn/grass context.
+        if {"TRIMMER", "ROUTER TOOL"}.issubset(type_candidates):
+            wood_router_titles = [
+                src for src in sources
+                if src.relevance == "STRONG"
+                and "ROUTER TOOL" in src.type_hits
+                and "TITLE" in (src.type_evidence_fields.get("ROUTER TOOL", []) or [])
+                and any(contains_alias_prepared(norm_text(src.title), alias)
+                        for alias in ("wood trimmer", "trimmer router", "laminate trimmer"))
+                and not any(contains_alias_prepared(norm_text(src.title), alias)
+                            for alias in ("grass trimmer", "string trimmer", "hedge trimmer"))
+            ]
+            if len(wood_router_titles) >= 2 and not any(
+                src.relevance == "STRONG"
+                and "TRIMMER" in src.type_hits
+                and "TITLE" in (src.type_evidence_fields.get("TRIMMER", []) or [])
+                and any(contains_alias_prepared(norm_text(src.title), x)
+                        for x in ("grass trimmer", "string trimmer", "line trimmer"))
+                for src in sources
+            ):
+                type_candidates.remove("TRIMMER")
+                # ROUTER is a lexical parent of ROUTER TOOL for this
+                # specific target-anchored woodworking context.
+                if "ROUTER" in type_candidates:
+                    type_candidates.remove("ROUTER")
+
         power_candidates = sorted(all_power_hits.keys())
         # Após especificidade, métricas só consideram candidatos sobreviventes.
         type_support = {t: len(set(all_type_hits.get(t, []))) for t in type_candidates}
@@ -4353,7 +4573,14 @@ class DeterministicEngine:
         else:
             cg, fam, tax_reason = "", "", ""
 
-        if (product_type and power is not None and len(power_candidates) <= 1
+        # A valid taxonomy pair does not prove the power source. Active tools
+        # with UNKNOWN power must go through adjudication, never RULE_CLASSIFIED.
+        # Passive types explicitly allow UNKNOWN.
+        power_verified_for_auto = (
+            power != "UNKNOWN" or product_type in self.rules.passive_types
+        )
+        if (product_type and power is not None and power_verified_for_auto
+                and len(power_candidates) <= 1
                 and (cg, fam) in self.rules.valid_pairs and (cg, fam) != ("OTHERS", "OTHERS")
                 # Generic WATERPUMP fallback proves a broad type, not the commercial FAMILY.
                 # Route to JEV with evidence rather than silently auto-resolving.
@@ -4387,6 +4614,7 @@ class DeterministicEngine:
             type_margin=type_margin,
             type_support=type_support,
             power_scores=power_scores,
+            power_support=power_support,
             power_share=power_share,
             power_margin=power_margin,
             best_source_score=best_source_score,
@@ -4440,7 +4668,13 @@ def _combo_kit_components(rules: Rules, s1: Stage1Result) -> List[str]:
                  or "BODY" in (src.type_evidence_fields.get(t, []) or []))
         }
         distinct = _collapse_related_primary_types(rules, explicit)
-        if len(distinct) >= min_types:
+        # Multiple TYPE aliases on a product page do not prove the SKU
+        # is a kit (e.g. a JIGSAW page with an unrelated circular-saw advert).
+        # Require an explicit combo expression in target-anchored evidence.
+        terms = [safe(t) for t in (policy.get("combo_terms", []) or []) if safe(t)]
+        combo_explicit = any(contains_alias_prepared(norm_text(src.title), t)
+                             for t in terms)
+        if len(distinct) >= min_types and combo_explicit:
             return distinct
     return []
 
@@ -4462,7 +4696,9 @@ def choose_combo_title(rules: Rules, s1: Stage1Result) -> Tuple[str, str]:
             and ("TITLE" in (src.type_evidence_fields.get(t, []) or [])
                  or "BODY" in (src.type_evidence_fields.get(t, []) or []))
         }
-        if len(_collapse_related_primary_types(rules, explicit)) >= min_types:
+        terms = [safe(t) for t in (policy.get("combo_terms", []) or []) if safe(t)]
+        if (len(_collapse_related_primary_types(rules, explicit)) >= min_types
+                and any(contains_alias_prepared(norm_text(src.title), t) for t in terms)):
             candidates.append(src)
     if not candidates:
         return "", ""
@@ -6132,6 +6368,11 @@ def _clef_auto_gate(
     fam = safe(data.get("family"))
     if typ not in rules.types:
         return False, "CLEF_TYPE_INVALID"
+    # A confident TYPE/FAMILY does not justify automatic acceptance when an
+    # active product's power source remains unsupported by target evidence.
+    clef_power = safe(data.get("power")) or "UNKNOWN"
+    if clef_power == "UNKNOWN" and typ not in rules.passive_types:
+        return False, "CLEF_POWER_UNVERIFIED"
     if (cg, fam) not in rules.valid_pairs or (cg, fam) == ("OTHERS", "OTHERS"):
         return False, "CLEF_TAXONOMY_INVALID"
 
@@ -6571,7 +6812,7 @@ def finalize_product(
             "FAMILY": fam if (cg, fam) in rules.valid_pairs else "",
             "Título Real": title,
             "Fonte URL": url,
-            "Review Required": "NÃO",
+            "Review Required": "SIM",
             "Auto Eligible": "NÃO",
             "Double Check Priority": "ALTA",
             "Reason Code": f"CLEF_{safe(data.get('decision')) or 'INSUFFICIENT'}",
@@ -6609,6 +6850,12 @@ def finalize_product(
 # -----------------------------------------------------------------------------
 # Baseline e exportação
 # -----------------------------------------------------------------------------
+BASELINE_PUBLIC_COLUMNS = [
+    "Marca", "Modelo", "O que é (Tipo)", "Alimentação",
+    "Category General", "FAMILY", "Título Real", "Próxima Ação",
+    "Status", "Revisão", "Revisão B.I",
+]
+
 BASELINE_FINAL_COLUMNS = [
     "Marca",
     "Modelo",
@@ -6780,6 +7027,14 @@ def _baseline_row_accepted(row: Any, df: Any) -> bool:
     resolution_col = find_col(df, ["Resolution State"], required=False)
     resolution = safe(row.get(resolution_col)).upper() if resolution_col else ""
     if resolution and resolution != "RESOLVED":
+        return False
+
+    # Keep the canonical final acceptance contract identical to the live
+    # classifier: RESOLVED alone must NEVER approve a WEAK/CONFLICT identity.
+    # BI_OK and Manual locks have already returned above and stay authoritative.
+    identity_col = find_col(df, ["Classification Identity"], required=False)
+    identity = safe(row.get(identity_col)).upper() if identity_col else ""
+    if identity and identity != "STRONG":
         return False
 
     proc_col = find_col(df, ["Status Processamento"], required=False)
@@ -7378,6 +7633,20 @@ def _sync_final_into_master(
 
             if src_manual or src_accepted:
                 _copy_business_values(src, final_df, master_df, idx)
+                if src_accepted and not src_manual:
+                    # Final-approved data must not inherit a stale WEAK or
+                    # REVIEW flag from a superseded Consolidado row.
+                    for dest, aliases in (
+                        ("O que é (Tipo)", ("O que é (Tipo)", "Tipo", "Product Type")),
+                        ("Category General", ("Category General",)),
+                        ("FAMILY", ("FAMILY", "Family")),
+                        ("Classification Identity", ("Classification Identity",)),
+                        ("Revisão", ("Revisão", "Revisao")),
+                    ):
+                        col = find_col(final_df, aliases, required=False)
+                        if dest not in master_df.columns:
+                            master_df[dest] = pd.NA
+                        master_df.at[idx, dest] = src.get(col) if col else pd.NA
                 if src_manual:
                     master_df.at[idx, "Status"] = "Manual"
                     stats["final_manual_promoted"] += 1
@@ -7588,7 +7857,7 @@ def _atomic_write_dataframe(df: Any, path: Path, sheet_name: str) -> None:
     tmp = path.with_name(path.stem + f".tmp_{os.getpid()}" + path.suffix)
     try:
         with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name=sheet_name[:31] or "Consolidado", index=False)
+            _excel_export_safe_frame(df).to_excel(writer, sheet_name=sheet_name[:31] or "Consolidado", index=False)
         os.replace(tmp, path)
     except PermissionError as exc:
         try:
@@ -7606,6 +7875,35 @@ def _atomic_write_dataframe(df: Any, path: Path, sheet_name: str) -> None:
             pass
         raise
 
+
+
+def _cache_evidence_route(raw: RawEvidence) -> Tuple[str, str, str]:
+    """Single source of truth for RAW_OK pending actions (never approves a SKU).
+
+    Return (next_action, resolution_state, review). A Search hit is not
+    automatically a classifiable source; only curated target evidence or
+    explicitly eligible safe auxiliary evidence may be sent for classification.
+    """
+    if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+        raise ValueError("CACHE_ROUTE_REQUIRES_RAW_OK")
+    payload = raw.payload or {}
+    coll = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
+    state = safe(coll.get("state")).upper()
+    curated = [x for x in coll.get("curated_results", []) or [] if isinstance(x, dict)]
+    auxiliaries = [x for x in coll.get("evidence_cache", []) or [] if isinstance(x, dict)]
+    safe_aux = any(
+        safe(x.get("tier")).upper() == "AUXILIARY_REVIEW_ONLY"
+        and safe(x.get("identity")).upper() in {"STRONG", "PROBABLE"}
+        and x.get("eligible_for_llm_rescue", True) is not False
+        and safe(x.get("decision")).upper() not in {
+            "REJECT_WRONG_MODEL", "REJECT_COMPATIBILITY_ONLY", "REJECT_RELATED_ONLY"
+        }
+        for x in auxiliaries
+    )
+    # Source gate still applies in classify; this only opens the candidate queue.
+    if state not in {"LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"} and (curated or safe_aux):
+        return "CLASSIFICAR_CACHE", "PENDING_CLASSIFICATION", "PENDENTE_CLASSIFICACAO"
+    return "REVISAR_EVIDENCIA_CACHE", "REVIEW_CACHE_EVIDENCE", "REVISAR"
 
 
 def _manual_review_bundle(raw: RawEvidence) -> Dict[str, str]:
@@ -7696,8 +7994,26 @@ def _export_base_final(
         out[col] = work[src] if src else pd.NA
 
     if review_bi_source_exists:
-        review_bi_snapshot = review_bi_snapshot or {}
-        out["Revisão B.I"] = [review_bi_snapshot.get(key, pd.NA) for key in work["__key"]]
+        # BI approval is owned by the EXACT Marca+Modelo pair in Final.
+        # Never copy a human OK to another alias sharing the compacted key.
+        # _load_review_bi_snapshot uses normalized keys for historical
+        # lookups; it is NOT an approval authority for distinct physical SKUs.
+        prior_bi_by_exact_pair = {}
+        if final_path.is_file():
+            original_bi_df, _ = _read_business_sheet(final_path)
+            ob = find_col(original_bi_df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+            om = find_col(original_bi_df, ["Modelo", "Model", "SKU", "Part Number"])
+            orbi = find_col(original_bi_df, ["Revisão B.I", "Revisao B.I"], required=False)
+            for _, old_row in original_bi_df.iterrows():
+                exact_pair = (safe(old_row.get(ob)), safe(old_row.get(om)))
+                old_value = old_row.get(orbi) if orbi else pd.NA
+                if (exact_pair not in prior_bi_by_exact_pair
+                        or _is_bi_ok_value(old_value)):
+                    prior_bi_by_exact_pair[exact_pair] = old_value
+        out["Revisão B.I"] = [
+            prior_bi_by_exact_pair.get((safe(brand), safe(model)), pd.NA)
+            for brand, model in zip(out["Marca"], out["Modelo"])
+        ]
     else:
         src_rbi = find_col(work, ["Revisão B.I", "Revisao B.I"], required=False)
         out["Revisão B.I"] = work[src_rbi] if src_rbi else pd.NA
@@ -8016,7 +8332,10 @@ def _export_base_final(
             continue
         complete = classified(row)
         approved = safe(row.get("Revisão")).upper() == "AUTO_APROVADO"
-        if approved and not complete:
+        # A legacy accepted classification need not have Título Real.
+        # Do not silently revoke it under a stricter unrelated export rule.
+        accepted_under_contract = _baseline_row_accepted(row, out)
+        if approved and not complete and not accepted_under_contract:
             out.at[idx, "Revisão"] = "REVISAR"
             out.at[idx, "Próxima Ação"] = "REVISAR_CLASSIFICACAO_INCOMPLETA"
             repaired_approval += 1
@@ -8102,10 +8421,10 @@ def _export_base_final(
                         if not safe(rec.get("Fonte URL")):
                             out.at[idx, "Fonte URL"] = bundle["Fonte Referência URL"]
                     if not classified(rec):
-                        requires_review = state in {"LOW_TARGET_EVIDENCE", "NO_TARGET_EVIDENCE"}
-                        out.at[idx, "Revisão"] = "REVISAR" if requires_review else "PENDENTE_CLASSIFICACAO"
-                        out.at[idx, "Próxima Ação"] = "REVISAR_EVIDENCIA_CACHE" if requires_review else "CLASSIFICAR_CACHE"
-                        out.at[idx, "Resolution State"] = "REVIEW_CACHE_EVIDENCE" if requires_review else "PENDING_CLASSIFICATION"
+                        action, resolution, review = _cache_evidence_route(raw)
+                        out.at[idx, "Revisão"] = review
+                        out.at[idx, "Próxima Ação"] = action
+                        out.at[idx, "Resolution State"] = resolution
         finally:
             store.close()
 
@@ -8175,11 +8494,32 @@ def _export_base_final(
         finally:
             store.close()
 
+    # Release gate: RAW_OK can need evidence review, but can never mean
+    # that Search returned no results. Catch stale Excel state before writing.
+    stale_raw_ok = out.loc[
+        out["Collection State"].isin([
+            "READY_FOR_CLASSIFICATION", "TARGET_EVIDENCE",
+            "PARTIAL_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE",
+            "NO_TARGET_EVIDENCE", "CACHE_RAW_SEM_CURADORIA"
+        ]) & out["Próxima Ação"].eq("REVISAR_SEM_RESULTADOS")
+        & ~out["Revisão B.I"].map(_is_bi_ok_value)
+        & ~out["Status"].map(_is_manual_status)
+    ]
+    if not stale_raw_ok.empty:
+        examples = list(zip(stale_raw_ok["Marca"].head(5), stale_raw_ok["Modelo"].head(5)))
+        raise RuntimeError(
+            "BASE_FINAL_STALE_NO_RESULTS_ON_RAW_OK: "
+            f"rows={len(stale_raw_ok)} examples={examples}"
+        )
+
     tmp = final_path.with_name(final_path.stem + f".tmp_{os.getpid()}" + final_path.suffix)
     final_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
-            out.to_excel(writer, sheet_name="Base Final", index=False)
+            # Base Final is the 11-column business view only. Internal
+            # evidence/statuses remain on the Consolidado and SQLite cache.
+            _excel_export_safe_frame(out.loc[:, BASELINE_PUBLIC_COLUMNS]).to_excel(
+                writer, sheet_name="Base Final", index=False)
         os.replace(tmp, final_path)
     except PermissionError as exc:
         try:
@@ -8302,18 +8642,15 @@ def _hydrate_input_collection_from_cache(
             old_resolution = safe(old.get("Resolution State")).upper()
             pending = old_review in {"", "PENDENTE", "PENDENTE_COLETA", "PENDENTE_RECOLETA", "PENDENTE_CLASSIFICACAO"}
             pending = pending or old_process in {"PENDING_COLLECTION", "PENDING_RECOLLECTION", "PENDING_CLASSIFICATION"}
-            pending = pending or old_resolution in {"", "PENDING_EVIDENCE_CHECK", "PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "PENDING_CLASSIFICATION"}
+            pending = pending or old_resolution in {"", "PENDING_EVIDENCE_CHECK", "PENDING_COLLECTION", "PENDING_RECOLLECTION", "NEEDS_RECOLLECTION", "PENDING_CLASSIFICATION", "REVIEW_NO_RESULTS"}
+            # RAW_OK supersedes stale RAW_EMPTY/no-results state after cache recovery.
+            pending = pending or safe(old.get("Próxima Ação")).upper() == "REVISAR_SEM_RESULTADOS"
             if pending and old_resolution not in {"CLASSIFIED_CLEF", "RESOLVED"}:
-                if state in {"NO_TARGET_EVIDENCE", "LOW_TARGET_EVIDENCE"}:
-                    master_df.at[idx, review_col] = "REVISAR"
-                    master_df.at[idx, "Resolution State"] = "REVIEW_CACHE_EVIDENCE"
-                    master_df.at[idx, "Status Processamento"] = "REVIEW_CACHE_EVIDENCE"
-                    master_df.at[idx, "Próxima Ação"] = "REVISAR_EVIDENCIA_CACHE"
-                else:
-                    master_df.at[idx, review_col] = "PENDENTE_CLASSIFICACAO"
-                    master_df.at[idx, "Resolution State"] = "PENDING_CLASSIFICATION"
-                    master_df.at[idx, "Status Processamento"] = "PENDING_CLASSIFICATION"
-                    master_df.at[idx, "Próxima Ação"] = "CLASSIFICAR_CACHE"
+                action, resolution, review = _cache_evidence_route(raw)
+                master_df.at[idx, review_col] = review
+                master_df.at[idx, "Resolution State"] = resolution
+                master_df.at[idx, "Status Processamento"] = resolution
+                master_df.at[idx, "Próxima Ação"] = action
                 stats["cache_pending_corrected"] += 1
             # Independente da classificação, todos os títulos e fontes
             # existentes no SQLite precisam ficar visíveis no Consolidado.
@@ -8449,10 +8786,20 @@ def persist_baseline_excels(
         }
         dropped = before_accepted - after_accepted
         if dropped:
+            audit_root = Path((cfg or {}).get("files", {}).get(
+                "baseline_backup_dir", str(ROOT / "Backups_Baseline")))
+            audit_root.mkdir(parents=True, exist_ok=True)
+            report = audit_root / "baseline_preservation_blocked.json"
+            report.write_text(json.dumps({
+                "before_accepted": len(before_accepted),
+                "after_accepted": len(after_accepted),
+                "dropped": len(dropped),
+                "dropped_keys": sorted(dropped),
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
             raise RuntimeError(
                 "BASELINE_ACCEPTED_PRESERVATION_FAILED: "
                 f"{len(dropped)} classificacoes aceitas seriam removidas. "
-                "Nenhum Excel foi regravado."
+                f"Audit: {report}. Nenhum Excel foi regravado."
             )
 
     # Verificar acesso a AMBOS os arquivos antes de gravar o primeiro.
@@ -8554,18 +8901,39 @@ def reconcile_baseline_before_run(
     return stats
 
 
+# Excel XML 1.0 forbids control codepoints even when they are valid Unicode
+# in scraped search snippets. Preserve original source evidence in SQLite;
+# sanitize ONLY exported worksheet string values (not business keys).
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE as _EXCEL_ILLEGAL_CONTROLS
+
+
+def _excel_export_safe_value(value: Any) -> Any:
+    return _EXCEL_ILLEGAL_CONTROLS.sub("", value) if isinstance(value, str) else value
+
+
+def _excel_export_safe_frame(frame: "pd.DataFrame") -> "pd.DataFrame":
+    # Sanitize summary AND record/review sheets, without stringifying
+    # numerics, timestamps or missing values.
+    return frame.apply(lambda column: column.map(_excel_export_safe_value))
+
+
 def export_excel(rows: List[Dict[str, Any]], out_path: Path, summary: Dict[str, Any]) -> None:
     import pandas as pd
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
     rev = df[df.get("Review Required", pd.Series(dtype=str)).astype(str).str.upper().eq("SIM")].copy() if not df.empty else pd.DataFrame()
     summ = pd.DataFrame([{"Métrica": k, "Valor": v} for k, v in summary.items()])
+    # Never leave a malformed temporary workbook after failed exports.
     tmp = out_path.with_name(out_path.stem + f".tmp_{os.getpid()}" + out_path.suffix)
-    with pd.ExcelWriter(tmp, engine="openpyxl") as w:
-        summ.to_excel(w, sheet_name="Resumo", index=False)
-        df.to_excel(w, sheet_name="Resultados", index=False)
-        rev.to_excel(w, sheet_name="Revisar", index=False)
-    os.replace(tmp, out_path)
+    try:
+        with pd.ExcelWriter(tmp, engine="openpyxl") as w:
+            _excel_export_safe_frame(summ).to_excel(w, sheet_name="Resumo", index=False)
+            _excel_export_safe_frame(df).to_excel(w, sheet_name="Resultados", index=False)
+            _excel_export_safe_frame(rev).to_excel(w, sheet_name="Revisar", index=False)
+        os.replace(tmp, out_path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 # -----------------------------------------------------------------------------
@@ -8805,8 +9173,8 @@ def inventory(
     if output:
         import pandas as pd
         with pd.ExcelWriter(output, engine="openpyxl") as w:
-            pd.DataFrame([{"Métrica": k, "Valor": v} for k, v in counts.items()]).to_excel(w, sheet_name="Resumo", index=False)
-            pd.DataFrame(rows).to_excel(w, sheet_name="Catalogo", index=False)
+            _excel_export_safe_frame(pd.DataFrame([{"Métrica": k, "Valor": v} for k, v in counts.items()])).to_excel(w, sheet_name="Resumo", index=False)
+            _excel_export_safe_frame(pd.DataFrame(rows)).to_excel(w, sheet_name="Catalogo", index=False)
     return dict(counts)
 
 def _load_master_rule_metadata(master_path: Optional[Path]) -> Dict[str, Dict[str, str]]:
@@ -8935,7 +9303,7 @@ def _export_recovery_report(rows: List[Dict[str, Any]], path: Path, sheet: str) 
     import pandas as pd
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.stem + f".tmp_{os.getpid()}" + path.suffix)
-    pd.DataFrame(rows).to_excel(tmp, sheet_name=sheet[:31], index=False)
+    _excel_export_safe_frame(pd.DataFrame(rows)).to_excel(tmp, sheet_name=sheet[:31], index=False)
     os.replace(tmp, path)
 
 
@@ -9169,6 +9537,25 @@ def run_pipeline(
     output_path = Path(args.output or cfg["files"]["output"])
     inventory_path = Path(args.inventory_output or cfg["files"]["inventory_output"])
 
+    output_only = bool(cfg.get("_nightly_output_only", False))
+    if output_only:
+        # This is NOT a generic switch to disable safety gates. It is valid
+        # only for an overnight-created, isolated 1..20 SKU cohort.
+        if args.mode != "classify":
+            raise RuntimeError("OUTPUT_ONLY_REQUIRES_CLASSIFY")
+        isolated_run = input_path.resolve().parent if input_path else None
+        required_paths = (master_path, final_path, cache_path, db_path, output_path)
+        if (not isolated_run
+                or input_path.name != "raw_empty_cohort.xlsx"
+                or not (isolated_run / "run_report.json").is_file()
+                or not all(p and p.resolve().parent == isolated_run
+                           for p in required_paths)):
+            raise RuntimeError("OUTPUT_ONLY_ISOLATED_PATH_CONTRACT_FAILED")
+        original_state = json.loads((isolated_run / "run_report.json").read_text(encoding="utf-8"))
+        if (original_state.get("mode") != "ISOLATED_RAW_EMPTY_CONTROLLED"
+                or not 1 <= original_state.get("cohort_count", 0) <= 20):
+            raise RuntimeError("OUTPUT_ONLY_INVALID_COHORT_STATE")
+
     baseline_pre_stats: Dict[str, int] = {}
     if args.mode in {"classify", "full", "recover"}:
         backup_root = Path(cfg.get("files", {}).get("baseline_backup_dir", "Backups_Baseline"))
@@ -9188,12 +9575,33 @@ def run_pipeline(
         else:
             LOG.info("AUDITORIA BASELINE OK | sem conflitos objetivos")
 
-        baseline_pre_stats = reconcile_baseline_before_run(
-            master_path=master_path,
-            final_path=final_path,
-            input_path=input_path,
-            rules=rules,
-        )
+        if output_only:
+            # Never mutate the isolated workbook when no output has been
+            # classified. The original Final must already cover every
+            # accepted key, otherwise fail before ANY paid LLM call.
+            previous_inv = load_baseline_inventory(master_path, final_path)
+            missing_accepted = previous_inv["processed"] - previous_inv["final_accepted"]
+            if missing_accepted:
+                raise RuntimeError(
+                    "OUTPUT_ONLY_PREEXISTING_BASELINE_GAP: "
+                    f"{len(missing_accepted)} missing accepted keys"
+                )
+            baseline_pre_stats = {
+                "pre_master_accepted": len(previous_inv["master_accepted"]),
+                "pre_final_accepted": len(previous_inv["final_accepted"]),
+                "pre_union_accepted": len(previous_inv["processed"]),
+                "pre_missing_in_final": 0,
+                "pre_reconciled": 0,
+            }
+            LOG.info("OUTPUT_ONLY BASELINE | accepted=%d unchanged | official_writes=0",
+                     len(previous_inv["processed"]))
+        else:
+            baseline_pre_stats = reconcile_baseline_before_run(
+                master_path=master_path,
+                final_path=final_path,
+                input_path=input_path,
+                rules=rules,
+            )
         LOG.info(
             "BASELINE CHECK | Consolidado aceitos=%d | Base Final aceitos=%d | "
             "união=%d | faltando na Base Final=%d | reconciliada=%s",
@@ -9530,70 +9938,77 @@ def run_pipeline(
 
             baseline_stats: Dict[str, int] = {}
             baseline_warning = ""
-            try:
-                baseline_stats = persist_baseline_excels(
-                    rows=rows,
-                    master_path=master_path,
-                    final_path=final_path,
-                    input_path=input_path,
-                    rules=rules,
-                    reprocess=args.reprocess,
-                    force_reprocess_keys=force_reprocess_keys,
-                    cache_path=cache_path,
-                    cfg=cfg,
-                )
-                if baseline_stats:
-                    post_inv = load_baseline_inventory(master_path, final_path)
-                    final_cohort_accepted = len(
-                        cohort_keys & post_inv["final_accepted"]
-                    )
-                    expected_cohort_keys = _expected_cohort_accepted_after_run(
-                        cohort_keys=cohort_keys,
-                        final_accepted_at_start=cohort_final_accepted_keys_at_start,
+            if output_only:
+                stats["deferred_isolated_baseline_export"] = 1
+                LOG.info("NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK | "
+                         "durable_output_xlsx_and_sqlite=YES | "
+                         "isolated_master_final_unchanged=YES | "
+                         "canonical_promotion=BLOCKED")
+            else:
+                try:
+                    baseline_stats = persist_baseline_excels(
                         rows=rows,
-                        force_reprocess_keys=force_reprocess_keys,
-                    )
-                    equivalence_accepted_keys = _cohort_equivalence_accepted_keys(
+                        master_path=master_path,
                         final_path=final_path,
-                        cohort_keys=cohort_keys,
+                        input_path=input_path,
+                        rules=rules,
+                        reprocess=args.reprocess,
+                        force_reprocess_keys=force_reprocess_keys,
+                        cache_path=cache_path,
+                        cfg=cfg,
                     )
-                    expected_cohort_keys |= equivalence_accepted_keys
-                    expected_cohort_accepted = len(expected_cohort_keys)
-                    stats["cohort_final_accepted_at_end"] = final_cohort_accepted
-                    stats["cohort_expected_accepted_at_end"] = expected_cohort_accepted
-                    stats["cohort_equivalence_accepted_at_end"] = len(equivalence_accepted_keys)
-
-                    LOG.info(
-                        "BASELINE EXCEL ATUALIZADA | %s",
-                        " | ".join(
-                            f"{k}={v}" for k, v in baseline_stats.items()
-                        ),
-                    )
-                    LOG.info(
-                        "COHORT BASE FINAL | aceitos=%d/%d | esperado=%d | equivalencia=%d | review=%d",
-                        final_cohort_accepted,
-                        len(cohort),
-                        expected_cohort_accepted,
-                        len(equivalence_accepted_keys),
-                        int(stats.get("final_review", 0) or 0),
-                    )
-
-                    if final_path and final_cohort_accepted != expected_cohort_accepted:
-                        raise RuntimeError(
-                            "BASELINE_COHORT_MISMATCH: "
-                            f"Base Final possui {final_cohort_accepted} aceito(s) "
-                            f"no cohort, mas eram esperados {expected_cohort_accepted}. "
-                            "Classificacao_v3 e checkpoints foram preservados; "
-                            "a Base Final precisa ser reconciliada antes da próxima execução."
+                    if baseline_stats:
+                        post_inv = load_baseline_inventory(master_path, final_path)
+                        final_cohort_accepted = len(
+                            cohort_keys & post_inv["final_accepted"]
                         )
-            except Exception as exc:
-                # Classificação e checkpoints não são perdidos só porque o Excel
-                # está aberto ou houve falha de gravação.
-                baseline_warning = f"{type(exc).__name__}: {exc}"
-                LOG.error(
-                    "BASELINE EXCEL NÃO ATUALIZADA: %s",
-                    baseline_warning,
-                )
+                        expected_cohort_keys = _expected_cohort_accepted_after_run(
+                            cohort_keys=cohort_keys,
+                            final_accepted_at_start=cohort_final_accepted_keys_at_start,
+                            rows=rows,
+                            force_reprocess_keys=force_reprocess_keys,
+                        )
+                        equivalence_accepted_keys = _cohort_equivalence_accepted_keys(
+                            final_path=final_path,
+                            cohort_keys=cohort_keys,
+                        )
+                        expected_cohort_keys |= equivalence_accepted_keys
+                        expected_cohort_accepted = len(expected_cohort_keys)
+                        stats["cohort_final_accepted_at_end"] = final_cohort_accepted
+                        stats["cohort_expected_accepted_at_end"] = expected_cohort_accepted
+                        stats["cohort_equivalence_accepted_at_end"] = len(equivalence_accepted_keys)
+
+                        LOG.info(
+                            "BASELINE EXCEL ATUALIZADA | %s",
+                            " | ".join(
+                                f"{k}={v}" for k, v in baseline_stats.items()
+                            ),
+                        )
+                        LOG.info(
+                            "COHORT BASE FINAL | aceitos=%d/%d | esperado=%d | equivalencia=%d | review=%d",
+                            final_cohort_accepted,
+                            len(cohort),
+                            expected_cohort_accepted,
+                            len(equivalence_accepted_keys),
+                            int(stats.get("final_review", 0) or 0),
+                        )
+
+                        if final_path and final_cohort_accepted != expected_cohort_accepted:
+                            raise RuntimeError(
+                                "BASELINE_COHORT_MISMATCH: "
+                                f"Base Final possui {final_cohort_accepted} aceito(s) "
+                                f"no cohort, mas eram esperados {expected_cohort_accepted}. "
+                                "Classificacao_v3 e checkpoints foram preservados; "
+                                "a Base Final precisa ser reconciliada antes da próxima execução."
+                            )
+                except Exception as exc:
+                    # Classificação e checkpoints não são perdidos só porque o Excel
+                    # está aberto ou houve falha de gravação.
+                    baseline_warning = f"{type(exc).__name__}: {exc}"
+                    LOG.error(
+                        "BASELINE EXCEL NÃO ATUALIZADA: %s",
+                        baseline_warning,
+                    )
 
             summary = {
                 "Pipeline Version": PIPELINE_VERSION,
@@ -9656,30 +10071,33 @@ def run_pipeline(
                 raise RuntimeError("RECOVERY_BATCH_PAUSED: " + paused_reason)
 
         except KeyboardInterrupt:
-            try:
-                partial_baseline = persist_baseline_excels(
-                    rows=rows,
-                    master_path=master_path,
-                    final_path=final_path,
-                    input_path=input_path,
-                    rules=rules,
-                    reprocess=args.reprocess,
-                    force_reprocess_keys=force_reprocess_keys,
-                    cache_path=cache_path,
-                    cfg=cfg,
-                )
-                if partial_baseline:
-                    LOG.warning(
-                        "Interrompido, mas baseline Excel foi atualizada: %s",
-                        " | ".join(
-                            f"{k}={v}" for k, v in partial_baseline.items()
-                        ),
+            if output_only:
+                LOG.warning("OUTPUT_ONLY INTERRUPTED | saving durable checkpoints; no baseline export")
+            else:
+                try:
+                    partial_baseline = persist_baseline_excels(
+                        rows=rows,
+                        master_path=master_path,
+                        final_path=final_path,
+                        input_path=input_path,
+                        rules=rules,
+                        reprocess=args.reprocess,
+                        force_reprocess_keys=force_reprocess_keys,
+                        cache_path=cache_path,
+                        cfg=cfg,
                     )
-            except Exception as baseline_exc:
-                LOG.error(
-                    "Interrompido; baseline Excel não pôde ser atualizada: %s",
-                    baseline_exc,
-                )
+                    if partial_baseline:
+                        LOG.warning(
+                            "Interrompido, mas baseline Excel foi atualizada: %s",
+                            " | ".join(
+                                f"{k}={v}" for k, v in partial_baseline.items()
+                            ),
+                        )
+                except Exception as baseline_exc:
+                    LOG.error(
+                        "Interrompido; baseline Excel não pôde ser atualizada: %s",
+                        baseline_exc,
+                    )
 
             db.finish_run(
                 run_id,
@@ -9739,7 +10157,20 @@ def run_quality_gates(rules: Rules, cfg: Dict[str, Any]) -> Dict[str, int]:
             if expected is not None and actual != expected:
                 errors.append(f"{cid}: {label}={actual!r}, esperado={expected!r}")
 
-        if "state" in expect: check("state", result.state, safe(expect.get("state")))
+        if "state" in expect:
+            expected_state = safe(expect.get("state"))
+            # Legacy gold cases assert taxonomy resolution even if power is
+            # UNKNOWN. Keep TYPE/FAMILY checks, but require an active SKU
+            # lacking power evidence to be AMBIGUOUS, never auto-approved.
+            if (expected_state == "RESOLVED_RULE"
+                    and result.product_type
+                    and result.product_type not in rules.passive_types
+                    and result.power == "UNKNOWN"
+                    and not result.power_candidates
+                    and result.taxonomy[:2] in rules.valid_pairs
+                    and result.taxonomy[:2] != ("OTHERS", "OTHERS")):
+                expected_state = "AMBIGUOUS"
+            check("state", result.state, expected_state)
         if "product_type" in expect: check("product_type", result.product_type, expect.get("product_type"))
         if "power" in expect: check("power", result.power, expect.get("power"))
         if "category_general" in expect: check("category_general", result.taxonomy[0], safe(expect.get("category_general")))
@@ -9954,7 +10385,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -9980,9 +10411,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
     p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata"], default="")
     p.add_argument("--recollect-empty", action="store_true")
+    p.add_argument("--auto-providers", action="store_true", help="Rotação entre contas/provedores apenas para SKUs distintos")
     p.add_argument("--recollect-low-evidence", action="store_true")
     p.add_argument("--curate-all-cache", action="store_true", help="No modo curate, ignora o arquivo de entrada e percorre todo o cache")
     p.add_argument("--force-curate", action="store_true", help="Reavaliar a curadoria atual sem repetir Search; preserva historico do SQLite.")
+    p.add_argument("--execute-live", action="store_true")
+    p.add_argument("--allow-prior-serper-quota-error", action="store_true")
+    p.add_argument("--search-budget", type=int, default=20)
+    p.add_argument("--llm-budget", type=int, default=60)
+    p.add_argument("--token-budget", type=int, default=120000)
+    p.add_argument("--timeout-minutes", type=int, default=120)
+    p.add_argument("--resume-dir", default="")
+    p.add_argument("--campaign-total", type=int, default=0)
+    p.add_argument("--campaign-review-before-promotion", action="store_true",
+                   help="Complete and audit isolated batches, NEVER auto-promote to canonical files; explicit promotion remains separate")
+    p.add_argument("--night-output-only", action="store_true",
+                   help="Isolated 1..20 SKU night only: retain classifier XLSX+SQLite, defer legacy Final/Master export; requires review-before-promotion")
+    p.add_argument("--night-include-raw-missing", action="store_true",
+                   help="Explicitly allow never-collected RAW_MISSING SKUs from the input; excludes historical attempts and human locks")
+    p.add_argument("--night-allow-previous-errors", action="store_true",
+                   help="Explicitly authorize ONE new paid Search for RAW_EMPTY with an old provider error but no controlled-night attempt; may incur charges")
+    p.add_argument("--campaign-jev-budget", type=int, default=0)
+    p.add_argument("--campaign-token-budget", type=int, default=0)
+    p.add_argument("--campaign-resume-dir", default="", help="Existing campaign manifest directory; never starts new unaudited work")
+    p.add_argument("--campaign-pause-after-sublots", type=int, default=0, help="Safety test: pause a campaign after N audited sublots; resume with the same campaign directory and zero pause")
+    p.add_argument("--recovery-manifest", default="", help="Prepared 20-SKU recovery manifest; offline only")
+    p.add_argument("--legacy-run-dir", action="append", default=[], help="Two historical audited run folders for offline-only 40-SKU promotion")
+    p.add_argument("--promotion-dry-run", action="store_true", help="Build and verify staging without replacing any canonical data")
+    p.add_argument("--pilot-dir", default="", help="Isolated ten-SKU pilot folder for targeted official promotion")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p
@@ -10310,6 +10766,351 @@ def run_baseline_repair(args: argparse.Namespace, cfg: Dict[str, Any], rules: Ru
     LOG.info("Revisão B.I não foi recalculada nem preenchida pelo script.")
 
 
+
+def promote_isolated_ten(pilot_dir: Path, official_final: Path, *, commit: bool = False) -> Dict[str, Any]:
+    """Promote only ten verified pilot rows to the official Final workbook.
+
+    No collection/LLM, no full-baseline reconciliation, and no changes to
+    manual / BI_OK records. A dry run is the default. An immutable backup is
+    created immediately before an atomic workbook replacement.
+    """
+    import hashlib
+    import shutil
+    import tempfile
+    from datetime import datetime
+    from openpyxl import load_workbook
+
+    pilot_dir = Path(pilot_dir).resolve()
+    official_final = Path(official_final).resolve()
+    result_path = pilot_dir / "classification_output.xlsx"
+    isolated_cfg_path = pilot_dir / "isolated_config.json"
+    if not result_path.is_file() or not isolated_cfg_path.is_file():
+        raise RuntimeError("PROMOTE10_MISSING_PILOT_RESULT_OR_CONFIG")
+    cfg_pilot = json.loads(isolated_cfg_path.read_text(encoding="utf-8-sig"))
+    pilot_files = cfg_pilot.get("files", {})
+    source_final = Path(pilot_files.get("final", "")).resolve()
+    input_path = Path(pilot_files.get("input", "")).resolve()
+    if any(not p.is_file() for p in (source_final, input_path, official_final)):
+        raise RuntimeError("PROMOTE10_MISSING_SOURCE_OR_OFFICIAL_FILE")
+    if not all(p.is_relative_to(pilot_dir) for p in (source_final, input_path, result_path)):
+        raise RuntimeError("PROMOTE10_NONISOLATED_SOURCE")
+    if source_final == official_final:
+        raise RuntimeError("PROMOTE10_SAME_SOURCE_AND_DEST")
+    if official_final.suffix.lower() != ".xlsx" or source_final.suffix.lower() != ".xlsx":
+        raise RuntimeError("PROMOTE10_ONLY_XLSX_SUPPORTED")
+
+    def headers(ws):
+        return {safe(cell.value): cell.column for cell in ws[1] if safe(cell.value)}
+
+    def business_sheet(wb):
+        for ws in wb.worksheets:
+            h = headers(ws)
+            if "Marca" in h and "Modelo" in h:
+                return ws, h
+        raise RuntimeError("PROMOTE10_BUSINESS_SHEET_NOT_FOUND")
+
+    def rows_by_key(ws, h, target_keys=None):
+        # Canonical workbooks may contain legacy duplicate keys unrelated to
+        # this ten-SKU promotion. Never repair or reject those unrelated rows.
+        # Preserve all duplicate rows for the ten targets, never drop rows.
+        out = {}
+        for row_idx in range(2, ws.max_row + 1):
+            brand = safe(ws.cell(row_idx, h["Marca"]).value)
+            model = safe(ws.cell(row_idx, h["Modelo"]).value)
+            if not brand and not model:
+                continue
+            if not brand or not model:
+                continue
+            key = business_key(brand, model)
+            if target_keys is not None and key not in target_keys:
+                continue
+            out.setdefault(key, []).append(row_idx)
+        return out
+
+    def sheet_digest(ws):
+        h = hashlib.sha256()
+        for row in ws:
+            for cell in row:
+                value = cell.value
+                h.update((repr((cell.coordinate, cell.data_type, value)) + "\n").encode("utf-8", errors="replace"))
+        return h.hexdigest()
+
+    LOG.info("PROMOTE10 PHASE 1/5 | reading isolated and canonical workbooks")
+    source_wb = load_workbook(source_final, read_only=False, data_only=False)
+    result_wb = load_workbook(result_path, read_only=True, data_only=True)
+    input_wb = load_workbook(input_path, read_only=True, data_only=True)
+    official_wb = load_workbook(official_final, read_only=False, data_only=False)
+    tmp = None
+    try:
+        result_ws = result_wb["Resultados"]
+        rh = headers(result_ws)
+        for name in ("Marca", "Modelo", "Resolution State", "Review Required", "Auto Eligible"):
+            if name not in rh:
+                raise RuntimeError("PROMOTE10_MISSING_RESULT_FIELD:" + name)
+        results = {}
+        for values in result_ws.iter_rows(min_row=2, values_only=True):
+            brand, model = safe(values[rh["Marca"] - 1]), safe(values[rh["Modelo"] - 1])
+            if not brand and not model:
+                continue
+            key = business_key(brand, model)
+            if key in results:
+                raise RuntimeError("PROMOTE10_DUPLICATE_RESULT:" + key)
+            if (safe(values[rh["Resolution State"] - 1]).upper() != "RESOLVED"
+                    or safe(values[rh["Review Required"] - 1]).upper() != "NÃO"
+                    or safe(values[rh["Auto Eligible"] - 1]).upper() != "SIM"):
+                raise RuntimeError("PROMOTE10_NOT_ELIGIBLE:" + key)
+            results[key] = (brand, model)
+        if len(results) != 10:
+            raise RuntimeError(f"PROMOTE10_EXPECTED_EXACTLY_TEN_GOT_{len(results)}")
+
+        input_ws, ih = business_sheet(input_wb)
+        input_keys = set(rows_by_key(input_ws, ih))
+        if input_keys != set(results):
+            raise RuntimeError("PROMOTE10_INPUT_MISMATCH")
+
+        baseline_ws, baseline_h = business_sheet(source_wb)
+        sws, sh = result_ws, rh
+        ows, oh = business_sheet(official_wb)
+        source_rows = rows_by_key(sws, sh, set(results))
+        isolated_rows = rows_by_key(baseline_ws, baseline_h, set(results))
+        official_rows = rows_by_key(ows, oh, set(results))
+        if (set(results) != set(source_rows)
+                or not set(results).issubset(isolated_rows)
+                or not set(results).issubset(official_rows)):
+            raise RuntimeError("PROMOTE10_MISSING_KEYS_IN_FINAL")
+
+        required = ("O que é (Tipo)", "Alimentação", "Category General", "FAMILY")
+        for field in required:
+            if field not in sh or field not in oh:
+                raise RuntimeError("PROMOTE10_REQUIRED_COLUMN_MISSING:" + field)
+        allowed = (
+            "O que é (Tipo)", "Alimentação", "Category General", "FAMILY",
+            "Título Real", "Fonte URL", "Status", "Status Processamento",
+            "Revisão", "Resolution State", "Review Required", "Auto Eligible",
+            "Classification Outcome", "Classification Identity", "Stage",
+            "Reason Code", "Motivo", "Próxima Ação", "Rules Hash",
+            "Pipeline Version", "Processed At", "Clef Provider", "Clef Model",
+            "Clef Cache", "Clef Prompt Tokens", "Clef Completion Tokens",
+            "Clef Total Tokens"
+        )
+        transferable = [name for name in allowed if name in sh and name in oh]
+        changes = []
+        for key in sorted(results):
+            src_row = source_rows[key][0]
+            source_values = {name: sws.cell(src_row, sh[name]).value for name in required}
+            if not all(safe(x) for x in source_values.values()):
+                raise RuntimeError("PROMOTE10_EMPTY_CLASSIFICATION:" + key)
+            if safe(source_values["O que é (Tipo)"]).upper() in ("REVISAR", "UNKNOWN"):
+                raise RuntimeError("PROMOTE10_UNKNOWN_TYPE:" + key)
+            if safe(source_values["Alimentação"]).upper() == "UNKNOWN":
+                raise RuntimeError("PROMOTE10_UNKNOWN_POWER:" + key)
+            if (safe(source_values["Category General"]), safe(source_values["FAMILY"])) == ("OTHERS", "OTHERS"):
+                raise RuntimeError("PROMOTE10_GENERIC_TAXONOMY:" + key)
+            src_res = safe(sws.cell(src_row, sh["Resolution State"]).value) if "Resolution State" in sh else ""
+            if src_res and src_res.upper() != "RESOLVED":
+                raise RuntimeError("PROMOTE10_SOURCE_NOT_RESOLVED:" + key)
+            # The adjudicated classification output is authoritative. The
+            # isolated baseline may still contain older duplicate rows; require
+            # at least one row to match all four approved classification fields,
+            # without rewriting or deleting any staging duplicates.
+            if not all(name in baseline_h for name in required):
+                raise RuntimeError("PROMOTE10_ISOLATED_COLUMNS_MISSING")
+            matching = [
+                idx for idx in isolated_rows[key]
+                if all(safe(baseline_ws.cell(idx, baseline_h[name]).value) == safe(source_values[name])
+                       for name in required)
+            ]
+            if not matching:
+                raise RuntimeError("PROMOTE10_NO_MATCHING_ISOLATED_RESULT:" + key)
+            # Update every official occurrence, but abort if ANY has a human lock.
+            for dst_row in official_rows[key]:
+                current_bi = safe(ows.cell(dst_row, oh["Revisão B.I"]).value) if "Revisão B.I" in oh else ""
+                current_status = safe(ows.cell(dst_row, oh["Status"]).value) if "Status" in oh else ""
+                if current_bi.upper() == "OK" or current_status.upper() == "MANUAL":
+                    raise RuntimeError("PROMOTE10_HUMAN_LOCK:" + key)
+                for name in transferable:
+                    source_cell = sws.cell(src_row, sh[name])
+                    dest_cell = ows.cell(dst_row, oh[name])
+                    if source_cell.data_type == "f":
+                        raise RuntimeError("PROMOTE10_SOURCE_FORMULA:" + key + ":" + name)
+                    if source_cell.value != dest_cell.value:
+                        changes.append((key, name, dest_cell.value, source_cell.value))
+                        dest_cell.value = source_cell.value
+        LOG.info("PROMOTE10 PHASE 2/5 | target_keys=%d | changed_cells=%d | staging Excel", len(results), len(changes))
+        # Reopen and verify the full staged workbook before touching the original.
+        from tempfile import NamedTemporaryFile
+        with NamedTemporaryFile(prefix=".promote10_", suffix=".xlsx",
+                                dir=official_final.parent, delete=False) as handle:
+            tmp = Path(handle.name)
+        official_wb.save(tmp)
+        # Random .cell() access on openpyxl read_only worksheets reparses
+        # XML repeatedly and can take many minutes for large baselines.
+        # Use the indexed normal worksheet for the staged verification.
+        LOG.info("PROMOTE10 PHASE 3/5 | stage written; verifying targeted rows")
+        check_wb = load_workbook(tmp, read_only=False, data_only=False)
+        try:
+            check_ws, check_h = business_sheet(check_wb)
+            check_rows = rows_by_key(check_ws, check_h, set(results))
+            if set(check_rows) != set(official_rows):
+                raise RuntimeError("PROMOTE10_STAGED_KEY_INTEGRITY")
+            for key in results:
+                if len(check_rows[key]) != len(official_rows[key]):
+                    raise RuntimeError("PROMOTE10_STAGED_ROWCOUNT_MISMATCH:" + key)
+                for row_idx in check_rows[key]:
+                    for name in transferable:
+                        original_cell = sws.cell(source_rows[key][0], sh[name])
+                        staged_cell = check_ws.cell(row_idx, check_h[name])
+                        if staged_cell.value != original_cell.value:
+                            raise RuntimeError("PROMOTE10_STAGED_VALUE_MISMATCH:" + key + ":" + name)
+        finally:
+            check_wb.close()
+
+        report = {
+            "status": "DRY_RUN_PASS" if not commit else "READY_TO_COMMIT",
+            "cohort": len(results),
+            "changed_cells": len(changes),
+            "official": str(official_final),
+            "isolated_source": str(source_final),
+            "modified_skus": sorted({k for k, _, _, _ in changes}),
+            "search_calls": 0, "jev_calls": 0,
+        }
+        if not commit:
+            LOG.info("PROMOTE10 DRY_RUN_PASS | cohort=%d | changes=%d | no official changes", len(results), len(changes))
+            return report
+        # Prevent accidental overwrite when Excel is open / another process wrote
+        # the official workbook during staging.
+        def digest_file(path):
+            h = hashlib.sha256()
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        LOG.info("PROMOTE10 PHASE 4/5 | creating verified official backup")
+        # Saving a backup uses copy2; the original remains untouched until replace.
+        original_hash = digest_file(official_final)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = official_final.with_name(official_final.stem + ".backup_promote10_" + stamp + official_final.suffix)
+        shutil.copy2(official_final, backup)
+        if digest_file(backup) != original_hash or digest_file(official_final) != original_hash:
+            raise RuntimeError("PROMOTE10_CONCURRENT_MODIFICATION")
+        LOG.info("PROMOTE10 PHASE 5/5 | replacing canonical Excel atomically")
+        os.replace(tmp, official_final)
+        tmp = None
+        report["status"] = "COMMITTED"
+        report["backup"] = str(backup)
+        report["verified_after_replace"] = digest_file(official_final) != original_hash or not changes
+        return report
+    finally:
+        for wb in (source_wb, result_wb, input_wb, official_wb):
+            wb.close()
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def clean_final_business_schema(path: Path, *, commit: bool = False) -> Dict[str, Any]:
+    """Reduce the existing official Final worksheet to 11 user-facing columns.
+
+    Does not reclassify or alter row values; no search/LLM calls. Preserves
+    duplicate physical rows and human-approved data. Retains full untouched
+    workbook backup before atomic replacement. Default is a dry run.
+    """
+    from openpyxl import load_workbook
+    from tempfile import NamedTemporaryFile
+    from datetime import datetime
+    import hashlib
+    import shutil
+
+    path = Path(path).resolve()
+    if not path.is_file() or path.suffix.lower() != ".xlsx":
+        raise RuntimeError("FINAL_CLEAN_INVALID_XLSX_PATH")
+
+    def filehash(p):
+        h = hashlib.sha256()
+        with open(p, "rb") as stream:
+            for part in iter(lambda: stream.read(1024 * 1024), b""):
+                h.update(part)
+        return h.hexdigest()
+
+    original_hash = filehash(path)
+    book = load_workbook(path, read_only=False, data_only=False)
+    temp = None
+    try:
+        worksheet = book["Base Final"] if "Base Final" in book.sheetnames else next(
+            (ws for ws in book.worksheets
+             if {"Marca", "Modelo"}.issubset({
+                 safe(c.value) for c in ws[1]
+             })), None)
+        if worksheet is None:
+            raise RuntimeError("FINAL_CLEAN_BUSINESS_SHEET_MISSING")
+        headers = [safe(c.value) for c in worksheet[1]]
+        if len(headers) != len(set(x for x in headers if x)):
+            raise RuntimeError("FINAL_CLEAN_DUPLICATE_COLUMN_NAMES")
+        missing = [field for field in BASELINE_PUBLIC_COLUMNS if field not in headers]
+        if missing:
+            raise RuntimeError("FINAL_CLEAN_MISSING_FIELDS:" + ", ".join(missing))
+        existing = [headers.index(field) + 1 for field in BASELINE_PUBLIC_COLUMNS]
+        all_original = [
+            tuple(worksheet.cell(i, j).value for j in existing)
+            for i in range(2, worksheet.max_row + 1)
+        ]
+        row_count = len(all_original)
+        before_sheets = list(book.sheetnames)
+        removed_columns = [name for name in headers if name not in BASELINE_PUBLIC_COLUMNS]
+        # A fresh business-only worksheet avoids the fragile column-deletion
+        # behavior on formatted ranges and retains exact row order/duplicates.
+        new_sheet = book.create_sheet("_FinalBusinessStaging", index=book.sheetnames.index(worksheet.title))
+        new_sheet.append(BASELINE_PUBLIC_COLUMNS)
+        for row in all_original:
+            new_sheet.append(row)
+        original_name = worksheet.title
+        book.remove(worksheet)
+        new_sheet.title = original_name
+        with NamedTemporaryFile(prefix=".final_schema_",suffix=".xlsx",
+                                dir=path.parent,delete=False) as handle:
+            temp = Path(handle.name)
+        book.save(temp)
+    finally:
+        book.close()
+    try:
+        check = load_workbook(temp, read_only=True, data_only=False)
+        try:
+            if check.sheetnames != before_sheets:
+                raise RuntimeError("FINAL_CLEAN_SHEET_ORDER_CHANGED")
+            ws = check[original_name]
+            if [safe(c.value) for c in next(ws.iter_rows(min_row=1,max_row=1))] != BASELINE_PUBLIC_COLUMNS:
+                raise RuntimeError("FINAL_CLEAN_HEADER_VALIDATION_FAILED")
+            staged_rows = list(ws.iter_rows(min_row=2,values_only=True))
+            if staged_rows != all_original:
+                raise RuntimeError("FINAL_CLEAN_ROW_VALUES_CHANGED")
+        finally:
+            check.close()
+        result = {"status": "DRY_RUN_PASS", "rows": row_count, 
+                  "columns_before": len(headers), "columns_after": 11,
+                  "removed_columns": removed_columns, "official": str(path),
+                  "search_calls": 0, "jev_calls": 0}
+        if not commit:
+            return result
+        if filehash(path) != original_hash:
+            raise RuntimeError("FINAL_CLEAN_CONCURRENT_MODIFICATION")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = path.with_name(path.stem + ".backup_schema11_" + stamp + path.suffix)
+        shutil.copy2(path, backup)
+        if filehash(backup) != original_hash or filehash(path) != original_hash:
+            raise RuntimeError("FINAL_CLEAN_BACKUP_VERIFICATION_FAILED")
+        os.replace(temp,path)
+        temp = None
+        result.update(status="COMMITTED",backup=str(backup),
+                      verified_after_replace=filehash(path) != original_hash
+                      or not removed_columns)
+        return result
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
+
+
 def main() -> int:
     base = Path(__file__).resolve().parent
     args = interactive_menu(base) if len(sys.argv) == 1 else build_parser().parse_args()
@@ -10365,6 +11166,47 @@ def main() -> int:
         for e in errors[:50]:
             LOG.error(e)
         return 2
+    if args.mode == "final-schema-cleanup":
+        target = Path(args.final or cfg["files"]["final"]).resolve()
+        with exclusive_campaign_lock():
+            report = clean_final_business_schema(target, commit=args.yes)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    if args.mode == "promote-isolated-ten":
+        if not args.pilot_dir:
+            raise ValueError("PROMOTE10_REQUIRES_PILOT_DIR")
+        official = Path(args.final or cfg["files"]["final"]).resolve()
+        with exclusive_campaign_lock():
+            report = promote_isolated_ten(Path(args.pilot_dir), official, commit=args.yes)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    if args.mode == "overnight-recover-20":
+        if not args.recovery_manifest or args.execute_live:
+            raise ValueError("RECOVERY20_REQUIRES_MANIFEST_AND_FORBIDS_LIVE_APIS")
+        result = overnight_recover_prepared_twenty(
+            Path(args.recovery_manifest), commit=args.yes, cfg=cfg)
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 0
+    if args.mode == "overnight-reconcile-failed":
+        if not args.campaign_resume_dir or args.legacy_run_dir:
+            raise ValueError("offline recovery requires --campaign-resume-dir only")
+        with exclusive_campaign_lock():
+            result=overnight_reconcile_failed_campaign(
+                Path(args.campaign_resume_dir),cfg,rules)
+            print(json.dumps(result,ensure_ascii=False,indent=2,default=str))
+            return 0
+    if args.mode == "overnight-promote":
+        if bool(args.campaign_resume_dir) == bool(args.legacy_run_dir):
+            raise ValueError("Provide exactly one: --campaign-resume-dir OR two --legacy-run-dir")
+        with exclusive_campaign_lock():
+            root = (overnight_register_legacy_runs(args.legacy_run_dir)
+                    if args.legacy_run_dir else Path(args.campaign_resume_dir))
+            result = overnight_promote_campaign(root, cfg, rules, dry_run=args.promotion_dry_run)
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+            return 0
+    if args.mode == "overnight":
+        with exclusive_campaign_lock():
+            return overnight_campaign(args, cfg, rules=rules)
     if args.mode == "validate":
         validate_all(rules, cfg, args.cache)
         return 0
@@ -10391,7 +11233,7 @@ def main() -> int:
         )
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
-    if args.mode in {"collect", "full", "sync-input"}:
+    if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and args.auto_providers):
         files_cfg = cfg.get("files", {}) or {}
         input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
         master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
@@ -10423,9 +11265,10 @@ def main() -> int:
         return 0
     if args.mode == "collect":
         provider = _resolve_search_provider(args, cfg)
-        _provider_credentials(provider, cfg)
+        if not args.auto_providers:
+            _provider_credentials(provider, cfg)
         completed = collect_products(args, cfg, rules)
-        if completed:
+        if completed and not args.auto_providers:
             files_cfg = cfg.get("files", {}) or {}
             persist_baseline_excels(
                 rows=[],
@@ -10448,7 +11291,8 @@ def main() -> int:
         return 0
     if args.mode == "full":
         provider = _resolve_search_provider(args, cfg)
-        _provider_credentials(provider, cfg)
+        if not args.auto_providers:
+            _provider_credentials(provider, cfg)
         completed = collect_products(args, cfg, rules)
         if not completed:
             LOG.warning("PROCESSO COMPLETO interrompido após a coleta. Classificação não iniciada.")
@@ -10456,6 +11300,1902 @@ def main() -> int:
         run_pipeline(args, cfg, rules)
         return 0
     return 0
+
+
+# =================== MASTER OVERNIGHT / QUOTA / AUDIT ===================
+@dataclass(frozen=True)
+class Slot:
+    provider: str
+    account: str
+    key_env: str
+    zone_env: str
+    limit: int
+    group: str
+
+def configured_slots() -> list[Slot]:
+    slots = []
+    for provider, prefix in (("tavily","TAVILY"),("brightdata","BRIGHTDATA"),("serper","SERPER")):
+        for n in (1, 2, 3, 4):
+            suffix = f"_{n}"
+            key_env = f"{prefix}_API_KEY{suffix}"
+            if n == 1 and not os.getenv(key_env):
+                key_env = f"{prefix}_API_KEY"
+            if not os.getenv(key_env):
+                continue
+            limit_raw = os.getenv(f"{prefix}_LIMIT{suffix}", "")
+            if not limit_raw:
+                # An unconfigured cap must NEVER imply unlimited spending.
+                continue
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                raise ValueError(f"Invalid request budget: {prefix}_LIMIT{suffix}")
+            if limit <= 0:
+                continue
+            zone_env = f"{prefix}_ZONE{suffix}"
+            if provider == "brightdata" and not os.getenv(zone_env):
+                zone_env = "BRIGHTDATA_ZONE"
+            if provider == "brightdata" and not os.getenv(zone_env):
+                continue
+            group = os.getenv(f"{prefix}_BILLING_GROUP{suffix}", f"{provider}:{n}")
+            slots.append(Slot(provider, f"{provider}:{n}", key_env,zone_env,limit,group))
+    return slots
+
+class DurableRouter:
+    def __init__(self, path: Path, slots: list[Slot]):
+        if not slots:
+            raise ValueError("No accounts with positive explicitly configured budget")
+        group_limits = {}
+        accounts = set()
+        for slot in slots:
+            if slot.account in accounts:
+                raise ValueError(f"Duplicate provider account: {slot.account}")
+            accounts.add(slot.account)
+            if slot.limit <= 0:
+                raise ValueError(f"Invalid non-positive limit for {slot.account}")
+            prior = group_limits.setdefault(slot.group, slot.limit)
+            if prior != slot.limit:
+                raise ValueError(f"Conflicting limits for billing group {slot.group}")
+        self.conn = sqlite3.connect(path, timeout=30)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
+            business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
+            provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
+            account TEXT PRIMARY KEY, reason TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        self.conn.commit()
+        self.slots=slots
+
+    def choose(self, key: str) -> Optional[Slot]:
+        if self.conn.execute("SELECT 1 FROM collection_attempt_reservations WHERE business_key=?", (key,)).fetchone():
+            return None
+        for slot in self.slots:
+            if self.conn.execute("SELECT 1 FROM collection_disabled_accounts WHERE account=?", (slot.account,)).fetchone():
+                continue
+            used = self.conn.execute("SELECT COUNT(*) FROM collection_attempt_reservations WHERE account=?", (slot.account,)).fetchone()[0]
+            if used >= slot.limit:
+                continue
+            # A shared billing group requires *the same total cap* configured on each key.
+            group_slots = [s for s in self.slots if s.group == slot.group]
+            group_limit = group_slots[0].limit
+            group_used = self.conn.execute(
+                "SELECT COUNT(*) FROM collection_attempt_reservations WHERE account IN (" +
+                ",".join("?" for _ in group_slots) + ")",
+                [s.account for s in group_slots]).fetchone()[0]
+            if group_used >= group_limit:
+                continue
+            return slot
+        return None
+
+    def already_reserved(self, key: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM collection_attempt_reservations WHERE business_key=?", (key,)
+        ).fetchone() is not None
+
+    def reserve(self, key: str) -> Optional[Slot]:
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            slot = self.choose(key)
+            if slot:
+                self.conn.execute(
+                    "INSERT INTO collection_attempt_reservations(business_key,account,provider) VALUES(?,?,?)",
+                    (key,slot.account,slot.provider))
+            self.conn.commit()
+            return slot
+        except BaseException:
+            self.conn.rollback()
+            raise
+
+    def disable(self, account: str, reason: str) -> None:
+        self.conn.execute(
+            "INSERT INTO collection_disabled_accounts(account,reason) VALUES(?,?) "
+            "ON CONFLICT(account) DO UPDATE SET reason=excluded.reason,updated_at=CURRENT_TIMESTAMP",
+            (account,reason))
+        self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.close()
+
+def overnight_audit(input_path,cache_path,master_path,final_path):
+    from contextlib import closing
+    protected=load_baseline_inventory(master_path,final_path)["hard_lock"]
+    processed=load_baseline_inventory(master_path,final_path)["processed"]
+    rows=read_input_rows(input_path)
+    seen=set();summary=Counter();eligible=[];errors=[];missing_rows=[];examples=[]
+    with closing(TavilyReadOnlyStore(cache_path)) as store:
+        for row in rows:
+            if not row.valid:
+                summary["invalid_input"]+=1;continue
+            if row.key in seen:
+                summary["duplicate_input"]+=1;continue
+            seen.add(row.key)
+            raw=store.get(row.brand_original,row.model_original)
+            summary["state_"+raw.state]+=1
+            if raw.state=="RAW_MISSING":
+                if row.key in protected:
+                    summary["raw_missing_hard_locked"]+=1
+                elif row.key in processed:
+                    summary["raw_missing_processed"]+=1
+                else:
+                    missing_rows.append({
+                        "brand":row.brand_original,"model":row.model_original,
+                        "business_key":row.key,
+                        "prior_state":"RAW_MISSING","provider":"","previous_error":"",
+                    })
+                    summary["raw_missing_unattempted_input"]+=1
+                continue
+            if raw.state!="RAW_EMPTY":continue
+            payload=raw.payload or {}
+            coll=payload.get("_collection",{}) if isinstance(payload,dict) else {}
+            coll=coll if isinstance(coll,dict) else {}
+            meta=payload.get("_search_meta",{}) if isinstance(payload,dict) else {}
+            meta=meta if isinstance(meta,dict) else {}
+            prior=safe(coll.get("state")).upper()
+            error=safe(coll.get("error")) or safe(meta.get("error"))
+            provider=safe(coll.get("provider")) or safe(meta.get("provider")) or "UNKNOWN"
+            summary["raw_empty_provider_"+provider]+=1
+            if row.key in protected:
+                summary["raw_empty_hard_locked"]+=1;continue
+            if row.key in processed:
+                summary["raw_empty_processed"]+=1;continue
+            rec={"brand":row.brand_original,"model":row.model_original,"business_key":row.key,
+                 "prior_state":prior,"provider":provider,"previous_error":error[:250]}
+            if prior in {"REQUEST_ATTEMPTED_NO_AUTO_RETRY","REQUEST_ERROR"} or error:
+                summary["raw_empty_previous_error"]+=1
+                errors.append(rec)
+            else:
+                summary["raw_empty_candidate"]+=1
+                eligible.append(rec)
+            if len(examples)<10:examples.append(rec)
+    return {"unique_input_keys":len(seen),"summary":dict(sorted(summary.items())),
+            "recollectable_without_prior_error":len(eligible),
+            "previous_search_errors_requiring_explicit_review":len(errors),
+            "candidate_rows":eligible,"error_rows":errors,
+            "missing_rows":missing_rows,"examples":examples,
+            "interpretation":"RAW_EMPTY does not prove a completed Search, and requerying can incur charges.",
+            "search_calls":0,"auto_approval":False}
+
+def prior_attempts_in_database(path: Path) -> set:
+    """Read original SQLite search reservations without creating or editing it.
+
+    Align candidate selection with collect_products(), which refuses any
+    business_key already reserved in the durable source classification DB.
+    """
+    path=Path(path)
+    if not path.is_file():
+        return set()
+    try:
+        with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro",uri=True)) as conn:
+            exists=conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='collection_attempt_reservations'"
+            ).fetchone()
+            if not exists:
+                return set()
+            return {str(row[0]) for row in conn.execute(
+                "SELECT business_key FROM collection_attempt_reservations"
+            ) if row[0]}
+    except sqlite3.Error as exc:
+        raise RuntimeError(
+            f"ORIGINAL_SEARCH_RESERVATION_LEDGER_UNREADABLE: {path}; "
+            "no new Search allowed until database is repaired"
+        ) from exc
+
+
+def select_overnight_eligible(audit, prior_attempts, *,
+                              include_raw_missing=False,
+                              allow_serper_quota_error=False,
+                              allow_previous_errors=False):
+    """One candidate policy used by BOTH offline launcher and paid create_run.
+
+    Prior real pilot attempts are NEVER eligible, even with retry overrides.
+    RAW_MISSING and old provider errors require independent explicit permission.
+    """
+    prior=set(prior_attempts)
+    counts=Counter()
+    chosen=[]
+    selected=set()
+    # Preserve original RAW_EMPTY campaign scope before considering brand
+    # new RAW_MISSING input products. Explicit previous errors come next,
+    # missing input is a last resort and needs a separate opt-in.
+    candidates=[
+        ("raw_empty_clean", audit.get("candidate_rows", []), True),
+    ]
+    for label, items, authorized in candidates:
+        for item in items:
+            key=item["business_key"]
+            if key in prior:
+                counts[label+"_previous_campaign"]+=1
+            elif not authorized:
+                counts[label+"_requires_opt_in"]+=1
+            elif key not in selected:
+                chosen.append(item)
+                selected.add(key)
+                counts[label+"_selected"]+=1
+    for item in audit.get("error_rows", []):
+        key=item["business_key"]
+        is_serper_quota=(
+            safe(item.get("provider")).casefold()=="serper"
+            and safe(item.get("prior_state")).upper()=="REQUEST_ATTEMPTED_NO_AUTO_RETRY"
+            and "not enough credits" in safe(item.get("previous_error")).casefold()
+        )
+        if key in prior:
+            counts["prior_provider_error_previous_campaign"]+=1
+        elif not (allow_previous_errors or
+                  (allow_serper_quota_error and is_serper_quota)):
+            counts["prior_provider_error_requires_opt_in"]+=1
+        elif key not in selected:
+            chosen.append(item)
+            selected.add(key)
+            counts["prior_provider_error_selected"]+=1
+    for item in audit.get("missing_rows", []):
+        key=item["business_key"]
+        if key in prior:
+            counts["raw_missing_new_previous_campaign"]+=1
+        elif not include_raw_missing:
+            counts["raw_missing_new_requires_opt_in"]+=1
+        elif key not in selected:
+            chosen.append(item)
+            selected.add(key)
+            counts["raw_missing_new_selected"]+=1
+    counts["eligible_unique"] = len(chosen)
+    counts["historical_attempts_excluded_unique"] = len(prior)
+    return chosen,dict(sorted(counts.items()))
+
+
+def overnight_examine(run:Path):
+    import pandas as pd
+    manifest=json.loads((run/"original_sources.json").read_text(encoding="utf-8"))
+    isolated=json.loads((run/"isolated_config.json").read_text(encoding="utf-8"))
+    before=Path(manifest["final"]["path"])
+    after=Path(isolated["files"]["final"])
+    if not before.is_file() or not after.is_file():raise FileNotFoundError("Missing baseline or isolated final")
+    left=pd.read_excel(before,dtype=object,keep_default_na=False)
+    right=pd.read_excel(after,dtype=object,keep_default_na=False)
+    def columns(df):
+        return (find_col(df,["Marca","Fabricante","Brand","Manufacturer"]),
+                find_col(df,["Modelo","Model","SKU","Part Number"]))
+    def collect(df):
+        b,m=columns(df);by={}
+        for i,row in df.iterrows():
+            brand,model=safe(row.get(b)),safe(row.get(m))
+            if brand and model:
+                by.setdefault(business_key(brand,model),[]).append((i+2,row))
+        return by
+    old,new=collect(left),collect(right)
+    fields=("O que é (Tipo)","Alimentação","Category General","FAMILY",
+            "Título Real","Status","Revisão","Revisão B.I")
+    aliases={"O que é (Tipo)":["O que é (Tipo)","Tipo","Product Type"],
+             "Alimentação":["Alimentação"],
+             "Category General":["Category General"],
+             "FAMILY":["FAMILY","Family"],
+             "Título Real":["Título Real"],
+             "Status":["Status"],
+             "Revisão":["Revisão","Revisao"],
+             "Revisão B.I":["Revisão B.I","Revisao B.I"]}
+    map_left={name:find_col(left,aliases[name],required=False) for name in fields}
+    map_right={name:find_col(right,aliases[name],required=False) for name in fields}
+    details=[]
+    counts=Counter()
+    for key,oldrows in old.items():
+        for old_num,oldrow in oldrows:
+            manual=_is_manual_status(oldrow.get(map_left["Status"])) if map_left["Status"] else False
+            bi=_is_bi_ok_value(oldrow.get(map_left["Revisão B.I"])) if map_left["Revisão B.I"] else False
+            if not (manual or bi):continue
+            newrows=new.get(key,[])
+            b,m=columns(left)
+            orig_pair=(safe(oldrow.get(b)),safe(oldrow.get(m)))
+            pairs=[(n,r) for n,r in newrows if
+                   (safe(r.get(columns(right)[0])),safe(r.get(columns(right)[1])))==orig_pair]
+            if len(pairs)!=1:
+                counts["missing_or_duplicated_exact_pair"]+=1
+                details.append({"key":key,"old_row":old_num,"new_row":"",
+                                "protection":"BI_OK" if bi else "MANUAL",
+                                "field":"EXACT_PAIR","before":str(orig_pair),
+                                "after":str(len(pairs)),"severity":"CRITICAL"})
+                continue
+            new_num,newrow=pairs[0]
+            for name in fields:
+                lv=safe(oldrow.get(map_left[name])) if map_left[name] else ""
+                rv=safe(newrow.get(map_right[name])) if map_right[name] else ""
+                if lv==rv:continue
+                severity="CRITICAL" if name in {"O que é (Tipo)","Alimentação",
+                  "Category General","FAMILY","Título Real","Status","Revisão B.I"} else "REVIEW"
+                counts[f"changed_{name}"]+=1
+                counts["bi_differences" if bi else "manual_differences"]+=1
+                details.append({"key":key,"old_row":old_num,"new_row":new_num,
+                                "protection":"BI_OK" if bi else "MANUAL",
+                                "field":name,"before":lv,"after":rv,"severity":severity})
+    return details,dict(sorted(counts.items())),len(left),len(right)
+
+ROOT=Path(__file__).resolve().parent
+OUT=ROOT/"piloto_argentina"/"controlled_night"
+
+def digest(p):
+    h=hashlib.sha256()
+    with p.open("rb") as stream:
+        for chunk in iter(lambda:stream.read(1024*1024),b""):h.update(chunk)
+    return h.hexdigest()
+
+def snapshot(src,dst):
+    with closing(sqlite3.connect(src.resolve().as_uri()+"?mode=ro",uri=True)) as a:
+        with closing(sqlite3.connect(dst)) as b:a.backup(b)
+
+def atomic_json(path,data):
+    tmp=path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data,indent=2,ensure_ascii=False),encoding="utf-8")
+    tmp.replace(path)
+
+def source_paths(cfg):
+    return {k:(ROOT/str(cfg["files"][k])).resolve()
+            for k in ("input","cache","master","final","classification_db")}
+
+def gate(cfg,args):
+    if not args.execute_live:return
+    if not 1<=args.search_budget<=20:raise ValueError("Search budget must be 1..20 in controlled pilot")
+    if not 1<=args.llm_budget<=100:raise ValueError("JEV cap must be 1..100")
+    if not 1<=args.token_budget<=200000:raise ValueError("Token cap must be 1..200000")
+    if not 1<=args.timeout_minutes<=240:raise ValueError("Timeout must be 1..240 minutes")
+    if cfg.get("recovery",{}).get("hard_lock_review_bi_value")!="OK":
+        raise ValueError("Missing BI hard lock")
+    if not cfg.get("identity",{}).get("auto_approval_requires_strong_identity"):
+        raise ValueError("Missing strong identity gate")
+    c=cfg.get("collection",{}).get("hard_limits",{})
+    if c.get("max_requests_per_product")!=1 or any(c.get(k) for k in (
+        "allow_automatic_retry","allow_secondary_search","allow_provider_failover","allow_extract")):
+        raise ValueError("Collection safety contract violated")
+    if not cfg.get("semantic_funnel",{}).get("offline_mode"):
+        raise ValueError("Local semantic offline mode required")
+    load_env_file(ROOT/".env")
+    slots=[slot for slot in configured_slots() if slot.provider!="serper"]
+    if not slots:raise ValueError("No Tavily/Bright Data account with explicit positive budget; Serper quota-error retry forbidden")
+    jev=cfg.get("jev",{})
+    key=jev.get("api_key_env") or "TYPESAFE_API_KEY"
+    if not os.getenv(key):raise ValueError(f"JEV credential not configured: {key}")
+
+def import_prior_reservations(destination: Path, history_root: Path = OUT) -> dict:
+    """Seed the NEW isolated SQLite with earlier real reservation attempts.
+
+    Every sampled key from a previously-started pilot must exist in its
+    SQLite ledger, including errors/ambiguous requests. Missing or corrupt
+    history blocks further collection instead of silently resetting quota.
+    Never writes to old ledgers or the production SQLite.
+    """
+    reports = sorted(history_root.glob("*/run_report.json"))
+    expected = set()
+    actual = {}
+    disabled_accounts = {}
+    overlap_keys = set()
+    scanned_runs = 0
+    LOG.info("OVERNIGHT HISTORY | scanning %d past run reports (read-only)", len(reports))
+    for report_path in reports:
+        state = json.loads(report_path.read_text(encoding="utf-8"))
+        if not state.get("stages", {}).get("collection", {}).get("attempts", 0):
+            continue
+        cohort = state.get("cohort_keys", [])
+        if len(cohort) != len(set(cohort)) or not cohort:
+            raise RuntimeError(f"Invalid earlier campaign cohort: {report_path}")
+        # Multiple historical pilots can refer to the SAME SKU. Do not
+        # abort simply because cohorts overlap. Accept only identical
+        # account/provider reservations; a conflict still aborts below.
+        overlap_keys.update(expected.intersection(cohort))
+        expected.update(cohort)
+        scanned_runs += 1
+        if scanned_runs % 10 == 0:
+            LOG.info(
+                "OVERNIGHT HISTORY | audited_runs=%d historical_keys=%d duplicates=%d",
+                scanned_runs, len(expected), len(overlap_keys),
+            )
+        config_path = report_path.parent / "isolated_config.json"
+        previous_config = json.loads(config_path.read_text(encoding="utf-8"))
+        ledger_path = Path(previous_config["files"]["classification_db"])
+        if not ledger_path.is_file():
+            raise RuntimeError(f"Missing previous reservation ledger: {ledger_path}")
+        with closing(sqlite3.connect(ledger_path.resolve().as_uri()+"?mode=ro", uri=True)) as source:
+            rows = source.execute(
+                "SELECT business_key, account, provider FROM collection_attempt_reservations"
+            ).fetchall()
+            has_disabled = source.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='collection_disabled_accounts'"
+            ).fetchone()
+            if has_disabled:
+                for account, reason in source.execute(
+                    "SELECT account, reason FROM collection_disabled_accounts"
+                ):
+                    disabled_accounts[account] = reason
+        reserved_here = {key for key, account, provider in rows}
+        if not set(cohort).issubset(reserved_here):
+            missing = sorted(set(cohort) - reserved_here)
+            raise RuntimeError(
+                f"Unaccounted previous collection attempts: {report_path}; "
+                f"missing_count={len(missing)} first={missing[:5]}"
+            )
+        for key, account, provider in rows:
+            if key in actual and actual[key] != (account, provider):
+                raise RuntimeError(f"Conflicting historical reservation for SKU: {key}")
+            actual[key] = (account, provider)
+    # Existing production snapshot rows are also attempts; avoid silent
+    # account rewrites and count all reservations across previous pilots.
+    with closing(sqlite3.connect(destination)) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
+            business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
+            provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        for key, (account, provider) in actual.items():
+            prior = conn.execute(
+                "SELECT account, provider FROM collection_attempt_reservations WHERE business_key=?",
+                (key,),
+            ).fetchone()
+            if prior and prior != (account, provider):
+                raise RuntimeError(f"Conflicting production/historical reservation: {key}")
+            if not prior:
+                conn.execute(
+                    "INSERT INTO collection_attempt_reservations(business_key, account, provider) VALUES (?, ?, ?)",
+                    (key, account, provider),
+                )
+        conn.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
+            account TEXT PRIMARY KEY, reason TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        for account, reason in disabled_accounts.items():
+            conn.execute(
+                "INSERT INTO collection_disabled_accounts(account, reason) VALUES (?, ?) "
+                "ON CONFLICT(account) DO UPDATE SET reason=excluded.reason",
+                (account, reason))
+        conn.commit()
+    LOG.info(
+        "OVERNIGHT HISTORY OK | reports=%d audited_runs=%d unique_keys=%d "
+        "duplicate_keys=%d reservations=%d disabled_accounts=%d",
+        len(reports), scanned_runs, len(expected), len(overlap_keys),
+        len(actual), len(disabled_accounts),
+    )
+    return {"historical_cohort_keys": len(expected),
+            "historical_reservation_keys": len(actual),
+            "historical_overlapping_keys": len(overlap_keys),
+            "historical_runs_scanned": scanned_runs,
+            "historical_disabled_accounts": len(disabled_accounts)}
+
+
+def create_run(cfg,args):
+    sources=source_paths(cfg)
+    for key in ("input","cache","master","final"):
+        if not sources[key].is_file():raise FileNotFoundError(f"Missing input: {key}: {sources[key]}")
+    result=overnight_audit(sources["input"],sources["cache"],sources["master"],sources["final"])
+    # New rounds must not repeatedly spend on the same frozen SKU from a prior
+    # pilot. Resume that run instead; do not silently re-authorize Search.
+    prior_attempts=set()
+    if OUT.is_dir():
+        for prior_report in OUT.glob("*/run_report.json"):
+            try:
+                history=json.loads(prior_report.read_text(encoding="utf-8"))
+                if history.get("stages",{}).get("collection",{}).get("attempts",0)>0:
+                    prior_attempts.update(history.get("cohort_keys",[]))
+            except (OSError,ValueError,TypeError):
+                raise RuntimeError(f"Unreadable previous campaign report: {prior_report}")
+    prior_attempts.update(prior_attempts_in_database(sources["classification_db"]))
+    eligible, selection_stats=select_overnight_eligible(
+        result, prior_attempts,
+        include_raw_missing=bool(getattr(args,"night_include_raw_missing",False)),
+        allow_serper_quota_error=bool(args.allow_prior_serper_quota_error),
+        allow_previous_errors=bool(getattr(args,"night_allow_previous_errors",False)),
+    )
+    LOG.info("OVERNIGHT SELECTOR | %s",
+             " | ".join(f"{k}={v}" for k,v in selection_stats.items()))
+    eligible=eligible[:args.search_budget]
+    if not eligible:
+        raise RuntimeError(
+            "NO_ELIGIBLE_UNATTEMPTED_PRODUCTS: "
+            + json.dumps({"source_states":result["summary"],
+                          "selection":selection_stats},ensure_ascii=False)
+        )
+    run=OUT/(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")+"_"+uuid.uuid4().hex[:8])
+    run.mkdir(parents=True,exist_ok=False)
+    originals={k:{"path":str(p),"sha256":digest(p)} for k,p in sources.items() if p.is_file()}
+    isolated=json.loads(json.dumps(cfg))
+    # During isolated overnight, durable classification output + SQLite are
+    # authoritative until human-audited, cohort-scoped canonical promotion.
+    # Never run the legacy full-baseline export during the paid worker.
+    isolated["_nightly_output_only"] = bool(getattr(args, "night_output_only", False))
+    files=isolated["files"]
+    for k,p in sources.items():
+        target=run/("source_"+k+p.suffix)
+        if p.is_file():
+            if p.suffix.lower() in (".sqlite",".db"):snapshot(p,target)
+            else:shutil.copy2(p,target)
+        files[k]=str(target)
+    # Persistent accounting across isolated pilot DB copies. This must happen
+    # BEFORE the new cohort is handed to the HTTP worker.
+    # Pass live OUT explicitly. The function's default OUT is bound at
+    # definition time and would otherwise point at the archived code snapshot,
+    # silently missing historical attempts after a guarded launcher relocates it.
+    prior_reservation_stats = import_prior_reservations(
+        Path(files["classification_db"]), OUT
+    )
+    # A subset input is the strongest protection against accidental RAW_MISSING
+    # collection. No 18K files are ever used as collection input in this campaign.
+    import pandas as pd
+    cohort=run/"raw_empty_cohort.xlsx"
+    _excel_export_safe_frame(pd.DataFrame([{"Marca":r["brand"],"Modelo":r["model"]} for r in eligible])).to_excel(cohort,index=False)
+    files["input"]=str(cohort)
+    for k,v in {
+        "output":"classification_output.xlsx",
+        "inventory_output":"inventory_output.xlsx",
+        "precollection_report":"precollection.xlsx",
+        "collection_report":"collection.xlsx",
+        "pending_with_cache":"pending_with_cache.xlsx",
+        "pending_without_cache":"pending_without_cache.xlsx",
+        "collection_report_cache_rebuild":"curation.xlsx",
+        "baseline_backup_dir":str(ROOT/"Backups_Baseline"/"controlled_night"/run.name),
+        "baseline_audit":"audit.csv",
+        "evidence_export_jsonl":"evidence.jsonl",
+    }.items():files[k]=str(run/v)
+    conf=run/"isolated_config.json"
+    atomic_json(conf,isolated)
+    atomic_json(run/"original_sources.json",originals)
+    atomic_json(run/"raw_empty_audit.json",{k:v for k,v in result.items() if k!="candidate_rows"})
+    state={"mode":"ISOLATED_RAW_EMPTY_CONTROLLED",
+           "created_at":datetime.now(timezone.utc).isoformat(),
+           "run_dir":str(run),"config":str(conf),
+           "originals":str(run/"original_sources.json"),
+           "budget":{"search":args.search_budget,"jev_calls":args.llm_budget,"tokens":args.token_budget},
+           "cohort_count":len(eligible),"cohort_skus":[r["model"] for r in eligible],
+           "cohort_keys":[r["business_key"] for r in eligible],
+           "excluded_prior_pilot_cohorts":len(prior_attempts),
+           "prior_reservation_stats":prior_reservation_stats,
+           "selection_stats":selection_stats,
+           "night_include_raw_missing":bool(getattr(args,"night_include_raw_missing",False)),
+           "night_allow_previous_errors":bool(getattr(args,"night_allow_previous_errors",False)),
+           "prior_serper_quota_error_rescue_authorized":bool(args.allow_prior_serper_quota_error),
+           "search_provider_exclusion":["serper"],
+           "stages":{},"production_approved":False,"mass_approval":"BLOCKED_REVIEW_REQUIRED"}
+    atomic_json(run/"run_report.json",state)
+    return run,state,isolated
+
+def protected_originals(state):
+    originals=json.loads(Path(state["originals"]).read_text(encoding="utf-8"))
+    return [k for k,v in originals.items()
+            if not Path(v["path"]).is_file() or digest(Path(v["path"]))!=v["sha256"]]
+
+def run_stage(run,state,label,cmd,timeout):
+    item=state["stages"].setdefault(label,{"attempts":0})
+    item["attempts"]+=1
+    item["status"]="RUNNING"
+    item["started_at"]=datetime.now(timezone.utc).isoformat()
+    atomic_json(run/"run_report.json",state)
+    name=f"{label}_{item['attempts']:02d}.log"
+    item["log"]=name
+    env=dict(os.environ)
+    env.update(HF_HUB_OFFLINE="1",TRANSFORMERS_OFFLINE="1",
+               HF_DATASETS_OFFLINE="1",HF_HUB_DISABLE_TELEMETRY="1")
+    # Block Serper in the worker AND suppress repopulation by load_env_file.
+    # All Serper keys (primary and numbered variants) are overridden to empty.
+    if label=="collection":
+        for key in ("SERPER_API_KEY","SERPER_API_KEY1","SERPER_API_KEY_1",
+                    "SERPER_API_KEY_2","SERPER_API_KEY_3","SERPER_API_KEY_4"):
+            env[key]=""
+    try:
+        with (run/name).open("w",encoding="utf-8") as log:
+            with subprocess.Popen(cmd,cwd=ROOT,env=env,stdin=subprocess.DEVNULL,
+                                  stdout=log,stderr=subprocess.STDOUT) as proc:
+                try:ret=proc.wait(timeout=timeout*60)
+                except subprocess.TimeoutExpired:
+                    proc.kill();proc.wait()
+                    item["status"]="TIMEOUT";ret=None
+                item["status"]="PASS" if ret==0 else ("TIMEOUT" if ret is None else "FAIL")
+                item["exit_code"]=ret
+    except Exception as exc:
+        item["status"]="FAIL";item["error"]=f"{type(exc).__name__}: {exc}"
+    item["finished_at"]=datetime.now(timezone.utc).isoformat()
+    atomic_json(run/"run_report.json",state)
+    print(f"[NIGHT] {label}: {item['status']} (attempt {item['attempts']})",flush=True)
+    return item["status"]=="PASS"
+
+def outcome_audit(run,state,isolated):
+    """Independent post-run checks. No promotion/approval happens here."""
+    import pandas as pd
+    cohort=pd.read_excel(isolated["files"]["input"],dtype=object,keep_default_na=False)
+    final=pd.read_excel(isolated["files"]["final"],dtype=object,keep_default_na=False)
+    # Compare exact Brand+Model human locks, not the last record sharing
+    # a normalized business_key. Structural aliases can share that key.
+    protected_details, protected_counts, original_rows_count, final_rows_count = overnight_examine(run)
+    cohort_b=find_col(cohort,["Marca","Fabricante","Brand","Manufacturer"])
+    cohort_m=find_col(cohort,["Modelo","Model","SKU","Part Number"])
+    final_b=find_col(final,["Marca","Fabricante","Brand","Manufacturer"])
+    final_m=find_col(final,["Modelo","Model","SKU","Part Number"])
+    cohort_keys={business_key(safe(row[cohort_b]),safe(row[cohort_m])) for _,row in cohort.iterrows()}
+    final_keys={business_key(safe(row[final_b]),safe(row[final_m])) for _,row in final.iterrows()}
+    missing=sorted(cohort_keys-final_keys)
+    missing_existing=[]
+    if final_rows_count < original_rows_count:
+        missing_existing=["ROW_COUNT_DECREASED"]
+    protected_changes=protected_details
+    raw_states={}
+    with closing(TavilyReadOnlyStore(Path(isolated["files"]["cache"]))) as store:
+        for _, row in cohort.iterrows():
+            ev=store.get(safe(row[cohort_b]),safe(row[cohort_m]))
+            raw_states[ev.state]=raw_states.get(ev.state,0)+1
+    labels=["BASE FINAL INPUT ROW COVERAGE OK","BASE FINAL PROCV COVERAGE OK",
+            "BASE FINAL CLASSIFICATION INTEGRITY"]
+    log=run/"classification_01.log"
+    if state["stages"].get("classification",{}).get("log"):
+        log=run/state["stages"]["classification"]["log"]
+    logtext=log.read_text(encoding="utf-8",errors="replace") if log.is_file() else ""
+    output_only = bool(isolated.get("_nightly_output_only", False))
+    # In isolated output-only mode the original Final is intentionally
+    # immutable; the classification work is in the isolated XLSX/SQLite.
+    # Requiring every cohort key in Final would falsely reject all new SKUs.
+    # Still enforce original rows, exact human locks, RAW and output integrity.
+    if output_only:
+        missing = []
+    log_checks=(
+        {"NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK":
+            "NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK" in logtext}
+        if output_only else {label:label in logtext for label in labels}
+    )
+    useful_raw=sum(raw_states.get(x,0) for x in ("RAW_OK","RAW_OK_MERGED"))
+    # The cohort audit must validate every result, not merely one useful RAW
+    # entry and the appearance of success messages in a log.
+    output_path = Path(isolated["files"]["output"])
+    result_errors = []
+    if not output_path.is_file():
+        result_errors.append("RESULT_FILE_MISSING")
+    else:
+        results = pd.read_excel(output_path, sheet_name="Resultados",
+                                dtype=object, keep_default_na=False)
+        if not {"Marca", "Modelo"}.issubset(results.columns):
+            result_errors.append("RESULT_SCHEMA_INVALID")
+        else:
+            result_keys = [business_key(safe(row["Marca"]), safe(row["Modelo"]))
+                           for _, row in results.iterrows()]
+            # A prior accepted campaign can have fewer classification rows
+            # than collected SKUs (e.g. 40 of 50). Missing output is not an
+            # automatic approval; reject duplicates/foreign SKUs and audit the
+            # subset actually classified.
+            if (len(set(result_keys)) != len(result_keys)
+                    or not set(result_keys).issubset(cohort_keys)):
+                result_errors.append("RESULT_COHORT_MISMATCH")
+            for _, row in results.iterrows():
+                resolved = safe(row.get("Resolution State")) == "RESOLVED"
+                eligible = safe(row.get("Auto Eligible")).upper() == "SIM"
+                needs_review = safe(row.get("Review Required")).upper() == "SIM"
+                if eligible and (not resolved or needs_review or
+                                 not safe(row.get("Category General")) or
+                                 not safe(row.get("FAMILY"))):
+                    result_errors.append("FALSE_AUTO_ELIGIBLE")
+                    break
+    passed=(not missing and not missing_existing and not protected_changes
+            and not protected_originals(state) and useful_raw==len(cohort)
+            and not result_errors and all(log_checks.values()))
+    result={"status":"PASS" if passed else "FAIL","cohort":len(cohort),
+            "classification_output_only":output_only,
+            "canonical_promotion_allowed":False,
+            "missing_cohort_in_final":missing[:20],"missing_original_in_final":missing_existing[:20],
+            "protected_manual_or_bi_changes":protected_changes[:20],
+            "protected_changes_total":len(protected_changes),
+            "protected_changes_by_type":protected_counts,
+            "cache_states_after":raw_states,"useful_raw_count":useful_raw,
+            "log_contracts":log_checks,
+            "result_integrity_errors":result_errors,
+            "original_source_modified":protected_originals(state),
+            "quality_decision":"REVIEW_REQUIRED","taxonomy_accuracy_measured":False}
+    state["quality_audit"]=result
+    atomic_json(run/"quality_audit.json",result)
+    atomic_json(run/"run_report.json",state)
+    return passed
+
+@contextmanager
+def exclusive_campaign_lock():
+    """OS-managed interprocess lock, automatically released after crash."""
+    OUT.mkdir(parents=True,exist_ok=True)
+    with (OUT/".campaign.lock").open("a+b") as handle:
+        handle.seek(0);handle.write(b"\0");handle.flush();handle.seek(0)
+        if os.name=="nt":
+            import msvcrt
+            try:msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
+            except OSError as exc:raise RuntimeError("Another live pilot is running; concurrent night runs blocked") from exc
+            try:yield
+            finally:
+                handle.seek(0);msvcrt.locking(handle.fileno(),msvcrt.LK_UNLCK,1)
+        else:
+            import fcntl
+            try:fcntl.flock(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except OSError as exc:raise RuntimeError("Another live pilot is running") from exc
+            try:yield
+            finally:fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
+
+def overnight_run_one(args, cfg, on_run_created=None):
+    # Master parser provides args; no shadow CLI.
+    if not args.execute_live:
+        paths=source_paths(cfg)
+        result=overnight_audit(paths["input"],paths["cache"],paths["master"],paths["final"])
+        dest=OUT/"raw_empty_audit_precheck.json"
+        dest.parent.mkdir(parents=True,exist_ok=True)
+        atomic_json(dest,{k:v for k,v in result.items() if k!="candidate_rows"})
+        print(json.dumps({"mode":"AUDIT_ONLY_NO_APIS","raw_empty_summary":result["summary"],
+              "candidates":len(result["candidate_rows"]),"prior_errors":len(result["error_rows"]),
+              "report":str(dest),"live_calls":0},indent=2,ensure_ascii=False))
+        return 0
+    gate(cfg,args)
+    if args.resume_dir:
+        run=Path(args.resume_dir).resolve()
+        if run.parent!=OUT.resolve():raise ValueError("Resume must target a direct controlled_night run directory")
+        state=json.loads((run/"run_report.json").read_text(encoding="utf-8"))
+        if state.get("prior_serper_quota_error_rescue_authorized")!=bool(args.allow_prior_serper_quota_error):
+            raise ValueError("Resume must preserve the same prior-error authorization flag")
+        if state["budget"]!={"search":args.search_budget,"jev_calls":args.llm_budget,"tokens":args.token_budget}:
+            raise ValueError("Resume budgets must match original campaign exactly")
+        isolated=json.loads((run/"isolated_config.json").read_text(encoding="utf-8"))
+    else:run,state,isolated=create_run(cfg,args)
+    if on_run_created is not None:
+        on_run_created(run)
+    altered=protected_originals(state)
+    if altered:raise RuntimeError(f"Original source files changed since campaign started: {altered}")
+    # Every worker must load the same reviewed rules as the parent. The
+    # archive's bundled taxonomy can be older than the real approved one.
+    rules_file = Path(isolated.get("_nightly_rules_path", str(ROOT/"regras_negocio.json")))
+    expected_sha = isolated.get("_nightly_rules_sha256", "")
+    if expected_sha:
+        if not rules_file.is_file() or digest(rules_file) != expected_sha:
+            raise RuntimeError(
+                "NIGHTLY_REVIEWED_RULES_CHANGED_SINCE_PREFLIGHT: "
+                "refusing paid Search/JEV until exact taxonomy is restored"
+            )
+    base=[sys.executable,str(ROOT/"pipeline_produtos.py"),"--config",str(run/"isolated_config.json"),
+          "--rules",str(rules_file),
+          "--input",isolated["files"]["input"],"--cache",isolated["files"]["cache"],
+          "--master",isolated["files"]["master"],"--final",isolated["files"]["final"],
+          "--db",isolated["files"]["classification_db"],"--yes"]
+    stages=state["stages"]
+    try:
+        if stages.get("collection",{}).get("status")!="PASS":
+            success=run_stage(run,state,"collection",base+[
+                "--mode","collect","--auto-providers","--recollect-empty",
+                "--max-search-new",str(state["budget"]["search"])],
+                args.timeout_minutes)
+            if not success:
+                # Recover only unexpected worker termination/timeout. Do not
+                # restart on pipeline policy failure (2) or provider pause (3).
+                last=state["stages"]["collection"]
+                if last.get("exit_code") not in (2,3) and last["status"] in ("FAIL","TIMEOUT"):
+                    print("[NIGHT] Worker interrupted. One automatic restart with SAME SQLite reservation ledger.",flush=True)
+                    success=run_stage(run,state,"collection",base+[
+                        "--mode","collect","--auto-providers","--recollect-empty",
+                        "--max-search-new",str(state["budget"]["search"])],
+                        args.timeout_minutes)
+                if not success:
+                    print("Collection stopped. Same cohort may resume; no new input keys allowed.")
+                    return 2
+        if stages.get("classification",{}).get("status")!="PASS":
+            if stages.get("classification",{}).get("attempts",0)>0:
+                raise RuntimeError(
+                    "JEV_INCOMPLETE_REQUIRES_AUDIT: automatic classification resume disabled; "
+                    "per-run HTTP/token limits do not guarantee cumulative limits across restarts."
+                )
+            success=run_stage(run,state,"classification",base+[
+                "--mode","classify","--llm-provider","jev",
+                "--max-items",str(state["cohort_count"]),
+                "--max-api-calls",str(state["budget"]["jev_calls"]),
+                "--max-tokens",str(state["budget"]["tokens"]),
+                "--output",isolated["files"]["output"],
+                "--inventory-output",isolated["files"]["inventory_output"]],
+                args.timeout_minutes)
+            if not success:return 2
+        passed=outcome_audit(run,state,isolated)
+        return 0 if passed else 2
+    finally:
+        state["source_files_modified"]=protected_originals(state)
+        state["all_stages_pass"]=all(stages.get(k,{}).get("status")=="PASS" for k in (
+            "collection","classification"))
+        state["production_approved"]=False
+        state["mass_approval"]="BLOCKED_PENDING_QUALITY_AUDIT_AND_REAL_RESUME"
+        atomic_json(run/"run_report.json",state)
+        print(f"Report: {run/'run_report.json'}",flush=True)
+
+
+
+
+
+
+def overnight_reconcile_failed_campaign(campaign_dir: Path, cfg: Dict[str, Any],
+                                        rules: Rules) -> Dict[str, Any]:
+    """Offline salvage of a fully classified cohort blocked by baseline count.
+
+    No Search, JEV, reranker or classification worker is executed. The former
+    classification subprocess exit code is retained for the forensic audit.
+    Success means output is intact and the isolated final now satisfies the
+    corrected, strict acceptance contract -- NOT that JEV was rerun.
+    """
+    import pandas as pd
+
+    campaign_dir=Path(campaign_dir).resolve()
+    if campaign_dir.parent!=(OUT/"campaigns").resolve():
+        raise RuntimeError("RECOVERY_INVALID_CAMPAIGN_PATH")
+    manifest=campaign_dir/"campaign.json"
+    state=json.loads(manifest.read_text(encoding="utf-8"))
+    if (state.get("status")!="BLOCKED" or state.get("batches") or
+            state.get("audited_products")!=0 or
+            state.get("pending_run_creation") or not state.get("active_run")):
+        raise RuntimeError("RECOVERY_BLOCKED_UNEXPECTED_CAMPAIGN_STATE")
+    run=Path(state["active_run"]).resolve()
+    if run.parent!=OUT.resolve() or not run.is_dir():
+        raise RuntimeError("RECOVERY_INVALID_RUN_PATH")
+    report_path=run/"run_report.json"
+    report=json.loads(report_path.read_text(encoding="utf-8"))
+    collection=report.get("stages",{}).get("collection",{})
+    classification=report.get("stages",{}).get("classification",{})
+    if (collection.get("status")!="PASS" or
+            classification.get("status")!="FAIL" or
+            classification.get("attempts")!=1 or
+            classification.get("exit_code")!=1):
+        raise RuntimeError("RECOVERY_NOT_SINGLE_BASELINE_FAILURE")
+    keys=report.get("cohort_keys",[])
+    if (len(keys)!=state.get("limits",{}).get("target") or
+            len(keys)!=report.get("cohort_count") or
+            len(set(keys))!=len(keys) or len(keys)!=10):
+        raise RuntimeError("RECOVERY_COHORT_INTEGRITY_FAILED")
+    log=run/safe(classification.get("log"))
+    if not log.is_file():
+        raise RuntimeError("RECOVERY_CLASSIFICATION_LOG_MISSING")
+    logtext=log.read_text(encoding="utf-8",errors="replace")
+    required_log=("PROGRESSO 10/10", "BASELINE EXCEL ATUALIZADA",
+                  "BASELINE_COHORT_MISMATCH", "classification")
+    if not all(token in logtext for token in required_log):
+        raise RuntimeError("RECOVERY_NOT_BASELINE_ONLY_FAILURE")
+    if protected_originals(report):
+        raise RuntimeError("RECOVERY_ORIGINAL_SOURCE_MODIFIED")
+
+    isolated=json.loads((run/"isolated_config.json").read_text(encoding="utf-8"))
+    files=isolated["files"]
+    output=Path(files["output"])
+    final=Path(files["final"])
+    if not output.is_file() or not final.is_file():
+        raise RuntimeError("RECOVERY_RESULTS_OR_FINAL_MISSING")
+    frame=pd.read_excel(output,sheet_name="Resultados",dtype=object,keep_default_na=False)
+    if not {"Marca","Modelo"}.issubset(frame.columns):
+        raise RuntimeError("RECOVERY_RESULTS_SCHEMA_INVALID")
+    result_keys=[business_key(safe(r["Marca"]),safe(r["Modelo"]))
+                 for _,r in frame.iterrows()]
+    if len(result_keys)!=len(keys) or set(result_keys)!=set(keys):
+        raise RuntimeError("RECOVERY_CLASSIFICATION_OUTPUT_INCOMPLETE")
+    cohort=pd.read_excel(files["input"],dtype=object,keep_default_na=False)
+    input_keys=[business_key(safe(r["Marca"]),safe(r["Modelo"]))
+                for _,r in cohort.iterrows()]
+    if len(input_keys)!=len(keys) or set(input_keys)!=set(keys):
+        raise RuntimeError("RECOVERY_INPUT_MISMATCH")
+
+    prior_final=Path(json.loads((run/"original_sources.json").read_text(
+        encoding="utf-8"))["final"]["path"])
+    final_start=_accepted_keys_from_baseline_file(prior_final)[0]
+    expected=_expected_cohort_accepted_after_run(
+        set(keys),final_start,frame.to_dict(orient="records"))
+    accepted=_accepted_keys_from_baseline_file(final)[0] & set(keys)
+    if expected!=accepted:
+        raise RuntimeError(
+            "RECOVERY_COHORT_ACCEPTANCE_MISMATCH: "
+            f"expected={sorted(expected)} actual={sorted(accepted)}")
+    if not outcome_audit(run,report,isolated):
+        raise RuntimeError("RECOVERY_ISOLATED_QUALITY_AUDIT_FAILED")
+    quality=json.loads((run/"quality_audit.json").read_text(encoding="utf-8"))
+    if (quality.get("status")!="PASS" or
+            quality.get("protected_changes_total")!=0 or
+            quality.get("useful_raw_count")!=len(keys) or
+            quality.get("original_source_modified")):
+        raise RuntimeError("RECOVERY_QUALITY_GATE_FAILED")
+
+    # Snapshot of the worker's true exit status is never erased.
+    report["stages"]["classification"]["recovery"]={
+        "mode":"OFFLINE_BASELINE_COHORT_RECONCILIATION",
+        "original_status":"FAIL",
+        "original_exit_code":1,
+        "accepted_expected":len(expected),
+        "accepted_actual":len(accepted),
+        "classification_rows_verified":len(result_keys),
+        "http_calls":0,
+    }
+    report["stages"]["classification"]["status"]="PASS"
+    report["all_stages_pass"]=True
+    atomic_json(report_path,report)
+    state["batches"]=[{"run_dir":str(run),"cohort_keys":keys,
+                      "cohort_count":len(keys),
+                      "raw_ok":quality["useful_raw_count"],
+                      "status":"AUDIT_PASS"}]
+    state["audited_products"]=len(keys)
+    state["active_run"]=""
+    state["status"]="COMPLETE"
+    state.pop("reason",None)
+    atomic_json(manifest,state)
+    # A real-data pre-commit is mandatory before authorizing canonical swap.
+    result=overnight_promote_campaign(campaign_dir,cfg,rules,dry_run=True)
+    return {"status":"RECOVERED_OFFLINE_DRY_RUN_PASS",
+            "campaign":str(campaign_dir),"audited_products":len(keys),
+            "classification_rows":len(result_keys),
+            "accepted_strict":len(accepted),
+            "original_worker_exit_code":1,
+            "http_calls":0,"promotion_preflight":result}
+
+
+def overnight_register_legacy_runs(run_dirs: Sequence[str]) -> Path:
+    """Register historical audited 20-SKU runs for offline-only promotion.
+
+    The old pilots have no campaign.json; only a verifiable manifest is
+    synthesized. The raw/classification files remain untouched. Never create
+    an unverified COMPLETE manifest from arbitrary filenames.
+    """
+    if len(run_dirs) != 2:
+        raise ValueError("LEGACY_REQUIRES_EXACTLY_TWO_RUNS")
+    summaries = []
+    seen = set()
+    for supplied in run_dirs:
+        run = Path(supplied).resolve()
+        if run.parent != OUT.resolve() or not run.is_dir():
+            raise RuntimeError(f"LEGACY_RUN_PATH_NOT_ISOLATED: {run}")
+        report_path = run / "run_report.json"
+        quality_path = run / "quality_audit.json"
+        isolated_path = run / "isolated_config.json"
+        if not all(p.is_file() for p in (report_path, quality_path, isolated_path)):
+            raise RuntimeError(f"LEGACY_REQUIRED_REPORT_MISSING: {run}")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        isolated = json.loads(isolated_path.read_text(encoding="utf-8"))
+        keys = report.get("cohort_keys", [])
+        stages = report.get("stages", {})
+        if (len(keys) != 20 or len(set(keys)) != 20 or
+                int(report.get("cohort_count", -1)) != 20 or
+                seen.intersection(keys) or
+                stages.get("collection", {}).get("status") != "PASS" or
+                stages.get("classification", {}).get("status") != "PASS" or
+                quality.get("status") != "PASS" or
+                quality.get("protected_changes_total") != 0 or
+                quality.get("original_source_modified") or
+                quality.get("useful_raw_count") != 20):
+            raise RuntimeError(f"LEGACY_RUN_NOT_AUDITABLE: {run}")
+        for name in ("cache", "input", "output", "classification_db"):
+            if not Path(isolated.get("files", {}).get(name, "")).is_file():
+                raise RuntimeError(f"LEGACY_SOURCE_MISSING: {name}: {run}")
+        seen.update(keys)
+        summaries.append({"run_dir": str(run), "cohort_keys": keys,
+                          "cohort_count": 20, "raw_ok": 20,
+                          "status": "AUDIT_PASS"})
+    if len(seen) != 40:
+        raise RuntimeError("LEGACY_COHORT_NOT_40_UNIQUE")
+    root = OUT / "campaigns" / (
+        "legacy40_" + hashlib.sha256(
+            "|".join(sorted(str(Path(p).resolve()) for p in run_dirs)).encode()
+        ).hexdigest()[:16]
+    )
+    manifest = root / "campaign.json"
+    if root.exists():
+        prior = json.loads(manifest.read_text(encoding="utf-8"))
+        if (prior.get("status") != "COMPLETE" or
+                prior.get("audited_products") != 40 or
+                prior.get("batches") != summaries):
+            raise RuntimeError("LEGACY_MANIFEST_CONFLICT")
+        return root
+    root.mkdir(parents=True, exist_ok=False)
+    atomic_json(manifest, {
+        "schema": 1, "status": "COMPLETE", "source": "LEGACY_AUDITED_TWO_RUNS",
+        "audited_products": 40, "batches": summaries,
+        "active_run": "", "pending_run_creation": False,
+    })
+    return root
+
+
+
+
+def _overnight_assert_exact_human_locks(original: Any, proposed: Any) -> Dict[str, int]:
+    """Fail closed on any protected original physical row changing.
+
+    The scoped overlay retains every original row at the same position.
+    Comparing exact Brand/Model AND each human field by original row position
+    covers normalized collisions and repeated exact pairs without selecting
+    or conflating any historic variant.
+    """
+    aliases = {
+        "O que é (Tipo)": ["O que é (Tipo)", "Tipo", "Product Type"],
+        "Alimentação": ["Alimentação"],
+        "Category General": ["Category General"],
+        "FAMILY": ["FAMILY", "Family"],
+        "Título Real": ["Título Real"],
+        "Status": ["Status"],
+        "Revisão": ["Revisão", "Revisao"],
+        "Revisão B.I": ["Revisão B.I", "Revisao B.I"],
+    }
+    if len(proposed)<len(original):
+        raise RuntimeError("PROMOTION_PROTECTED_ORIGINAL_ROWS_DROPPED")
+    ob=find_col(original, ["Marca","Fabricante","Brand","Manufacturer"])
+    om=find_col(original, ["Modelo","Model","SKU","Part Number"])
+    pb=find_col(proposed, ["Marca","Fabricante","Brand","Manufacturer"])
+    pm=find_col(proposed, ["Modelo","Model","SKU","Part Number"])
+    rbi=find_col(original, aliases["Revisão B.I"],required=False)
+    status=find_col(original, aliases["Status"],required=False)
+    fields = [(field, find_col(original,names,required=False),
+               find_col(proposed,names,required=False))
+              for field,names in aliases.items()]
+    checked=0
+    for pos,(_,old) in enumerate(original.iterrows()):
+        if not ((rbi and _is_bi_ok_value(old.get(rbi))) or
+                (status and _is_manual_status(old.get(status)))):
+            continue
+        new=proposed.iloc[pos]
+        exact=(safe(old.get(ob)),safe(old.get(om)))
+        staged=(safe(new.get(pb)),safe(new.get(pm)))
+        if exact!=staged:
+            raise RuntimeError(
+                f"PROMOTION_PROTECTED_PAIR_CHANGED: row={pos+2} {exact} -> {staged}")
+        for field,left_col,right_col in fields:
+            before=safe(old.get(left_col)) if left_col else ""
+            after=safe(new.get(right_col)) if right_col else ""
+            if before!=after:
+                raise RuntimeError(
+                    f"PROMOTION_PROTECTED_FIELD_CHANGED: row={pos+2} "
+                    f"{exact} {field}: {before!r} -> {after!r}")
+        checked+=1
+    return {"protected_original_rows_verified":checked}
+
+
+def _overnight_scoped_excel_overlay(original_path: Path, generated_path: Path,
+                                    cohort_pairs: Dict[str, Tuple[str, str]]) -> Dict[str, int]:
+    """Overlay ONLY cohort rows after legacy baseline exporter has completed.
+
+    Keep every original row, including historical duplicate business keys, in
+    its original position. Never choose an ambiguous variant and never modify
+    an unrelated product. The legacy exporter may normalize or reorder 13K rows;
+    those changes MUST NOT enter the canonical workbook.
+    """
+    import pandas as pd
+    cohort_keys = set(cohort_pairs)
+    old, old_sheet = _read_business_sheet(original_path)
+    proposed, _ = _read_business_sheet(generated_path)
+    old_b = find_col(old, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    old_m = find_col(old, ["Modelo", "Model", "SKU", "Part Number"])
+    new_b = find_col(proposed, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    new_m = find_col(proposed, ["Modelo", "Model", "SKU", "Part Number"])
+    def pair(row, b, m):
+        return (safe(row.get(b)), safe(row.get(m)))
+    before_keys = [business_key(*pair(row,old_b,old_m))
+                   for _,row in old.iterrows()]
+    # New columns belong to the central schema; all historical values remain
+    # unchanged (not even empty->NaN) outside the exact target cohort.
+    merged = old.copy()
+    for field in proposed.columns:
+        if field not in merged.columns:
+            merged[field] = pd.Series(pd.NA,index=merged.index,dtype="object")
+    indexes = {}
+    for i,row in proposed.iterrows():
+        brand,model = pair(row,new_b,new_m)
+        if not brand or not model: continue
+        key=business_key(brand,model)
+        if key in cohort_keys:
+            indexes.setdefault(key,[]).append(row)
+    updated=inserted=locked=0
+    for key in sorted(cohort_keys):
+        choices=indexes.get(key,[])
+        if not choices:
+            raise RuntimeError(f"PROMOTION_GENERATED_COHORT_MISSING: {key}")
+        existing=[i for i,k in enumerate(before_keys) if k==key]
+        # Select the authoritative original input pair, not an arbitrary
+        # existing variant that happens to share a normalized business key.
+        authoritative = cohort_pairs[key]
+        proposed_matches = [row for row in choices
+                            if pair(row,new_b,new_m)==authoritative]
+        original_matches = [i for i in existing
+                            if pair(old.iloc[i],old_b,old_m)==authoritative]
+        if len(proposed_matches)!=1:
+            raise RuntimeError(
+                f"PROMOTION_EXACT_PROPOSAL_MISMATCH: {key} "
+                f"pair={authoritative} matches={len(proposed_matches)}")
+        if len(original_matches)>1:
+            raise RuntimeError(
+                f"PROMOTION_DUPLICATE_EXACT_COHORT_PAIR: {key} "
+                f"pair={authoritative} matches={len(original_matches)}")
+        selected=proposed_matches[0]
+        target_idx=original_matches[0] if original_matches else None
+        if target_idx is not None:
+            if _row_bi_locked(old.iloc[target_idx],old):
+                locked+=1
+                continue
+            status_col=find_col(old,["Status"],required=False)
+            if status_col and _is_manual_status(old.iloc[target_idx].get(status_col)):
+                locked+=1
+                continue
+            for col in proposed.columns:
+                if col in (new_b,new_m) and col not in (old_b,old_m):
+                    continue
+                if col in (old_b,old_m):
+                    continue
+                if col in {"Revisão B.I","Revisao B.I"}:
+                    continue
+                merged.at[target_idx,col]=selected.get(col)
+            updated+=1
+        else:
+            row={col:pd.NA for col in merged.columns}
+            row[old_b],row[old_m]=pair(selected,new_b,new_m)
+            for col in proposed.columns:
+                if col in (new_b,new_m) or col in {"Revisão B.I","Revisao B.I"}:continue
+                row[col]=selected.get(col)
+            merged=pd.concat([merged,pd.DataFrame([row])],ignore_index=True)
+            inserted+=1
+    # Count and compare every original non-cohort row, even duplicate keys.
+    for i,key in enumerate(before_keys):
+        if key in cohort_keys:continue
+        for col in old.columns:
+            if safe(old.iloc[i].get(col))!=safe(merged.iloc[i].get(col)):
+                raise RuntimeError(f"PROMOTION_UNRELATED_ROW_CHANGED: {key} row={i}")
+    # Export with the original worksheet's name. No non-cohort row is omitted.
+    _atomic_write_dataframe(merged,generated_path,old_sheet)
+    return {"updated":updated,"inserted":inserted,"human_locks_skipped":locked,
+            "original_rows_preserved":len(old)}
+
+
+def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: Rules, dry_run: bool = False) -> Dict[str, Any]:
+    """Commit verified isolated RAW + classifications into canonical cache/Excel.
+
+    Fail-closed, offline-only; immutable backup snapshots enable manual recovery
+    after an OS crash. Idempotent: a successfully promoted campaign is not replayed.
+    This is persistence of unreviewed proposals, NOT human taxonomy approval.
+    """
+    import pandas as pd
+
+    campaign_dir = Path(campaign_dir).resolve()
+    manifest_path = campaign_dir / "campaign.json"
+    state = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if state.get("promotion", {}).get("status") == "COMMITTED":
+        return state["promotion"]
+    if state.get("promotion", {}).get("status") in {"PROMOTING", "RECOVERY_REQUIRED"}:
+        raise RuntimeError("PROMOTION_RECOVERY_REQUIRED: inspect immutable backup before trying again")
+    if state.get("night_output_only", False):
+        raise RuntimeError(
+            "PROMOTION_BLOCKED_OUTPUT_ONLY: classifier results were stored only "
+            "in output XLSX/SQLite; a separately audited cohort-scoped Excel "
+            "projection is required before any canonical promotion."
+        )
+    if state.get("status") != "COMPLETE" or not state.get("batches"):
+        raise RuntimeError("PROMOTION_BLOCKED: requires COMPLETE audited campaign")
+    if state.get("active_run") or state.get("pending_run_creation"):
+        raise RuntimeError("PROMOTION_BLOCKED: incomplete sublot")
+    files = cfg["files"]
+    canonical = {k: (ROOT / str(files[k])).resolve() for k in
+                 ("cache", "master", "final", "classification_db", "input")}
+    for k, p in canonical.items():
+        if not p.is_file():
+            raise RuntimeError(f"PROMOTION_SOURCE_MISSING: {k}: {p}")
+
+    # Read authoritative cohort identities and all available classification
+    # rows. Every input classification must belong to exactly one pilot SKU.
+    keys = set()
+    records = []
+    raw_items = []
+    cohort_pairs = {}
+    isolated_databases = []
+    for batch in state["batches"]:
+        run = Path(batch["run_dir"]).resolve()
+        if run.parent != OUT.resolve():
+            raise RuntimeError("PROMOTION_INVALID_RUN_PATH")
+        report = json.loads((run / "run_report.json").read_text(encoding="utf-8"))
+        audit_result = json.loads((run / "quality_audit.json").read_text(encoding="utf-8"))
+        cohort_keys = list(batch["cohort_keys"])
+        if (batch.get("status") != "AUDIT_PASS" or audit_result.get("status") != "PASS"
+                or report.get("cohort_keys") != cohort_keys
+                or batch.get("raw_ok") != len(cohort_keys)
+                or audit_result.get("protected_changes_total") != 0
+                or audit_result.get("original_source_modified")
+                or report.get("stages", {}).get("collection", {}).get("status") != "PASS"
+                or report.get("stages", {}).get("classification", {}).get("status") != "PASS"
+                or len(cohort_keys) != len(set(cohort_keys))):
+            raise RuntimeError(f"PROMOTION_AUDIT_INVALID: {run}")
+        if keys.intersection(cohort_keys):
+            raise RuntimeError("PROMOTION_DUPLICATE_COHORT")
+        keys.update(cohort_keys)
+        isolated = json.loads((run / "isolated_config.json").read_text(encoding="utf-8"))
+        prior_db = Path(isolated["files"]["classification_db"])
+        if not prior_db.is_file():
+            raise RuntimeError(f"PROMOTION_CLASSIFICATION_DB_MISSING: {prior_db}")
+        isolated_databases.append((prior_db, set(cohort_keys)))
+        output = Path(isolated["files"]["output"])
+        if not output.is_file():
+            raise RuntimeError(f"PROMOTION_CLASSIFICATION_FILE_MISSING: {output}")
+        frame = pd.read_excel(output, sheet_name="Resultados",
+                              dtype=object, keep_default_na=False)
+        if not {"Marca", "Modelo"}.issubset(frame.columns):
+            raise RuntimeError("PROMOTION_CLASSIFICATION_COLUMNS_MISSING")
+        seen_output = set()
+        for record in frame.to_dict(orient="records"):
+            brand, model = safe(record["Marca"]), safe(record["Modelo"])
+            key = business_key(brand, model)
+            if key not in cohort_keys or key in seen_output:
+                raise RuntimeError(f"PROMOTION_UNEXPECTED_OR_DUPLICATE_RESULT: {key}")
+            seen_output.add(key)
+            # A review proposal stays a proposal, never a human approval.
+            record.pop("Revisão B.I", None)
+            if safe(record.get("Resolution State")).upper() == "REVIEW_CACHE_EVIDENCE":
+                record["Review Required"] = "SIM"
+                record["Auto Eligible"] = "NÃO"
+            records.append(record)
+        cohort_frame = pd.read_excel(isolated["files"]["input"],
+                                      dtype=object, keep_default_na=False)
+        key_to_pair = {business_key(safe(row["Marca"]), safe(row["Modelo"])):
+                       (safe(row["Marca"]), safe(row["Modelo"]))
+                       for _, row in cohort_frame.iterrows()}
+        if set(key_to_pair) != set(cohort_keys):
+            raise RuntimeError("PROMOTION_INPUT_COHORT_MISMATCH")
+        for key, exact_pair in key_to_pair.items():
+            if key in cohort_pairs and cohort_pairs[key] != exact_pair:
+                raise RuntimeError("PROMOTION_CONFLICTING_EXACT_COHORT_PAIR")
+            cohort_pairs[key] = exact_pair
+        with closing(TavilyReadOnlyStore(Path(isolated["files"]["cache"]))) as cache:
+            for key in cohort_keys:
+                brand, model = key_to_pair[key]
+                raw = cache.get(brand, model)
+                if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+                    raise RuntimeError(f"PROMOTION_RAW_NOT_OK: {key}: {raw.state}")
+                raw_items.append((brand, model, raw.payload))
+    if len(keys) != state.get("audited_products"):
+        raise RuntimeError("PROMOTION_COHORT_COUNT_MISMATCH")
+
+    backup_dir = campaign_dir / "promotion_backup"
+    resume_staging = backup_dir.exists()
+    if resume_staging:
+        manifest_backup = backup_dir / "source_manifest.json"
+        if not manifest_backup.is_file():
+            raise RuntimeError("PROMOTION_INCOMPLETE_BACKUP: manual recovery required")
+        previous = json.loads(manifest_backup.read_text(encoding="utf-8"))
+        for k in ("cache", "master", "final", "classification_db"):
+            meta=previous.get(k,{})
+            src=canonical[k]
+            old=Path(meta.get("backup","")) if meta.get("backup") else None
+            # On Windows tempfile may return an 8.3 (RUNNER~1) spelling
+            # while Path.resolve() expands it to runneradmin. Validate that
+            # both spellings identify the SAME physical source file, then
+            # independently require its original SHA-256 to match. Never
+            # relax the byte-level source-change protection.
+            recorded_src = Path(meta.get("path", "")) if meta.get("path") else None
+            same_source = bool(
+                recorded_src and recorded_src.is_file() and src.is_file()
+                and os.path.samefile(recorded_src, src)
+            )
+            if (not same_source or
+                    not old or not old.is_file() or
+                    digest(src)!=meta.get("sha256")):
+                raise RuntimeError("PROMOTION_SOURCE_CHANGED_SINCE_FAILED_STAGE: " + k)
+    else:
+        backup_dir.mkdir(parents=False)
+    # Back up canonical artifacts before creating any staging files. Never
+    # rewrite the original files until all independent staging gates pass.
+    originals = {}
+    staged = {}
+    for k in ("cache", "master", "final", "classification_db"):
+        src = canonical[k]
+        backup = backup_dir / (k + src.suffix)
+        stage = backup_dir / ("staged_" + k + src.suffix)
+        if src.suffix.lower() in (".sqlite", ".db"):
+            if not resume_staging: snapshot(src, backup)
+            if stage.exists(): stage.unlink()
+            snapshot(src, stage)
+        else:
+            if not resume_staging: shutil.copy2(src, backup)
+            shutil.copy2(src, stage)
+        originals[k] = {"path": str(src), "sha256": digest(src),
+                        "backup": str(backup)}
+        staged[k] = stage
+    atomic_json(backup_dir / "source_manifest.json", originals)
+    try:
+        # Merge only audited target evidence. The writer maintains history of
+        # replaced RAW_EMPTY rows in the staged cache.
+        writer = TavilyWritableStore(staged["cache"])
+        try:
+            for brand, model, payload in raw_items:
+                writer.put(brand, model, payload, archive_reason="OVERNIGHT_PROMOTION")
+        finally:
+            writer.close()
+
+        # Bring terminal classification checkpoints and LLM responses home too:
+        # otherwise future classification could re-spend API credits. Never
+        # overwrite an existing official checkpoint/cache with conflicting bytes.
+        official_checkpoints = ClassificationDB(staged["classification_db"])
+        official_checkpoints.close()
+        with closing(sqlite3.connect(staged["classification_db"])) as target_db:
+            target_db.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
+                business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
+                provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            for previous_db, cohort_set in isolated_databases:
+                with closing(sqlite3.connect(previous_db.resolve().as_uri()+"?mode=ro",
+                                             uri=True)) as source_db:
+                    for table, fields, pk in (
+                        ("classification_results",
+                         ("checkpoint_id","business_key","brand","model","raw_hash",
+                          "rules_hash","pipeline_version","result_json","updated_at"),"checkpoint_id"),
+                        ("llm_cache",
+                         ("cache_id","business_key","raw_hash","rules_hash","prompt_version",
+                          "provider","model","response_json","usage_json","created_at"),"cache_id"),
+                    ):
+                        columns = ",".join(fields)
+                        placeholders = ",".join("?" for _ in fields)
+                        for values in source_db.execute(f"SELECT {columns} FROM {table}"):
+                            rec = dict(zip(fields, values))
+                            if rec["business_key"] not in cohort_set:
+                                continue
+                            prior = target_db.execute(
+                                f"SELECT {columns} FROM {table} WHERE {pk}=?",
+                                (rec[pk],)).fetchone()
+                            if prior is not None and tuple(prior) != tuple(values):
+                                # Timestamp differences in an otherwise identical
+                                # cache are harmless; the response content is not.
+                                stable_fields = ("result_json",) if table == "classification_results" else (
+                                    "response_json","usage_json")
+                                existing = dict(zip(fields,prior))
+                                if any(existing[k] != rec[k] for k in stable_fields):
+                                    raise RuntimeError(f"PROMOTION_CHECKPOINT_CONFLICT: {table}/{rec[pk]}")
+                            if prior is None:
+                                target_db.execute(
+                                    f"INSERT INTO {table} ({columns}) VALUES ({placeholders})",
+                                    tuple(values))
+                    # Preserve previous Search attempt reservations and provider
+                    # disable state without modifying an existing official account.
+                    for key, account, provider in source_db.execute(
+                        "SELECT business_key,account,provider FROM collection_attempt_reservations"):
+                        if key in cohort_set:
+                            target_db.execute(
+                                "INSERT OR IGNORE INTO collection_attempt_reservations"
+                                "(business_key,account,provider) VALUES (?,?,?)",
+                                (key,account,provider))
+                    if source_db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='collection_disabled_accounts'").fetchone():
+                        target_db.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
+                            account TEXT PRIMARY KEY, reason TEXT NOT NULL,
+                            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                        for account, reason in source_db.execute(
+                                "SELECT account,reason FROM collection_disabled_accounts"):
+                            target_db.execute(
+                                "INSERT OR IGNORE INTO collection_disabled_accounts"
+                                "(account,reason) VALUES (?,?)",(account,reason))
+            target_db.commit()
+
+        # Input-scoped baseline synchronization: do not hydrate or register the
+        # entire source population while promoting only this campaign.
+        promotion_input = backup_dir / "promotion_cohort.xlsx"
+        _excel_export_safe_frame(pd.DataFrame([
+            {"Marca": brand, "Modelo": model} for brand, model, _ in raw_items
+        ])).to_excel(promotion_input, index=False)
+        # Existing vetted/up-to-date official rows dominate historical proposals.
+        # The canonical master routine contains locks for Manual and BI_OK.
+        stats = persist_baseline_excels(
+            rows=records, master_path=staged["master"],
+            final_path=staged["final"], input_path=promotion_input,
+            rules=rules, cache_path=staged["cache"], cfg=cfg,
+        )
+        # The legacy exporter reorders/deduplicates unrelated lines. Rewrite
+        # staged workbooks as an exact cohort overlay of the canonical originals.
+        stats["master_scoped_overlay"] = _overnight_scoped_excel_overlay(
+            canonical["master"],staged["master"],cohort_pairs)
+        stats["final_scoped_overlay"] = _overnight_scoped_excel_overlay(
+            canonical["final"],staged["final"],cohort_pairs)
+        final, _ = _read_business_sheet(staged["final"])
+        fb = find_col(final, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        fm = find_col(final, ["Modelo", "Model", "SKU", "Part Number"])
+        final_keys = {business_key(safe(row[fb]), safe(row[fm]))
+                      for _, row in final.iterrows() if safe(row[fb]) and safe(row[fm])}
+        missing = keys - final_keys
+        if missing:
+            raise RuntimeError(f"PROMOTION_FINAL_MISSING: {len(missing)} keys")
+        with closing(TavilyReadOnlyStore(staged["cache"])) as store:
+            for brand, model, _ in raw_items:
+                if store.get(brand, model).state not in {"RAW_OK", "RAW_OK_MERGED"}:
+                    raise RuntimeError(f"PROMOTION_CACHE_VERIFICATION_FAILED: {brand}/{model}")
+
+        # No human-reviewed row may change, even its review/status metadata.
+        # Production promotion must be input-scoped: unrelated products are
+        # immutable, even without a human hard lock. Baseline normalization
+        # must not silently rewrite an unrelated 23K-row population.
+        original_final, _ = _read_business_sheet(canonical["final"])
+        ob = find_col(original_final, ["Marca","Fabricante","Brand","Manufacturer"])
+        om = find_col(original_final, ["Modelo","Model","SKU","Part Number"])
+        if len(final)<len(original_final):
+            raise RuntimeError("PROMOTION_UNRELATED_ROWS_MISSING")
+        common_fields = [col for col in original_final.columns if col in final.columns]
+        for pos,(_,old_row) in enumerate(original_final.iterrows()):
+            key=business_key(safe(old_row.get(ob)),safe(old_row.get(om)))
+            if key in keys:continue
+            new_row=final.iloc[pos]
+            if business_key(safe(new_row.get(fb)),safe(new_row.get(fm))) != key or any(
+                 safe(old_row.get(col))!=safe(new_row.get(col)) for col in common_fields):
+                raise RuntimeError(f"PROMOTION_UNRELATED_ROW_CHANGED: {key} row={pos}")
+        # The generic BI snapshot is indexed only by normalized business_key
+        # and conflates historical exact pairs (e.g. ANNOVI variants).
+        # For promotion, compare EVERY original BI_OK row by its exact pair;
+        # never relax the eight protected human fields.
+        _overnight_assert_exact_human_locks(original_final, final)
+
+        # The physical-row gate above protects ALL original BI_OK/Manual
+        # rows including historic exact duplicates. The old grouped forensic
+        # gate can conflate such rows; it is not valid for canonical promotion.
+        for k, meta in originals.items():
+            if digest(Path(meta["path"])) != meta["sha256"]:
+                raise RuntimeError(f"PROMOTION_SOURCE_CHANGED: {k}")
+
+        if dry_run:
+            # This is an actual full-size pre-commit on staged copies, not a
+            # synthetic audit. Official files remain byte-identical and the
+            # stage can be safely rebuilt when the commit is requested.
+            report = {"status": "DRY_RUN_PASS",
+                      "cohort_count": len(keys),
+                      "classification_rows": len(records),
+                      "without_classification_output": len(keys)-len(records),
+                      "backups": str(backup_dir),
+                      "baseline_stats": stats,
+                      "canonical_files_unchanged": True,
+                      "http_calls": 0,
+                      "human_taxonomy_approved": False}
+            atomic_json(backup_dir / "dry_run_report.json", report)
+            return report
+        # Fail closed if the run was interrupted here. Backups and manifest
+        # persist; the user must reconcile manually, no silent replay.
+        state["promotion"] = {"status": "PROMOTING",
+                              "records_imported": len(records),
+                              "cohort_count": len(keys),
+                              "backups": str(backup_dir)}
+        atomic_json(manifest_path, state)
+        replaced = []
+        try:
+            for k in ("cache", "master", "final", "classification_db"):
+                os.replace(staged[k], canonical[k])
+                replaced.append(k)
+        except BaseException:
+            for k in reversed(replaced):
+                backup = Path(originals[k]["backup"])
+                if backup.is_file():
+                    shutil.copy2(backup, canonical[k])
+            state["promotion"]["status"] = "RECOVERY_REQUIRED"
+            atomic_json(manifest_path, state)
+            raise
+        state["promotion"] = {
+            "status": "COMMITTED", "cohort_count": len(keys),
+            "classification_rows": len(records),
+            "without_classification_output": len(keys) - len(records),
+            "backups": str(backup_dir),
+            "baseline_stats": stats,
+            "human_taxonomy_approved": False,
+        }
+        atomic_json(manifest_path, state)
+        LOG.info("OVERNIGHT PROMOTED TO CANONICAL CACHE+MASTER+FINAL | cohort=%d | results=%d",
+                 len(keys), len(records))
+        return state["promotion"]
+    except BaseException:
+        # Existing backups remain available; never auto-delete on failure.
+        raise
+
+
+
+def overnight_recover_prepared_twenty(manifest_path: Path, *, commit: bool = False,
+                                      cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Audit and optionally commit an existing offline 20-SKU recovery manifest.
+
+    Never calls Search or JEV, never reruns classification, and never invokes
+    the global baseline exporter. The manifest must have been prepared from
+    the existing isolated cohort and 4 canonical sources with immutable backups.
+    The old worker failure remains in the historical report for forensics.
+    """
+    import pandas as pd
+
+    path = Path(manifest_path).resolve()
+    job = path.parent
+    run = job.parent
+    if (path.name != "promotion_manifest.json"
+            or not job.name.startswith("recovery_promotion_20_")
+            or run.parent != OUT.resolve()):
+        raise RuntimeError("RECOVERY20_INVALID_MANIFEST_LOCATION")
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    state = read_json(path)
+    if state.get("status") != "PREPARED_NOT_COMMITTED":
+        raise RuntimeError("RECOVERY20_NOT_PREPARED_OR_ALREADY_COMMITTED")
+    if (state.get("cohort_count") != 20 or state.get("calls_search") != 0
+            or state.get("calls_jev") != 0 or state.get("human_taxonomy_approved") is not False):
+        raise RuntimeError("RECOVERY20_MANIFEST_CONTRACT_INVALID")
+    if Path(state.get("run", "")).resolve() != run:
+        raise RuntimeError("RECOVERY20_WRONG_RUN")
+    original = read_json(run / "original_sources.json")
+    history = read_json(run / "run_report.json")
+    isolated = read_json(run / "isolated_config.json")
+    stages = history.get("stages", {})
+    if not (history.get("cohort_count") == 20
+            and stages.get("collection", {}).get("status") == "PASS"
+            and stages.get("classification", {}).get("status") == "FAIL"
+            and stages.get("classification", {}).get("attempts") == 1):
+        raise RuntimeError("RECOVERY20_HISTORICAL_RUN_MISMATCH")
+    keys = history.get("cohort_keys", [])
+    if len(keys) != 20 or len(set(keys)) != 20:
+        raise RuntimeError("RECOVERY20_COHORT_KEYS_INVALID")
+    keyset = set(keys)
+    output = pd.read_excel(isolated["files"]["output"], sheet_name="Resultados",
+                           dtype=object, keep_default_na=False)
+    if len(output) != 20 or not {"Marca", "Modelo"}.issubset(output.columns):
+        raise RuntimeError("RECOVERY20_OUTPUT_COUNT_OR_SCHEMA_CHANGED")
+    actual_keys = [business_key(safe(r["Marca"]), safe(r["Modelo"]))
+                   for _, r in output.iterrows()]
+    if set(actual_keys) != keyset or len(set(actual_keys)) != 20:
+        raise RuntimeError("RECOVERY20_OUTPUT_COHORT_CHANGED")
+
+    names = ("master", "final", "cache", "classification_db")
+    source = {}
+    stage = {}
+    backups = {}
+    for name in names:
+        recorded = state.get("canonical", {}).get(name, {})
+        staged = state.get("staged", {}).get(name, {})
+        backup = state.get("backup", {}).get(name, {})
+        candidate = Path(recorded.get("path", "")).resolve()
+        s = Path(staged.get("path", "")).resolve()
+        b = Path(backup.get("path", "")).resolve()
+        if (candidate != Path(original[name]["path"]).resolve()
+                or (cfg is not None and candidate != source_paths(cfg)[name])
+                or recorded.get("sha256") != original[name]["sha256"]
+                or s.parent != (job / "stage").resolve()
+                or b.parent != (job / "backup").resolve()
+                or not all(p.is_file() for p in (candidate, s, b))):
+            raise RuntimeError(f"RECOVERY20_SOURCE_PATH_OR_HASH_CONTRACT:{name}")
+        for label, item, meta in (("canonical", candidate, recorded),
+                                  ("stage", s, staged), ("backup", b, backup)):
+            if digest(item) != meta.get("sha256"):
+                raise RuntimeError(f"RECOVERY20_HASH_DRIFT:{name}:{label}")
+        source[name], stage[name], backups[name] = candidate, s, b
+
+    # Preserve every unrelated physical row, including same-normalized-key
+    # variants; neither BI_OK, Manual nor previously accepted rows may change.
+    for name in ("master", "final"):
+        with pd.ExcelFile(source[name]) as book:
+            if len(book.sheet_names) != 1:
+                raise RuntimeError(f"RECOVERY20_MULTISHEET_BLOCK:{name}")
+        before, _ = _read_business_sheet(source[name])
+        after, _ = _read_business_sheet(stage[name])
+        if len(after) < len(before) or not set(before.columns).issubset(after.columns):
+            raise RuntimeError(f"RECOVERY20_BASELINE_STRUCTURE_CHANGED:{name}")
+        brand = find_col(before, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        model = find_col(before, ["Modelo", "Model", "SKU", "Part Number"])
+        nbrand = find_col(after, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        nmodel = find_col(after, ["Modelo", "Model", "SKU", "Part Number"])
+        bi = find_col(before, ["Revisão B.I", "Revisao B.I"], required=False)
+        stat = find_col(before, ["Status"], required=False)
+        for index, (_, old) in enumerate(before.iterrows()):
+            new = after.iloc[index]
+            pair = (safe(old[brand]), safe(old[model]))
+            new_pair = (safe(new[nbrand]), safe(new[nmodel]))
+            if pair != new_pair:
+                raise RuntimeError(f"RECOVERY20_ORIGINAL_ROW_REORDERED:{name}:{index+2}")
+            locked = ((bi is not None and _is_bi_ok_value(old.get(bi)))
+                      or (stat is not None and _is_manual_status(old.get(stat))))
+            if locked or _baseline_row_accepted(old, before) or business_key(*pair) not in keyset:
+                for column in before.columns:
+                    if safe(old.get(column)) != safe(new.get(column)):
+                        raise RuntimeError(
+                            f"RECOVERY20_UNRELATED_OR_PROTECTED_ROW_CHANGED:{name}:{index+2}:{column}")
+        for index in range(len(before), len(after)):
+            new = after.iloc[index]
+            if business_key(safe(new[nbrand]), safe(new[nmodel])) not in keyset:
+                raise RuntimeError(f"RECOVERY20_FOREIGN_ROW_APPENDED:{name}:{index+2}")
+
+    before = load_baseline_inventory(source["master"], source["final"])
+    after = load_baseline_inventory(stage["master"], stage["final"])
+    if (before["processed"] - after["processed"]
+            or before["final_accepted"] - after["final_accepted"]
+            or (after["processed"] - before["processed"] - keyset)
+            or (after["bi_locked"] - before["bi_locked"])
+            or (after["manual"] - before["manual"])
+            or len(before["processed"]) != state.get("accepted_before")
+            or len(after["processed"]) != state.get("accepted_after")):
+        raise RuntimeError("RECOVERY20_ACCEPTANCE_OR_HUMAN_LOCK_DRIFT")
+
+    # Search, classification and quota reservations survive in the staged
+    # SQLite, so the recovered cohort cannot accidentally be billed twice.
+    with closing(TavilyReadOnlyStore(stage["cache"])) as store:
+        for _, item in output.iterrows():
+            raw = store.get(safe(item["Marca"]), safe(item["Modelo"]))
+            if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+                raise RuntimeError("RECOVERY20_STAGED_RAW_MISSING")
+    with closing(sqlite3.connect(stage["classification_db"].as_uri() + "?mode=ro", uri=True)) as db:
+        if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("RECOVERY20_STAGED_DB_INVALID")
+        for table in ("collection_attempt_reservations", "classification_results"):
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                              (table,)).fetchone():
+                raise RuntimeError(f"RECOVERY20_DB_TABLE_MISSING:{table}")
+            stored = {row[0] for row in db.execute(f"SELECT DISTINCT business_key FROM {table}")}
+            if not keyset.issubset(stored):
+                raise RuntimeError(f"RECOVERY20_DB_COHORT_INCOMPLETE:{table}")
+
+    result = {"status": "INTEGRATED_RECOVERY20_VALIDATED_NOT_COMMITTED",
+              "cohort": 20, "new_accepted": len(after["processed"] - before["processed"]),
+              "accepted_before": len(before["processed"]),
+              "accepted_after": len(after["processed"]),
+              "search_calls": 0, "jev_calls": 0,
+              "manifest": str(path), "canonical_modified": False}
+    if not commit:
+        return result
+
+    # Existing prepared snapshots are the only source for the commit; never
+    # regenerate them under a fresh, silently different set of inputs.
+    with exclusive_campaign_lock():
+        state = read_json(path)
+        if state.get("status") != "PREPARED_NOT_COMMITTED":
+            raise RuntimeError("RECOVERY20_COMMIT_NOT_PREPARED")
+        for name in names:
+            if digest(source[name]) != state["canonical"][name]["sha256"]:
+                raise RuntimeError(f"RECOVERY20_SOURCE_CHANGED_BEFORE_COMMIT:{name}")
+            if digest(stage[name]) != state["staged"][name]["sha256"]:
+                raise RuntimeError(f"RECOVERY20_STAGING_CHANGED_BEFORE_COMMIT:{name}")
+            if digest(backups[name]) != state["backup"][name]["sha256"]:
+                raise RuntimeError(f"RECOVERY20_BACKUP_CHANGED_BEFORE_COMMIT:{name}")
+        # Refuse replacement while SQLite WAL contains uncheckpointed changes.
+        for name in ("cache", "classification_db"):
+            wal = Path(str(source[name]) + "-wal")
+            if wal.is_file() and wal.stat().st_size:
+                raise RuntimeError(f"RECOVERY20_SQLITE_WAL_ACTIVE:{name}")
+        for name in ("master", "final"):
+            try:
+                with source[name].open("r+b"):
+                    pass
+            except PermissionError as exc:
+                raise RuntimeError(f"RECOVERY20_CLOSE_EXCEL_FIRST:{name}") from exc
+
+        state["status"] = "COMMITTING_MANUAL_RECOVERY_ON_FAILURE"
+        state.setdefault("journal", [])
+        atomic_json(path, state)
+        try:
+            for name in names:
+                target = source[name]
+                pending = target.with_name(target.name + ".recovery_20_next")
+                if pending.exists():
+                    raise RuntimeError(f"RECOVERY20_UNFINISHED_PENDING_FILE:{name}")
+                shutil.copyfile(stage[name], pending)
+                if digest(pending) != state["staged"][name]["sha256"]:
+                    raise RuntimeError(f"RECOVERY20_PENDING_HASH_MISMATCH:{name}")
+                if digest(target) != state["canonical"][name]["sha256"]:
+                    raise RuntimeError(f"RECOVERY20_SOURCE_DRIFT_DURING_COMMIT:{name}")
+                os.replace(pending, target)
+                if digest(target) != state["staged"][name]["sha256"]:
+                    raise RuntimeError(f"RECOVERY20_COMMITTED_HASH_MISMATCH:{name}")
+                state["journal"].append({"file": name, "committed": True})
+                atomic_json(path, state)
+            state["status"] = "COMMITTED"
+            state["official_files_modified"] = True
+            atomic_json(path, state)
+        except BaseException:
+            # Cross-file commit is not atomic. Preserve immutable backups and
+            # the journal; manual reconciliation is mandatory if interrupted.
+            atomic_json(path, state)
+            raise
+    result["status"] = "COMMITTED"
+    result["canonical_modified"] = True
+    return result
+
+def overnight_campaign(args, cfg, rules=None):
+    """One master entrypoint: collect -> classify -> audit in <=20 SKU sublots.
+
+    Reserve the *maximum* possible calls/tokens before every batch. This
+    conservative ledger cannot exceed the cumulative user-authorized limits
+    even when JEV usage is missing, a process crashes, or a batch is resumed.
+    """
+    import copy
+    from datetime import datetime, timezone
+
+    if not args.execute_live:
+        if args.campaign_resume_dir or args.resume_dir:
+            raise ValueError("Resuming a live campaign requires --execute-live")
+        paths = source_paths(cfg)
+        report = overnight_audit(paths["input"], paths["cache"], paths["master"], paths["final"])
+        print(json.dumps({"mode": "AUDIT_ONLY_NO_APIS", "candidates": len(report["candidate_rows"]),
+                          "prior_errors": len(report["error_rows"]),
+                          "search_calls": 0}, ensure_ascii=False, indent=2))
+        return 0
+    if args.resume_dir and (args.campaign_total or args.campaign_resume_dir):
+        raise ValueError("Single-sublot --resume-dir cannot be combined with campaign options")
+    if args.resume_dir:
+        return overnight_run_one(args, cfg)
+    if args.campaign_total <= 0:
+        raise ValueError("--campaign-total must be positive in live master overnight mode")
+    if args.campaign_jev_budget <= 0 or args.campaign_token_budget <= 0:
+        raise ValueError("Explicit cumulative JEV call and token budgets required")
+    if not 1 <= args.search_budget <= 20:
+        raise ValueError("Search cap per sublot must be 1..20")
+    if getattr(args, "campaign_pause_after_sublots", 0) < 0:
+        raise ValueError("campaign-pause-after-sublots must not be negative")
+    if getattr(args, "night_output_only", False) and not getattr(args, "campaign_review_before_promotion", False):
+        raise ValueError("NIGHT_OUTPUT_ONLY_REQUIRES_REVIEW_BEFORE_PROMOTION")
+    gate(cfg, args)
+
+    if args.campaign_resume_dir:
+        root = Path(args.campaign_resume_dir).resolve()
+        if root.parent != (OUT / "campaigns").resolve():
+            raise ValueError("Campaign resume directory must be a direct child of campaigns/")
+        manifest_path = root / "campaign.json"
+        state = json.loads(manifest_path.read_text(encoding="utf-8"))
+        expected = {"target": args.campaign_total,
+                    "search_per_sublot": args.search_budget,
+                    "jev_limit": args.campaign_jev_budget,
+                    "token_limit": args.campaign_token_budget}
+        if state.get("limits") != expected:
+            raise ValueError("Resume budgets/target differ from original campaign")
+        if state.get("serper_rescue") != args.allow_prior_serper_quota_error:
+            raise ValueError("Resume cannot alter previous Serper-error authorization")
+        if state.get("review_before_promotion", False) != bool(getattr(args, "campaign_review_before_promotion", False)):
+            raise ValueError("Resume must preserve review-before-promotion flag")
+        if state.get("night_output_only", False) != bool(getattr(args, "night_output_only", False)):
+            raise ValueError("Resume must preserve night-output-only mode")
+        if state.get("night_include_raw_missing", False) != bool(getattr(args, "night_include_raw_missing", False)):
+            raise ValueError("Resume must preserve raw-missing authorization")
+        if state.get("night_allow_previous_errors", False) != bool(getattr(args, "night_allow_previous_errors", False)):
+            raise ValueError("Resume must preserve previous-error retry authorization")
+    else:
+        root = OUT / "campaigns" / (
+            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8])
+        root.mkdir(parents=True, exist_ok=False)
+        manifest_path = root / "campaign.json"
+        state = {"status": "READY", "schema": 1, "limits": {
+                     "target": args.campaign_total,
+                     "search_per_sublot": args.search_budget,
+                     "jev_limit": args.campaign_jev_budget,
+                     "token_limit": args.campaign_token_budget},
+                 "serper_rescue": args.allow_prior_serper_quota_error,
+                 "review_before_promotion": bool(getattr(args, "campaign_review_before_promotion", False)),
+                 "night_output_only": bool(getattr(args, "night_output_only", False)),
+                 "night_include_raw_missing": bool(getattr(args, "night_include_raw_missing", False)),
+                 "night_allow_previous_errors": bool(getattr(args, "night_allow_previous_errors", False)),
+                 "reserved_jev_calls": 0, "reserved_tokens": 0,
+                 "audited_products": 0, "batches": [], "active_run": "",
+                 "pending_run_creation": False}
+        atomic_json(manifest_path, state)
+
+    if state.get("pending_run_creation") and not state.get("active_run"):
+        raise RuntimeError("UNCERTAIN_SUBLOT_START: reserved budget but missing sublot checkpoint; manual reconciliation required before resume")
+
+    completed_this_invocation = 0
+    while state["audited_products"] < args.campaign_total:
+        remaining = args.campaign_total - state["audited_products"]
+        allotted_search = min(args.search_budget, remaining)
+        if state["active_run"]:
+            sublot = Path(state["active_run"]).resolve()
+            if sublot.parent != OUT.resolve():
+                raise RuntimeError("Invalid active sublot outside controlled_night")
+            report = json.loads((sublot / "run_report.json").read_text(encoding="utf-8"))
+            subargs = copy.copy(args)
+            subargs.resume_dir = str(sublot)
+            subargs.search_budget = report["budget"]["search"]
+            subargs.llm_budget = report["budget"]["jev_calls"]
+            subargs.token_budget = report["budget"]["tokens"]
+        else:
+            remaining_jev = args.campaign_jev_budget - state["reserved_jev_calls"]
+            remaining_tokens = args.campaign_token_budget - state["reserved_tokens"]
+            allotted_jev = min(args.llm_budget, remaining_jev)
+            allotted_tokens = min(args.token_budget, remaining_tokens)
+            if allotted_jev < 1 or allotted_tokens < 1:
+                state["status"] = "BUDGET_EXHAUSTED"
+                atomic_json(manifest_path, state)
+                print("[OVERNIGHT] Cumulative JEV/token budget exhausted. No extra sublot started.")
+                return 2
+            subargs = copy.copy(args)
+            subargs.resume_dir = ""
+            subargs.search_budget = allotted_search
+            subargs.llm_budget = allotted_jev
+            subargs.token_budget = allotted_tokens
+            # Budget reservations are durable BEFORE a new sublot's requests.
+            # On crash/restart we never reallocate these reserved amounts.
+            state["reserved_jev_calls"] += allotted_jev
+            state["reserved_tokens"] += allotted_tokens
+            state["pending_run_creation"] = True
+            state["status"] = "RUNNING"
+            atomic_json(manifest_path, state)
+
+        def created(sublot):
+            state["active_run"] = str(sublot)
+            state["pending_run_creation"] = False
+            atomic_json(manifest_path, state)
+
+        try:
+            result = overnight_run_one(subargs, cfg, on_run_created=created)
+        except Exception as exc:
+            state["status"] = "BLOCKED"
+            state["reason"] = f"{type(exc).__name__}: {exc}"
+            atomic_json(manifest_path, state)
+            raise
+        if result != 0:
+            state["status"] = "BLOCKED"
+            state["reason"] = "Sublot collection/classification/audit failed; manual review required"
+            atomic_json(manifest_path, state)
+            return result
+        if not state["active_run"]:
+            raise RuntimeError("Missing sublot checkpoint; fail closed")
+        sublot = Path(state["active_run"])
+        report = json.loads((sublot / "run_report.json").read_text(encoding="utf-8"))
+        quality = json.loads((sublot / "quality_audit.json").read_text(encoding="utf-8"))
+        keys = report.get("cohort_keys", [])
+        if (quality.get("status") != "PASS"
+                or quality.get("protected_changes_total") != 0
+                or quality.get("useful_raw_count") != len(keys)
+                or quality.get("original_source_modified")
+                or len(keys) != report.get("cohort_count")
+                or len(keys) != len(set(keys))):
+            state["status"] = "BLOCKED"
+            state["reason"] = "Inconsistent sublot audit or duplicate keys"
+            atomic_json(manifest_path, state)
+            return 2
+        previous = [k for batch in state["batches"] for k in batch["cohort_keys"]]
+        if set(previous).intersection(keys):
+            state["status"] = "BLOCKED"
+            state["reason"] = "SKU reused in campaign"
+            atomic_json(manifest_path, state)
+            return 2
+        state["batches"].append({
+            "run_dir": str(sublot), "cohort_keys": keys,
+            "cohort_count": len(keys), "raw_ok": quality.get("useful_raw_count", 0),
+            "status": "AUDIT_PASS"})
+        state["audited_products"] += len(keys)
+        state["active_run"] = ""
+        state["status"] = "RUNNING"
+        atomic_json(manifest_path, state)
+        completed_this_invocation += 1
+        if (getattr(args, "campaign_pause_after_sublots", 0)
+                and completed_this_invocation >= args.campaign_pause_after_sublots
+                and state["audited_products"] < args.campaign_total):
+            # Pausing is a successful checkpoint, but intentionally NOT a
+            # completed or promotable campaign. No further Search/JEV requests.
+            state["status"] = "PAUSED_FOR_RESUME_TEST"
+            state["pause_checkpoint"] = {
+                "audited_products": state["audited_products"],
+                "completed_sublots": len(state["batches"]),
+                "reserved_jev_calls": state["reserved_jev_calls"],
+                "reserved_tokens": state["reserved_tokens"],
+            }
+            atomic_json(manifest_path, state)
+            print(json.dumps({
+                "campaign": str(manifest_path),
+                "status": state["status"],
+                "audited": state["audited_products"],
+                "target": args.campaign_total,
+                "next": "resume_same_campaign",
+                "production_persisted": False,
+                "reserved_jev_calls": state["reserved_jev_calls"],
+                "reserved_tokens": state["reserved_tokens"]
+            }, ensure_ascii=False, indent=2))
+            return 0
+        if len(keys) < allotted_search:
+            # Less than asked: there may be no eligible SKUs left. Rather than
+            # silently exceed the requested scope, finish with a partial report.
+            break
+
+    state["status"] = "COMPLETE" if state["audited_products"] == args.campaign_total else "PARTIAL"
+    atomic_json(manifest_path, state)
+    if state["status"] == "COMPLETE" and rules is not None and not state.get("review_before_promotion", False):
+        # Legacy behavior: automatically persist fully audited campaigns unless
+        # the user explicitly requested human review before promotion.
+        overnight_promote_campaign(root, cfg, rules)
+    print(json.dumps({"campaign": str(manifest_path), "status": state["status"],
+                      "audited": state["audited_products"], "target": args.campaign_total,
+                      "jev_reserved": state["reserved_jev_calls"],
+                      "tokens_reserved": state["reserved_tokens"],
+                      "production_persisted": state.get("promotion", {}).get("status") == "COMMITTED",
+                      "review_before_promotion": state.get("review_before_promotion", False),
+                      "human_taxonomy_approved": False}, ensure_ascii=False, indent=2))
+    return 0 if state["status"] == "COMPLETE" else 2
 
 
 if __name__ == "__main__":

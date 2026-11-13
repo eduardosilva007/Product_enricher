@@ -68,6 +68,16 @@ class V5TaxonomyBenchmarkContracts(unittest.TestCase):
             bt.canonical_pair(" OTHERS ", " BLADE   FAN ", aliases),
         )
 
+    def test_taxonomy_config_accepts_utf8_bom_on_windows(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "taxonomy.json"
+            path.write_text(json.dumps({"pair_aliases": [], "catchall_pairs": [["OTHERS", "OTHERS"]]}),
+                            encoding="utf-8-sig")
+            loaded = bt.load_taxonomy_normalization(path)
+            self.assertEqual(loaded["catchall_pairs"], [["OTHERS", "OTHERS"]])
+
     def test_tfidf_supports_singleton_taxonomy_classes(self):
         texts = [
             "BRAND A MODEL A1",
