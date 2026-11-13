@@ -7956,6 +7956,236 @@ def _manual_review_bundle(raw: RawEvidence) -> Dict[str, str]:
 
 
 
+
+def audit_committed_classifications(cfg: Dict[str, Any], *, commit: bool = False) -> Dict[str, Any]:
+    """Audit/recover previously paid nightly proposals in the ONE canonical baseline.
+
+    Historical pilot outputs are read-only recovery evidence, never an alternate
+    active baseline. Human-approved rows and pre-existing accepted rows win.
+    Only BLANK proposal fields may be restored; competing values fail closed.
+    """
+    import pandas as pd
+    from openpyxl import load_workbook
+    import tempfile
+
+    campaigns = []
+    for manifest in sorted((OUT / "campaigns").glob("*/campaign.json")):
+        state = read_json(manifest)
+        if (state.get("status") == "COMPLETE"
+                and (state.get("promotion") or {}).get("status") == "COMMITTED"
+                and state.get("night_output_only")):
+            campaigns.append((manifest.parent, state))
+    files = cfg["files"]
+    official = {name: (ROOT / str(files[name])).resolve()
+                for name in ("master", "final", "cache")}
+    for name, path in official.items():
+        if not path.is_file():
+            raise RuntimeError(f"CENTRAL_AUDIT_CANONICAL_SOURCE_MISSING:{name}:{path}")
+    catalog = {}
+    proposal_count = pending_count = historical_locks = 0
+    for folder, campaign in campaigns:
+        previous_final = folder / "promotion_backup" / "final.xlsx"
+        if not previous_final.is_file():
+            raise RuntimeError("CENTRAL_AUDIT_PROMOTION_BACKUP_MISSING:" + folder.name)
+        old_final, _ = _read_business_sheet(previous_final)
+        ob = find_col(old_final, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        om = find_col(old_final, ["Modelo", "Model", "SKU", "Part Number"])
+        original_accepted = set()
+        for _, row in old_final.iterrows():
+            pair = (safe(row.get(ob)), safe(row.get(om)))
+            if _baseline_row_accepted(row, old_final):
+                original_accepted.add(pair)
+        for batch in campaign.get("batches", []):
+            run = Path(batch["run_dir"]).resolve()
+            if run.parent != OUT.resolve():
+                raise RuntimeError("CENTRAL_AUDIT_UNTRUSTED_RUN_DIRECTORY")
+            isolated = read_json(run / "isolated_config.json")
+            cohort_path = Path(isolated["files"]["input"]).resolve()
+            output_path = Path(isolated["files"]["output"]).resolve()
+            if cohort_path.parent != run or output_path.parent != run:
+                raise RuntimeError("CENTRAL_AUDIT_UNTRUSTED_OUTPUT_PATH")
+            cohort = pd.read_excel(cohort_path, dtype=object, keep_default_na=False)
+            outputs = pd.read_excel(output_path, sheet_name="Resultados",
+                                    dtype=object, keep_default_na=False)
+            pairs = {}
+            for row in cohort.to_dict(orient="records"):
+                pair = (safe(row.get("Marca")), safe(row.get("Modelo")))
+                key = business_key(*pair)
+                if not all(pair) or key in pairs:
+                    raise RuntimeError("CENTRAL_AUDIT_COHORT_DUPLICATE")
+                pairs[key] = pair
+            if set(pairs) != set(batch["cohort_keys"]):
+                raise RuntimeError("CENTRAL_AUDIT_COHORT_KEY_MISMATCH")
+            exported = {}
+            for row in outputs.to_dict(orient="records"):
+                pair = (safe(row.get("Marca")), safe(row.get("Modelo")))
+                key = business_key(*pair)
+                if key not in pairs or pair != pairs[key] or key in exported:
+                    raise RuntimeError("CENTRAL_AUDIT_INVALID_CLASSIFICATION_OUTPUT")
+                exported[key] = row
+            proposal_count += len(exported)
+            pending_count += len(pairs) - len(exported)
+            for key, pair in pairs.items():
+                record = exported.get(key)
+                # Last committed cohort may supersede an older proposal for
+                # the same exact SKU, but never an originally accepted row.
+                catalog[key] = {
+                    "pair": pair, "proposal": record,
+                    "protected_before": pair in original_accepted,
+                }
+                if pair in original_accepted:
+                    historical_locks += 1
+
+    snapshots = {}
+    by_pair = {}
+    for name in ("master", "final"):
+        frame, _ = _read_business_sheet(official[name])
+        bcol = find_col(frame, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+        mcol = find_col(frame, ["Modelo", "Model", "SKU", "Part Number"])
+        mapping = {}
+        for pos, row in frame.iterrows():
+            mapping.setdefault((safe(row.get(bcol)), safe(row.get(mcol))), []).append((pos, row))
+        snapshots[name] = frame
+        by_pair[name] = mapping
+
+    problems = []
+    fixes = {"master": {}, "final": {}}
+    completed = no_classification = missing_raw = protected = 0
+    fields = ("O que é (Tipo)", "Alimentação", "Category General", "FAMILY", "Título Real")
+    with closing(TavilyReadOnlyStore(official["cache"])) as store:
+        for key, item in catalog.items():
+            pair = item["pair"]
+            raw = store.get(*pair)
+            if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+                missing_raw += 1
+                problems.append(f"{key}:CACHE:{raw.state}")
+            proposal = item["proposal"]
+            if (not proposal or
+                    safe(proposal.get("Resolution State")).upper() not in
+                    {"RESOLVED", "CLASSIFIED_CLEF"} or
+                    not all(safe(proposal.get(col)) for col in
+                            ("O que é (Tipo)", "Category General", "FAMILY"))):
+                no_classification += 1
+                continue
+            completed += 1
+            if item["protected_before"]:
+                protected += 1
+                continue
+            for name in ("master", "final"):
+                existing = by_pair[name].get(pair, [])
+                if not existing:
+                    problems.append(f"{key}:{name}:EXACT_ROW_MISSING")
+                    continue
+                for pos, row in existing:
+                    if (_row_bi_locked(row, snapshots[name])
+                            or _is_manual_status(row.get("Status"))):
+                        protected += 1
+                        continue
+                    for col in fields:
+                        wanted = safe(proposal.get(col))
+                        if not wanted or wanted.upper() == "UNKNOWN":
+                            continue
+                        actual = safe(row.get(col))
+                        if actual and actual != wanted:
+                            problems.append(f"{key}:{name}:{col}:CONFLICT:{actual!r}!={wanted!r}")
+                        elif not actual:
+                            fixes[name][(pos, col)] = wanted
+
+    result = {
+        "status": "AUDIT_PASS",
+        "campaigns": len(campaigns), "cohort_unique": len(catalog),
+        "classification_output_rows": proposal_count,
+        "without_classification_output": pending_count,
+        "complete_classification_proposals": completed,
+        "not_classified_or_insufficient": no_classification,
+        "historical_accepted_at_promotion": historical_locks,
+        "protected_rows_skipped": protected,
+        "raw_missing_or_invalid": missing_raw,
+        "missing_fields_master": len(fixes["master"]),
+        "missing_fields_final": len(fixes["final"]),
+        "hard_errors": len(problems), "first_errors": problems[:15],
+        "search_calls": 0, "llm_calls": 0,
+    }
+    if problems:
+        result["status"] = "BLOCKED_CONFLICT_OR_MISSING"
+        return result
+    if not any(fixes.values()):
+        result["status"] = "ALIGNED"
+        return result
+    result["status"] = "RESTORATION_REQUIRED"
+    if not commit:
+        return result
+
+    # Staging: preserve ALL physical rows, columns, locked classifications and
+    # unrelated products. Never run global baseline exporter for this repair.
+    import shutil
+    stages = {}
+    hashes = {name: digest(official[name]) for name in ("master", "final")}
+    try:
+        for name in ("master", "final"):
+            fd, tmp = tempfile.mkstemp(prefix=".central_audit_", suffix=".xlsx",
+                                       dir=official[name].parent)
+            os.close(fd)
+            stage = Path(tmp)
+            stages[name] = stage
+            shutil.copy2(official[name], stage)
+            book = load_workbook(stage)
+            try:
+                _, sheet_name = _read_business_sheet(stage)
+                sheet = book[sheet_name]
+                headers = {safe(cell.value): cell.column for cell in sheet[1]}
+                for (pos, column), value in fixes[name].items():
+                    if column not in headers:
+                        raise RuntimeError("CENTRAL_AUDIT_REPAIR_COLUMN_MISSING:" + column)
+                    cell = sheet.cell(pos + 2, headers[column])
+                    if safe(cell.value):
+                        raise RuntimeError("CENTRAL_AUDIT_REPAIR_NOT_BLANK")
+                    cell.value = _excel_export_safe_value(value)
+                book.save(stage)
+            finally:
+                book.close()
+            check, _ = _read_business_sheet(stage)
+            if len(check) != len(snapshots[name]) or list(check.columns) != list(snapshots[name].columns):
+                raise RuntimeError("CENTRAL_AUDIT_STAGED_SCHEMA_OR_ROW_CHANGE:" + name)
+            for pos, old in snapshots[name].iterrows():
+                current = check.iloc[pos]
+                for col in snapshots[name].columns:
+                    expected = fixes[name].get((pos, col), old.get(col))
+                    if safe(current.get(col)) != safe(expected):
+                        raise RuntimeError(f"CENTRAL_AUDIT_UNEXPECTED_STAGED_CHANGE:{name}:{pos+2}:{col}")
+            _overnight_assert_exact_human_locks(snapshots[name], check)
+
+        backup_root = Path(files.get("baseline_backup_dir", "Backups_Baseline"))
+        backup = _backup_baseline_files(official["master"], official["final"], backup_root)
+        if not backup:
+            raise RuntimeError("CENTRAL_AUDIT_BACKUP_FAILED")
+        for name in ("master", "final"):
+            if digest(official[name]) != hashes[name]:
+                raise RuntimeError("CENTRAL_AUDIT_CANONICAL_CHANGED_BEFORE_COMMIT:" + name)
+            if digest(backup / official[name].name) != hashes[name]:
+                raise RuntimeError("CENTRAL_AUDIT_BACKUP_HASH_MISMATCH:" + name)
+        replaced = []
+        try:
+            for name in ("master", "final"):
+                os.replace(stages[name], official[name])
+                replaced.append(name)
+            verified = audit_committed_classifications(cfg, commit=False)
+            if verified["status"] != "ALIGNED":
+                raise RuntimeError("CENTRAL_AUDIT_POSTWRITE_FAILED:" + verified["status"])
+        except BaseException:
+            for name in reversed(replaced):
+                shutil.copy2(backup / official[name].name, official[name])
+            raise
+        result.update(status="RESTORED_AND_AUDITED",
+                      backup=str(backup),
+                      missing_fields_master_after=0,
+                      missing_fields_final_after=0)
+        return result
+    finally:
+        for stage in stages.values():
+            stage.unlink(missing_ok=True)
+
+
 def _restore_missing_final_proposal_fields(master_df: Any, proposed_final: Any) -> Dict[str, int]:
     """Keep completed, unapproved classification proposals across full export.
 
@@ -10451,7 +10681,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -10571,6 +10801,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print("8 - SAIR")
     print("9 - CENTRALIZAR CACHE DOS PILOTOS E GRAVAR BASE FINAL (0 APIS)")
     print("10 - LIMPAR BASE FINAL: 11 COLUNAS (SEM BUSCA / SEM CLASSIFICACAO)")
+    print("11 - AUDITAR / RECUPERAR CLASSIFICACOES JA COLETADAS (0 APIS)")
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
@@ -10635,6 +10866,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     if op == "10":
         return parser.parse_args(["--mode", "final-schema-cleanup",
                                   "--final-schema-interactive"])
+    if op == "11":
+        return parser.parse_args(["--mode", "audit-central-cache"])
     raise SystemExit(0)
 
 
@@ -11240,6 +11473,15 @@ def main() -> int:
         for e in errors[:50]:
             LOG.error(e)
         return 2
+    if args.mode == "audit-central-cache":
+        with exclusive_campaign_lock():
+            report = audit_committed_classifications(cfg, commit=False)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            if report["status"] == "RESTORATION_REQUIRED":
+                if input("Restaurar somente campos ausentes na Base Final e Consolidado? Digite GRAVAR: ").strip() == "GRAVAR":
+                    report = audit_committed_classifications(cfg, commit=True)
+                    print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 0 if report["status"] in {"ALIGNED", "RESTORED_AND_AUDITED"} else 2
     if args.mode == "final-schema-cleanup":
         target = Path(args.final or cfg["files"]["final"]).resolve()
         with exclusive_campaign_lock():
@@ -11346,6 +11588,13 @@ def main() -> int:
             "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
         )
     if args.mode in {"collect", "full", "classify", "recover", "overnight"}:
+        central_integrity = audit_committed_classifications(cfg, commit=False)
+        if central_integrity["status"] != "ALIGNED":
+            LOG.error(
+                "CENTRALIZED_CLASSIFICATIONS_NOT_ALIGNED: %s; "
+                "use option 11 (offline audit/restore) BEFORE paid work",
+                json.dumps(central_integrity, ensure_ascii=False))
+            return 2
         pending_cache = _night_pending_centralization()
         if pending_cache:
             LOG.error(
