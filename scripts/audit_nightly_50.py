@@ -160,8 +160,11 @@ def audit(campaign: Path, expected: int = 50) -> tuple[dict, list[dict]]:
         errors.append("GLOBAL_50_SKU_COVERAGE_MISMATCH")
     if len(all_rows) != len(set(r["Business Key"] for r in all_rows)):
         errors.append("GLOBAL_DUPLICATE_SKU")
+    status = ("BLOCKED_INTEGRITY_FAILURE" if errors else
+              "BLOCKED_CLASSIFICATION_GAPS" if counts["SEM_SAIDA_DE_CLASSIFICACAO"] else
+              "PASS_INTEGRITY_REVIEW_PENDING")
     summary = {
-        "status": "PASS_INTEGRITY_REVIEW_PENDING" if not errors else "BLOCKED_INTEGRITY_FAILURE",
+        "status": status,
         "expected_skus": expected,
         "audited_skus": len(all_rows),
         "distinct_keys": len(keys_seen),
@@ -211,7 +214,7 @@ def main() -> int:
     out = export(a.campaign_dir, summary, rows)
     print(json.dumps({"audit": summary, "outputs": [str(x) for x in out]},
                      ensure_ascii=False, indent=2))
-    return 0 if not summary["errors"] else 2
+    return 0 if summary["status"] == "PASS_INTEGRITY_REVIEW_PENDING" else 2
 
 
 if __name__ == "__main__":
