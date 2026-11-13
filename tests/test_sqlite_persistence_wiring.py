@@ -11,6 +11,13 @@ class PersistenceIntegrationTests(unittest.TestCase):
                         src.index("_refresh_sqlite_sku_registry("))
         self.assertIn("sqlite_registry_status", src)
 
+    def test_overnight_generic_stage_never_writes_canonical_sqlite(self):
+        src=inspect.getsource(p.overnight_promote_campaign)
+        self.assertIn('"classification_db": str(staged["classification_db"])', src)
+        self.assertIn('cfg=staging_cfg,', src)
+        self.assertLess(src.index("staging_cfg = {"),
+                        src.index("stage_registry = _refresh_sqlite_sku_registry("))
+
     def test_overnight_registry_sync_is_pre_commit(self):
         src=inspect.getsource(p.overnight_promote_campaign)
         self.assertLess(src.index("stage_registry = _refresh_sqlite_sku_registry("),

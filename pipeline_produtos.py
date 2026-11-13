@@ -13623,10 +13623,18 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             stats = _night_stage_output_only_canonical(
                 originals, staged, cohort_pairs, raw_items, records, rules)
         else:
+            # NEVER allow an isolated staging run to update canonical SQLite
+            # while source integrity hashes are still being checked.
+            staging_cfg = {
+                **cfg, "files": {
+                    **cfg["files"],
+                    "classification_db": str(staged["classification_db"]),
+                },
+            }
             stats = persist_baseline_excels(
                 rows=records, master_path=staged["master"],
                 final_path=staged["final"], input_path=promotion_input,
-                rules=rules, cache_path=staged["cache"], cfg=cfg,
+                rules=rules, cache_path=staged["cache"], cfg=staging_cfg,
             )
             stats["master_scoped_overlay"] = _overnight_scoped_excel_overlay(
                 canonical["master"], staged["master"], cohort_pairs)
