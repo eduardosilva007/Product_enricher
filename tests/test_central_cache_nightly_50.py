@@ -98,6 +98,38 @@ class CentralCacheProjectionTests(unittest.TestCase):
                     [{"Marca": "OTHER", "Modelo": "UNRELATED"}],
                     SimpleNamespace(version="v", hash="h"))
 
+
+    def test_missing_classification_clears_only_existing_unapproved_taxonomy(self):
+        from openpyxl import load_workbook
+        with tempfile.TemporaryDirectory() as tmp:
+            originals, staged = self.make_baselines(tmp)
+            for name in ("master", "final"):
+                workbook = load_workbook(originals[name]["path"])
+                sheet = workbook.active
+                headers = {cell.value: cell.column for cell in sheet[1]}
+                for field, value in (
+                    ("O que é (Tipo)", "WRONG TYPE"),
+                    ("Category General", "OTHERS"),
+                    ("FAMILY", "ENGINE"),
+                ):
+                    sheet.cell(4, headers[field]).value = value
+                workbook.save(originals[name]["path"])
+                workbook.close()
+                shutil.copy2(originals[name]["path"], staged[name])
+            pairs = {"fixtec|fcd12l06ul": ("FIXTEC", "FCD12L06UL")}
+            raw = [("FIXTEC", "FCD12L06UL", {"results": []})]
+            core._night_stage_output_only_canonical(
+                originals, staged, pairs, raw, [],
+                SimpleNamespace(version="v", hash="h"))
+            for name in ("master", "final"):
+                after, _ = core._read_business_sheet(staged[name])
+                self.assertTrue(pd.isna(after.iloc[2]["O que é (Tipo)"]))
+                self.assertTrue(pd.isna(after.iloc[2]["Category General"]))
+                self.assertTrue(pd.isna(after.iloc[2]["FAMILY"]))
+                self.assertEqual(after.iloc[0]["Revisão B.I"], "OK")
+                self.assertEqual(after.iloc[1]["FAMILY"], "ENGINE")
+                self.assertEqual(after.iloc[2]["Review Required"], "SIM")
+
     def test_menu_has_offline_centralization_and_explicit_confirmation(self):
         parser = core.build_parser()
         self.assertEqual(parser.parse_args(["--mode", "overnight-centralize"]).mode,

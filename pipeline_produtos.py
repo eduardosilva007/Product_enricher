@@ -12602,7 +12602,9 @@ def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, reco
                         if value is None or isinstance(value, (str, int, float, bool)):
                             updates[col] = value
                 state = safe(rec.get("Resolution State")).upper()
-                updates["Status Processamento"] = "PROCESSADO"
+                updates["Status Processamento"] = (
+                    "PROCESSADO" if state in {"RESOLVED", "CLASSIFIED_CLEF"}
+                    else "PENDENTE")
                 updates["Revisão"] = "PROVÁVEL" if state in {"RESOLVED", "CLASSIFIED_CLEF"} else "REVISAR"
                 updates["Próxima Ação"] = "DOUBLE_CHECK" if state in {"RESOLVED", "CLASSIFIED_CLEF"} else "REVISAR_EVIDENCIA_CACHE"
                 updates["Status Classificação"] = (
@@ -12615,8 +12617,10 @@ def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, reco
                 updates["Auto Eligible"] = "NÃO"
             for column, val in updates.items():
                 if column != "Revisão B.I":
-                    sheet.cell(pos, headers[column],
-                               _excel_export_safe_value(val) if isinstance(val, str) else val)
+                    # Worksheet.cell(value=None) leaves an existing cell intact.
+                    # Explicit assignment clears stale unapproved taxonomy.
+                    sheet.cell(pos, headers[column]).value = (
+                        _excel_export_safe_value(val) if isinstance(val, str) else val)
             if not matches:
                 sheet.cell(pos, headers["Revisão B.I"], None)
         book.save(staged[name])
