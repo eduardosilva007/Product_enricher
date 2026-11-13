@@ -7967,22 +7967,34 @@ FINAL_SKU_INDEX_COLUMNS = [
 
 
 def _final_sku_lookup_rows(sheet):
-    """One row per compact business key, preserving every original Excel SKU."""
-    header = {safe(cell.value): cell.column for cell in sheet[1] if safe(cell.value)}
+    """Read each row exactly once; read-only worksheet random cell access is slow."""
+    iterator = iter(sheet.iter_rows(values_only=True))
+    try:
+        first_row = next(iterator)
+    except StopIteration as exc:
+        raise RuntimeError("SKU_INDEX_FINAL_EMPTY_SHEET") from exc
+    labels = [safe(v) for v in first_row]
+    present = [v for v in labels if v]
+    if len(present) != len(set(present)):
+        raise RuntimeError("SKU_INDEX_FINAL_DUPLICATE_HEADERS")
+    header = {name: i for i, name in enumerate(labels) if name}
     if any(x not in header for x in BASELINE_PUBLIC_COLUMNS):
         raise RuntimeError("SKU_INDEX_FINAL_MISSING_PUBLIC_COLUMNS")
+    public_positions = tuple(header[field] for field in BASELINE_PUBLIC_COLUMNS)
+    brand_at, model_at = header["Marca"], header["Modelo"]
     groups = {}
     physical = 0
-    for idx in range(2, sheet.max_row + 1):
-        brand = safe(sheet.cell(idx, header["Marca"]).value)
-        model = safe(sheet.cell(idx, header["Modelo"]).value)
+    for idx, values in enumerate(iterator, 2):
+        brand = safe(values[brand_at]) if brand_at < len(values) else ""
+        model = safe(values[model_at]) if model_at < len(values) else ""
         if not brand or not model:
             continue
         key = business_key(brand, model)
-        if not key or key == "|":
+        if key == "|":
             raise RuntimeError("SKU_INDEX_EMPTY_NORMALIZED_KEY")
         physical += 1
-        signature = tuple(safe(sheet.cell(idx, header[c]).value) for c in BASELINE_PUBLIC_COLUMNS)
+        signature = tuple(safe(values[j]) if j < len(values) else ""
+                          for j in public_positions)
         groups.setdefault(key, []).append((idx, brand, model, signature))
     rows, stats = [], {
         "physical_rows": physical, "normalized_keys": len(groups),
@@ -7994,7 +8006,6 @@ def _final_sku_lookup_rows(sheet):
         signatures = {signature for _, _, _, signature in entries}
         if len(variants) != 1 or len(signatures) != 1:
             stats["ambiguous_keys"] += 1
-            # No misleading match on conflicting normalized identities.
             original = ""
             state = "AMBIGUO:VARIANTES_OU_CLASSIFICACAO"
         else:
@@ -8006,7 +8017,6 @@ def _final_sku_lookup_rows(sheet):
         first, brand, model, _ = entries[0]
         rows.append((key, original, brand, model, first, len(entries), state))
     return rows, stats
-
 
 def _final_sku_index_state(final_path: Path, campaign_keys=None):
     """Compare physical Base Final rows and same-workbook normalized lookup."""

@@ -30,6 +30,35 @@ class FinalSkuIndexTests(unittest.TestCase):
         wb.save(path)
         wb.close()
 
+    def test_streaming_reader_does_not_use_random_access(self):
+        # A read-only Openpyxl .cell(i,j) may rescan worksheet XML every time.
+        # Regression: prohibit cell() and __getitem__ in the index path.
+        class StreamingSheet:
+            def __init__(self):
+                self.columns = list(p.BASELINE_PUBLIC_COLUMNS)
+            def iter_rows(self, values_only=False):
+                if not values_only:
+                    raise AssertionError("index must use values_only")
+                yield tuple(self.columns)
+                yield ("FIXTEC", "FCD12L06 UL", "DRILL", "BATTERY",
+                       "OTHERS", "DRILLERS", "Cordless drill", "DOUBLE_CHECK",
+                       "Script", "PROVÁVEL", None)
+                yield ("FOTON", "0501.218.540", None, None, None, None,
+                       None, "REVISAR", "Script", "REVISAR", None)
+            def cell(self, *_args, **_kwargs):
+                raise AssertionError("random cell access forbidden")
+            def __getitem__(self, _key):
+                raise AssertionError("worksheet slicing forbidden")
+        rows, stats = p._final_sku_lookup_rows(StreamingSheet())
+        self.assertEqual(stats["physical_rows"], 2)
+        self.assertEqual(stats["normalized_keys"], 2)
+        by_key = {r[0]: r for r in rows}
+        self.assertEqual(by_key["fixtec|fcd12l06ul"][1],
+                         "FIXTEC|FCD12L06 UL")
+        self.assertEqual(by_key["foton|0501218540"][1],
+                         "FOTON|0501.218.540")
+
+
     def test_normalized_index_maps_to_original_without_adding_public_column(self):
         with tempfile.TemporaryDirectory() as tmp:
             final = Path(tmp) / "Base Final Produtos Enriquecida.xlsx"
