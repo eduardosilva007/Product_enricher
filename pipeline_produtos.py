@@ -10438,6 +10438,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--recovery-manifest", default="", help="Prepared 20-SKU recovery manifest; offline only")
     p.add_argument("--legacy-run-dir", action="append", default=[], help="Two historical audited run folders for offline-only 40-SKU promotion")
     p.add_argument("--promotion-dry-run", action="store_true", help="Build and verify staging without replacing any canonical data")
+    p.add_argument("--final-schema-interactive", action="store_true", help="Menu-only preview then explicit commit for 11-column Final")
     p.add_argument("--pilot-dir", default="", help="Isolated ten-SKU pilot folder for targeted official promotion")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--verbose", action="store_true")
@@ -10503,6 +10504,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print("7 - EXPORTAR EVIDENCE BUNDLE (SEM BUSCA / 0 CRÉDITOS)")
     print("8 - SAIR")
     print("9 - CENTRALIZAR CACHE DOS PILOTOS E GRAVAR BASE FINAL (0 APIS)")
+    print("10 - LIMPAR BASE FINAL: 11 COLUNAS (SEM BUSCA / SEM CLASSIFICACAO)")
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
@@ -10564,6 +10566,9 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(argv)
     if op == "9":
         return parser.parse_args(["--mode", "overnight-centralize"])
+    if op == "10":
+        return parser.parse_args(["--mode", "final-schema-cleanup",
+                                  "--final-schema-interactive"])
     raise SystemExit(0)
 
 
@@ -11172,7 +11177,21 @@ def main() -> int:
     if args.mode == "final-schema-cleanup":
         target = Path(args.final or cfg["files"]["final"]).resolve()
         with exclusive_campaign_lock():
-            report = clean_final_business_schema(target, commit=args.yes)
+            # Always audit original rows first. The user can operate entirely
+            # through the VS Code menu without a second cleanup script.
+            if args.final_schema_interactive:
+                preview = clean_final_business_schema(target, commit=False)
+                print(json.dumps(preview, ensure_ascii=False, indent=2))
+                if preview["columns_before"] == len(BASELINE_PUBLIC_COLUMNS) and not preview["removed_columns"]:
+                    print("BASE FINAL JA ESTÁ NO SCHEMA DE 11 COLUNAS; SEM ALTERACOES.")
+                    return 0
+                answer = input("Remover SOMENTE colunas tecnicas da Base Final? Digite GRAVAR: ").strip()
+                if answer != "GRAVAR":
+                    print("NAO_GRAVADO: Base Final original mantida.")
+                    return 0
+                report = clean_final_business_schema(target, commit=True)
+            else:
+                report = clean_final_business_schema(target, commit=args.yes)
             print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
     if args.mode == "promote-isolated-ten":
@@ -12485,6 +12504,49 @@ def _overnight_scoped_excel_overlay(original_path: Path, generated_path: Path,
 
 
 
+
+def _stage_only_business_columns_in_final(path: Path) -> int:
+    """Narrow a STAGED official Final to the exact 11-column public schema.
+
+    Operational evidence stays in the master/SQLite. The caller has already
+    checked physical-row preservation and human locks on full staged contents.
+    No other worksheet is changed and no extra operational workbook is made.
+    """
+    from openpyxl import load_workbook
+
+    book = load_workbook(path)
+    try:
+        sheet = book["Base Final"] if "Base Final" in book.sheetnames else next(
+            (ws for ws in book.worksheets if {"Marca", "Modelo"}.issubset(
+                {safe(c.value) for c in ws[1]})), None
+        )
+        if sheet is None:
+            raise RuntimeError("CENTRALIZE_FINAL_BUSINESS_SHEET_NOT_FOUND")
+        headers = [safe(c.value) for c in sheet[1]]
+        if len(headers) != len(set(x for x in headers if x)):
+            raise RuntimeError("CENTRALIZE_FINAL_DUPLICATE_HEADERS")
+        if any(field not in headers for field in BASELINE_PUBLIC_COLUMNS):
+            raise RuntimeError("CENTRALIZE_FINAL_PUBLIC_COLUMNS_MISSING")
+        if headers == BASELINE_PUBLIC_COLUMNS:
+            return len(headers)
+        columns = [headers.index(field) + 1 for field in BASELINE_PUBLIC_COLUMNS]
+        replacement = book.create_sheet(
+            "_CentralFinalStaging", index=book.sheetnames.index(sheet.title))
+        replacement.append(BASELINE_PUBLIC_COLUMNS)
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            replacement.append([row[j - 1] for j in columns])
+        original_title = sheet.title
+        book.remove(sheet)
+        replacement.title = original_title
+        book.save(path)
+    finally:
+        book.close()
+    verified, _ = _read_business_sheet(path)
+    if list(verified.columns) != BASELINE_PUBLIC_COLUMNS:
+        raise RuntimeError("CENTRALIZE_FINAL_11_COLUMN_VERIFICATION_FAILED")
+    return len(verified.columns)
+
+
 def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, records, rules):
     """Project all audited SKU rows onto official staged Excel, without Search/JEV.
 
@@ -12642,6 +12704,13 @@ def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, reco
                         raise RuntimeError(
                             f"CENTRALIZE_PROTECTED_CHANGED:{name}:{pos+2}:{field}"
                         )
+        if name == "final":
+            # Only the 11 business fields go into the official Final. The
+            # Master and SQLite retain all operational/routing metadata.
+            count = _stage_only_business_columns_in_final(staged[name])
+            if count != len(BASELINE_PUBLIC_COLUMNS):
+                raise RuntimeError("CENTRALIZE_FINAL_PUBLIC_SCHEMA_INVALID")
+            result["final_business_columns"] = count
         result[name] = counts
     return result
 

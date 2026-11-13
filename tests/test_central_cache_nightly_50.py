@@ -67,13 +67,20 @@ class CentralCacheProjectionTests(unittest.TestCase):
                 classified = after.loc[(after["Marca"] == "BRAND")
                                        & (after["Modelo"] == "M000")].iloc[0]
                 self.assertEqual(classified["O que é (Tipo)"], "DRILL")
-                self.assertEqual(classified["Review Required"], "SIM")
-                self.assertEqual(classified["Auto Eligible"], "NÃO")
+                if name == "master":
+                    self.assertEqual(classified["Review Required"], "SIM")
+                    self.assertEqual(classified["Auto Eligible"], "NÃO")
+                else:
+                    self.assertEqual(list(after.columns), core.BASELINE_PUBLIC_COLUMNS)
+                    self.assertEqual(classified["Revisão"], "PROVÁVEL")
                 self.assertTrue(pd.isna(classified["Revisão B.I"]))
                 pending = after.loc[(after["Marca"] == "BRAND")
                                     & (after["Modelo"] == "M047")].iloc[0]
-                self.assertEqual(pending["Status Classificação"], "PENDENTE_CLASSIFICACAO")
-                self.assertEqual(pending["Raw State"], "RAW_OK")
+                if name == "master":
+                    self.assertEqual(pending["Status Classificação"], "PENDENTE_CLASSIFICACAO")
+                    self.assertEqual(pending["Raw State"], "RAW_OK")
+                else:
+                    self.assertEqual(pending["Revisão"], "REVISAR")
                 self.assertTrue(pd.isna(pending["Category General"]))
                 self.assertTrue(pd.isna(pending["Revisão B.I"]))
 
@@ -128,7 +135,39 @@ class CentralCacheProjectionTests(unittest.TestCase):
                 self.assertTrue(pd.isna(after.iloc[2]["FAMILY"]))
                 self.assertEqual(after.iloc[0]["Revisão B.I"], "OK")
                 self.assertEqual(after.iloc[1]["FAMILY"], "ENGINE")
-                self.assertEqual(after.iloc[2]["Review Required"], "SIM")
+                if name == "master":
+                    self.assertEqual(after.iloc[2]["Review Required"], "SIM")
+                else:
+                    self.assertEqual(list(after.columns), core.BASELINE_PUBLIC_COLUMNS)
+                    self.assertEqual(after.iloc[2]["Revisão"], "REVISAR")
+
+
+    def test_stage_removes_diagnostics_only_in_final(self):
+        from openpyxl import load_workbook
+        with tempfile.TemporaryDirectory() as tmp:
+            originals, staged = self.make_baselines(tmp)
+            pairs = {"fixtec|fcd12l06ul": ("FIXTEC", "FCD12L06UL")}
+            raw = [("FIXTEC", "FCD12L06UL", {"results": []})]
+            core._night_stage_output_only_canonical(
+                originals, staged, pairs, raw, [],
+                SimpleNamespace(version="v", hash="h"))
+            after_final, _ = core._read_business_sheet(staged["final"])
+            after_master, _ = core._read_business_sheet(staged["master"])
+            self.assertEqual(list(after_final.columns), core.BASELINE_PUBLIC_COLUMNS)
+            self.assertIn("Raw State", after_master.columns)
+            self.assertIn("Review Required", after_master.columns)
+            self.assertNotIn("Raw State", after_final.columns)
+            self.assertEqual(after_final.iloc[0]["Revisão B.I"], "OK")
+
+    def test_cleanup_menu_instructions_and_guard(self):
+        import inspect
+        menu_source = inspect.getsource(core.interactive_menu)
+        main_source = inspect.getsource(core.main)
+        self.assertIn("10 - LIMPAR BASE FINAL", menu_source)
+        self.assertIn("--final-schema-interactive", menu_source)
+        self.assertIn('input("Remover SOMENTE colunas tecnicas', main_source)
+        self.assertIn("commit=False", main_source)
+        self.assertIn("commit=True", main_source)
 
     def test_promotion_contains_post_write_cache_and_excel_audits(self):
         import inspect
