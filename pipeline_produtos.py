@@ -12956,6 +12956,27 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             for k in ("cache", "master", "final", "classification_db"):
                 os.replace(staged[k], canonical[k])
                 replaced.append(k)
+            if output_only:
+                # POST-WRITE AUDIT: 50 exact identities in BOTH official Excel
+                # files and useful RAW in the ONE canonical cache. On failure,
+                # restore immutable source backups in the except block below.
+                for name in ("master", "final"):
+                    current, _ = _read_business_sheet(canonical[name])
+                    bc = find_col(current, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+                    mc = find_col(current, ["Modelo", "Model", "SKU", "Part Number"])
+                    exact_pairs = {(safe(row.get(bc)), safe(row.get(mc)))
+                                   for _, row in current.iterrows()}
+                    missing_exact = set(cohort_pairs.values()) - exact_pairs
+                    if missing_exact:
+                        raise RuntimeError(
+                            f"CENTRALIZE_POSTWRITE_EXCEL_MISSING:{name}:{len(missing_exact)}"
+                        )
+                with closing(TavilyReadOnlyStore(canonical["cache"])) as verified:
+                    for brand, model, _ in raw_items:
+                        if verified.get(brand, model).state not in {"RAW_OK", "RAW_OK_MERGED"}:
+                            raise RuntimeError(
+                                f"CENTRALIZE_POSTWRITE_CACHE_MISSING:{brand}/{model}"
+                            )
         except BaseException:
             for k in reversed(replaced):
                 backup = Path(originals[k]["backup"])
@@ -12971,6 +12992,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             "backups": str(backup_dir),
             "baseline_stats": stats,
             "human_taxonomy_approved": False,
+            "post_commit_integrity": "PASS" if output_only else "NOT_RUN_LEGACY",
         }
         atomic_json(manifest_path, state)
         LOG.info("OVERNIGHT PROMOTED TO CANONICAL CACHE+MASTER+FINAL | cohort=%d | results=%d",

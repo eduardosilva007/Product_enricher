@@ -130,6 +130,13 @@ class CentralCacheProjectionTests(unittest.TestCase):
                 self.assertEqual(after.iloc[1]["FAMILY"], "ENGINE")
                 self.assertEqual(after.iloc[2]["Review Required"], "SIM")
 
+    def test_promotion_contains_post_write_cache_and_excel_audits(self):
+        import inspect
+        source = inspect.getsource(core.overnight_promote_campaign)
+        self.assertIn("CENTRALIZE_POSTWRITE_EXCEL_MISSING", source)
+        self.assertIn("CENTRALIZE_POSTWRITE_CACHE_MISSING", source)
+        self.assertIn("post_commit_integrity", source)
+
     def test_menu_has_offline_centralization_and_explicit_confirmation(self):
         parser = core.build_parser()
         self.assertEqual(parser.parse_args(["--mode", "overnight-centralize"]).mode,
