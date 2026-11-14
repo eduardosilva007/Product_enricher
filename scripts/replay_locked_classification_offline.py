@@ -209,6 +209,41 @@ def read_result(path, count, rules, db_path=None):
     return records, keys
 
 
+def business_visibility(records, final_path):
+    """Count physical per-SKU classifications already present in Base Final."""
+    frame, _ = p._read_business_sheet(Path(final_path))
+    lookup = {}
+    for _, row in frame.iterrows():
+        pair = (p.safe(row.get("Marca")), p.safe(row.get("Modelo")))
+        lookup.setdefault(pair, []).append(row)
+    visible = missing = incomplete = title_missing = already_present = 0
+    fields = ("O que é (Tipo)", "Category General", "FAMILY")
+    for rec in records:
+        state = p.safe(rec.get("Resolution State")).upper()
+        if state not in {"RESOLVED", "CLASSIFIED_CLEF"} or not all(
+                p.safe(rec.get(col)) for col in fields):
+            incomplete += 1
+            continue
+        pair = (p.safe(rec.get("Marca")), p.safe(rec.get("Modelo")))
+        matches = lookup.get(pair, ())
+        if not matches:
+            missing += 1
+            continue
+        if any(all(p.safe(row.get(col)) == p.safe(rec.get(col))
+                   for col in fields) for row in matches):
+            visible += 1
+        else:
+            missing += 1
+        if p.safe(rec.get("Título Real")) and not any(
+                p.safe(row.get("Título Real")) for row in matches):
+            title_missing += 1
+    return {"complete_results": visible + missing,
+            "complete_already_visible": visible,
+            "complete_missing_or_different": missing,
+            "partial_or_review_results": incomplete,
+            "source_titles_missing_in_final": title_missing}
+
+
 def sqlite_snapshot(src, dest):
     with closing(sqlite3.connect(Path(src).resolve().as_uri() + "?mode=ro", uri=True)) as con:
         if con.execute("PRAGMA quick_check").fetchone()[0] != "ok":
@@ -292,6 +327,10 @@ def run(args):
     source_rows, cohort = read_result(
         result, args.expected_rows, rules, db_path=paths["classification_db"]
     )
+    before_visibility = business_visibility(source_rows, paths["final"])
+    print("OFFLINE RESULT VS FINAL | " + " | ".join(
+        f"{k}={v}" for k, v in before_visibility.items()
+    ), flush=True)
     before_hash = {key: digest(paths[key]) for key in ("master", "final", "cache", "classification_db")}
     before_hash["result"] = digest(result)
     audit_dir = root / "auditorias"
@@ -316,6 +355,10 @@ def run(args):
         checks = verify(paths["master"], paths["final"],
                         staged_master, staged_final, cohort, source_rows,
                         paths["input"])
+        after_visibility = business_visibility(source_rows, staged_final)
+        print("STAGED RESULT VS FINAL | " + " | ".join(
+            f"{k}={v}" for k, v in after_visibility.items()
+        ), flush=True)
         staged_stats = {"persist": stage_stats, "checks": checks}
         # Check that staging only touched staging files.
         for key in ("master", "final", "cache", "classification_db"):
@@ -365,6 +408,8 @@ def run(args):
             "status": "COMMITTED" if args.commit else "STAGED_PASS_NO_WRITES",
             "input_result": str(result), "expected_rows": args.expected_rows,
             "replayed_keys": len(cohort), "checks": checks,
+            "visibility_before": before_visibility,
+            "visibility_staged": after_visibility,
             "stage_stats": {"baseline_promoted": stage_stats.get("baseline_promoted"),
                             "review_recorded": stage_stats.get("review_recorded"),
                             "cache_reference_titles": stage_stats.get("cache_reference_titles"),
