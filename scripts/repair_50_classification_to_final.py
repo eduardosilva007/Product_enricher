@@ -13,6 +13,12 @@ from pathlib import Path
 import shutil
 import tempfile
 from collections import defaultdict
+import sys
+
+# Direct invocation sets sys.path[0] to scripts/, not the repository root.
+# Make local imports work both with python scripts/...py and python -m scripts....
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from openpyxl import load_workbook
 from sku_registry_sqlite import _key, audit_sqlite_merge
