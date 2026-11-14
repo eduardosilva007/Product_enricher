@@ -7047,6 +7047,19 @@ def _baseline_row_accepted(row: Any, df: Any) -> bool:
     if review in _REVIEW_REJECT_STATES:
         return False
 
+    # The public Final carries only 11 business columns: its technical
+    # Resolution State / Review Required flags are stripped on export.
+    # PROVAVEL + DOUBLE_CHECK is a proposed JEV classification, not automatic
+    # acceptance. Without this gate, the postrun cohort audit counts proposals
+    # as accepted even though _record_is_accepted correctly rejects them.
+    action_col = find_col(df, ["Próxima Ação", "Proxima Acao"], required=False)
+    action = safe(row.get(action_col)).upper() if action_col else ""
+    if review in {"PROVÁVEL", "PROVAVEL"} and action in {
+        "DOUBLE_CHECK", "AGUARDAR_REVISAO_PRODUTO_CANONICO",
+        "REVISAR_CONFLITO_EQUIVALENCIA",
+    }:
+        return False
+
     technical_gate_present = any([
         bool(review_required_col and safe(row.get(review_required_col))),
         bool(resolution_col and safe(row.get(resolution_col))),
