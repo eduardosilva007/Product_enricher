@@ -107,7 +107,7 @@ class OfflineReplayTests(unittest.TestCase):
                  "Próxima Ação": "CONCLUIDO"}
                 for i in range(4)
             ]
-            keylines = "\\n".join(
+            keylines = "\n".join(
                 p.business_key(x["Marca"], x["Modelo"]) for x in records)
             cohort_hash = hashlib.sha256(keylines.encode("utf-8")).hexdigest()[:12]
             summary = {
