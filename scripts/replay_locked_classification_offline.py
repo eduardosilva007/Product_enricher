@@ -386,6 +386,7 @@ def run(args):
             (backups / "source-result.sha256").write_text(
                 before_hash["result"], encoding="ascii")
             committed = []
+            registry_refresh_started = False
             try:
                 for key, staged in (("master", staged_master), ("final", staged_final)):
                     temporary = paths[key].with_name(paths[key].stem + ".replay_tmp.xlsx")
@@ -395,6 +396,7 @@ def run(args):
                     finally:
                         temporary.unlink(missing_ok=True)
                     committed.append(key)
+                registry_refresh_started = True
                 p._refresh_sqlite_sku_registry(paths["master"], paths["final"], cfg)
                 if digest(paths["master"]) != digest(staged_master) or digest(paths["final"]) != digest(staged_final):
                     raise RuntimeError("POST_COMMIT_HASH_MISMATCH")
@@ -408,6 +410,16 @@ def run(args):
                         shutil.copy2(backups / paths[key].name, paths[key])
                     except OSError:
                         p.LOG.exception("ROLLBACK FAILED for %s: restore manually from %s", key, backups)
+                if registry_refresh_started:
+                    try:
+                        with closing(sqlite3.connect(backups / paths["classification_db"].name)) as saved, \\
+                             closing(sqlite3.connect(paths["classification_db"])) as destination:
+                            saved.backup(destination)
+                    except (OSError, sqlite3.Error):
+                        p.LOG.exception(
+                            "SQLITE REGISTRY ROLLBACK FAILED: recover manually from %s",
+                            backups,
+                        )
                 raise
         output = {
             "status": "COMMITTED" if args.commit else "STAGED_PASS_NO_WRITES",
