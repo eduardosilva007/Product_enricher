@@ -1,6 +1,8 @@
 """Offline regression: 24 stored outputs are projected into the official Excel only."""
 import json
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -127,6 +129,19 @@ class OfflineTwentyFourReconciliationTests(unittest.TestCase):
             self.assertEqual(ws.cell(2, headers["O que é (Tipo)"]).value, "ENGINE")
         finally:
             book.close()
+
+    def test_direct_cli_invocation_from_outside_repository(self):
+        before = self.final.read_bytes()
+        script = Path(__file__).resolve().parents[1] / "scripts" / "repair_50_classification_to_final.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--repo", str(self.root)],
+            cwd=self.root, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["source_records"], 24)
+        self.assertEqual(data["mode"], "DRY_RUN")
+        self.assertEqual(before, self.final.read_bytes())
 
     def test_wrong_number_of_outputs_is_blocked_without_changes(self):
         before = self.final.read_bytes()
