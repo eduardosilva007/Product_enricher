@@ -59,6 +59,14 @@ def read_result(path, count, rules):
     if p.safe(metrics.get("Pipeline Version")) != p.PIPELINE_VERSION:
         raise RuntimeError("RESULT_PIPELINE_VERSION_CHANGED")
     records = frame.to_dict("records")
+    # JEV proposals must remain in DOUBLE_CHECK; stripped public Final cannot
+    # infer that safely from a missing or stale action.
+    for record in records:
+        if p.safe(record.get("Resolution State")).upper() == "CLASSIFIED_CLEF" and p.safe(record.get("Próxima Ação")).upper() not in {
+            "DOUBLE_CHECK", "AGUARDAR_REVISAO_PRODUTO_CANONICO",
+            "REVISAR_CONFLITO_EQUIVALENCIA",
+        }:
+            raise RuntimeError("UNSAFE_PROPOSAL_MISSING_DOUBLE_CHECK:" + repr((record.get("Marca"),record.get("Modelo"))))
     keys = set()
     for rec in records:
         brand, model = p.safe(rec.get("Marca")), p.safe(rec.get("Modelo"))
