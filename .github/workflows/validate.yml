@@ -29,7 +29,10 @@ jobs:
         run: python -m pip install -r requirements-ci.txt
 
       - name: Compile pipeline and night launcher
-        run: python -m py_compile pipeline_produtos.py scripts/launch_night_output_only.py scripts/audit_overnight_940_eligible.py scripts/check_overnight_940_offline.py
+        run: python -m py_compile pipeline_produtos.py scripts/launch_night_output_only.py scripts/audit_overnight_940_eligible.py scripts/check_overnight_940_offline.py scripts/pilot_50_full_gate.py scripts/replay_locked_classification_offline.py
+
+      - name: Offline 50 SKU and locked Excel replay integration tests
+        run: python -m unittest discover -s tests -p "test_stable_50_and_offline_replay.py" -v
 
       - name: Gate DCA taxonomy regressions first (9 cases)
         run: python -m unittest discover -s tests -p "test_dca_evidence_regression.py" -v
