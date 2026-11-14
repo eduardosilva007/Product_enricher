@@ -62,5 +62,55 @@ class FinalOutputGateTests(unittest.TestCase):
         self.assertTrue(any("REFERENCE_TITLE_NOT_IN_REAL_TITLE" in x for x in errors))
 
 
+    def test_cumulative_public_final_includes_history(self):
+        write_excel(self.source, ["Marca", "Modelo"], [
+            ["STIHL", "FS120"], ["STIHL", "FS120"], ["HONDA", "GX"]])
+        public = ["Marca", "Modelo", "O que é (Tipo)", "Alimentação",
+                  "Category General", "FAMILY", "Título Real", "Próxima Ação",
+                  "Status", "Revisão", "Revisão B.I"]
+        rows = [
+            ["OLD", "OLD1", "DRILL", "BATTERY", "OTHERS", "DRILLERS",
+             "Old drill", "", "Manual", "VALIDADO_MANUAL", "OK"],
+            ["STIHL", "FS120", "BRUSHCUTTER", "PETROL", "PETROL HANDHELD",
+             "PETROL BRUSHCUTTER", "STIHL FS120", "", "Script", "PROVÁVEL", ""],
+            ["HONDA", "GX", "ENGINE", "PETROL", "OTHERS", "ENGINE",
+             "Honda GX", "", "Script", "PROVÁVEL", ""],
+            ["STIHL", "FS120", "BRUSHCUTTER", "PETROL", "PETROL HANDHELD",
+             "PETROL BRUSHCUTTER", "STIHL FS120", "", "Script", "PROVÁVEL", ""],
+        ]
+        write_excel(self.output, public, rows)
+        errors, in_rows, final_rows = validate(self.source, self.output)
+        self.assertEqual((in_rows, final_rows), (3, 4))
+        self.assertEqual(errors, [])
+
+    def test_cumulative_final_still_blocks_missing_duplicate(self):
+        write_excel(self.source, ["Marca", "Modelo"], [
+            ["STIHL", "FS120"], ["STIHL", "FS120"]])
+        write_excel(self.output, ["Marca", "Modelo", "Título Real"], [
+            ["STIHL", "FS120", "One occurrence"],
+            ["OLD", "HISTORY", "Historic row"],
+        ])
+        errors, _, _ = validate(self.source, self.output)
+        self.assertTrue(any("KEY_MULTIPLICITY" in x for x in errors))
+
+    def test_exact_pair_not_structural_alias(self):
+        write_excel(self.source, ["Marca", "Modelo"], [["STIHL", "FS-120"]])
+        write_excel(self.output, ["Marca", "Modelo", "Título Real"], [
+            ["STIHL", "FS120", "Different model"]])
+        errors, _, _ = validate(self.source, self.output)
+        self.assertTrue(any("KEY_MULTIPLICITY" in x for x in errors))
+
+    def test_historical_unresolved_reference_outside_input_is_ignored(self):
+        write_excel(self.source, ["Marca", "Modelo"], [["STIHL", "FS120"]])
+        write_excel(self.output, ["Marca", "Modelo", "Título Referência",
+                                   "Título Real"], [
+            ["OLD", "HISTORY", "Historic observed title", ""],
+            ["STIHL", "FS120", "", "Confirmed STIHL FS120"],
+        ])
+        errors, _, _ = validate(self.source, self.output)
+        self.assertEqual(errors, [])
+
+
+
 if __name__ == "__main__":
     unittest.main()
