@@ -64,6 +64,18 @@ jobs:
       - name: Gate DCA taxonomy regressions first on Windows (9 cases)
         run: python -m unittest discover -s tests -p "test_dca_evidence_regression.py" -v
 
+      - name: Verify bulk night PowerShell syntax (no execution or APIs)
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path "scripts/run_bulk_full_night.ps1").Path, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+          Write-Output "BULK_NIGHT_POWERSHELL_SYNTAX_PASS"
+
       - name: Verify canonical SKU registry and SQLite cleanup on Windows
         run: python -m unittest discover -s tests -p "test_sqlite*.py" -v
 
