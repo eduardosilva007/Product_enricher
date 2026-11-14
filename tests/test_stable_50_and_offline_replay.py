@@ -219,13 +219,48 @@ class New50PilotTests(unittest.TestCase):
                     execute(argparse.Namespace(manifest=str(manifests[0]),confirm=""))
                 popen.assert_not_called()
 
-    def test_1030_input_does_not_masquerade_as_19k(self):
+    def test_configured_input_1030_selects_fifty_without_alternate_source(self):
         with TemporaryDirectory() as d:
             cfg, master, final, cache, db, inp, result=local_fixture(d,input_count=1030)
-            args=argparse.Namespace(config=str(cfg),source=str(inp),count=50,
+            args=argparse.Namespace(config=str(cfg),source="",count=50,
                                     max_calls=65,max_tokens=350000)
-            with self.assertRaisesRegex(RuntimeError,"PILOT_SOURCE_TOO_SMALL"):
+            with redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(prepare(args),0)
+            self.assertIn("PILOT_50_PREPARED_NO_APIS",output.getvalue())
+            manifests=list((Path(d)/"pilotos").glob("*/manifest.json"))
+            self.assertEqual(len(manifests),1)
+            m=json.loads(manifests[0].read_text(encoding="utf-8"))
+            self.assertEqual(m["readiness"]["source_rows"],1030)
+            self.assertEqual(m["source"],str(inp))
+            self.assertEqual(len(m["selected"]),50)
+
+    def test_only_forty_nine_valid_input_skus_fail_without_api(self):
+        with TemporaryDirectory() as d:
+            cfg, master, final, cache, db, inp, result=local_fixture(d,input_count=49)
+            args=argparse.Namespace(config=str(cfg),source="",count=50,
+                                    max_calls=65,max_tokens=350000)
+            with self.assertRaisesRegex(RuntimeError,"PILOT_INPUT_INSUFFICIENT"):
                 prepare(args)
+            self.assertFalse((Path(d)/"pilotos").exists())
+
+    def test_fifty_unseen_skus_required_no_repeat_spending(self):
+        with TemporaryDirectory() as d:
+            cfg, master, final, cache, db, inp, result=local_fixture(d,input_count=1030)
+            writer=p.TavilyWritableStore(cache)
+            try:
+                for i in range(1030):
+                    writer.put("BRAND",f"SKU-{i:05d}",{
+                        "results":[{"title": "Synthetic old data"}],
+                        "_collection":{"state":"NO_TARGET_EVIDENCE"},
+                    })
+            finally:
+                writer.close()
+            args=argparse.Namespace(config=str(cfg),source="",count=50,
+                                    max_calls=65,max_tokens=350000)
+            with self.assertRaisesRegex(RuntimeError,
+                                         "PILOT_FRESH_COHORT_INSUFFICIENT"):
+                prepare(args)
+            self.assertFalse((Path(d)/"pilotos").exists())
 
 
 
