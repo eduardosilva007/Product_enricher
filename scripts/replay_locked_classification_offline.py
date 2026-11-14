@@ -34,7 +34,107 @@ def digest(path):
     return h.hexdigest()
 
 
-def read_result(path, count, rules):
+def verify_failed_sqlite_run(db_path, result_path, metrics, records, rules):
+    """Fail-closed provenance for a lost/blank Excel failure marker.
+
+    The Excel may have been copied after a locked run. Require the exact
+    ordered cohort hash, the matching FAILED run from SQLite, no intervening
+    classification, a bounded file timestamp, and many exact checkpoints.
+    Never infer recovery eligibility merely from identical row counts.
+    """
+    from datetime import datetime, timezone, timedelta
+    path = Path(db_path)
+    if not path.is_file():
+        raise RuntimeError("SQLITE_LOCKED_RUN_PROVENANCE_DB_MISSING")
+    keys = [p.business_key(p.safe(x.get("Marca")), p.safe(x.get("Modelo")))
+            for x in records]
+    fingerprint = hashlib.sha256("\\n".join(keys).encode("utf-8")).hexdigest()[:12]
+    if p.safe(metrics.get("Pilot Cohort Hash")) != fingerprint:
+        raise RuntimeError("SQLITE_LOCKED_RUN_COHORT_HASH_MISMATCH")
+    file_time = datetime.fromtimestamp(Path(result_path).stat().st_mtime,
+                                       tz=timezone.utc)
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RuntimeError("SQLITE_LOCKED_RUN_DB_CORRUPT")
+        rows = db.execute(
+            "SELECT run_id,started_at,finished_at,status,mode,pipeline_version,"
+            "rules_hash,note FROM runs WHERE mode IN ('classify','full','recover') "
+            "ORDER BY started_at DESC LIMIT 30").fetchall()
+        matches = []
+        for entry in rows:
+            rid, started, finished, status, mode, version, rhash, note = entry
+            if (status != "FAILED" or mode != "classify"
+                    or version != p.PIPELINE_VERSION or rhash != rules.hash
+                    or "BASELINE_FILE_LOCKED" not in (note or "")
+                    or not finished):
+                continue
+            try:
+                started_at = datetime.fromisoformat(started).astimezone(timezone.utc)
+                finished_at = datetime.fromisoformat(finished).astimezone(timezone.utc)
+            except (ValueError, TypeError):
+                continue
+            # Excel regeneration outside the failed-run window is ambiguous.
+            if started_at <= file_time <= finished_at + timedelta(minutes=30):
+                matches.append((rid, started_at, finished_at))
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"SQLITE_LOCKED_RUN_PROVENANCE_NOT_UNIQUE: matches={len(matches)}"
+            )
+        _, started_at, finished_at = matches[0]
+        for entry in rows:
+            started = entry[1]
+            if not started or entry[0] == matches[0][0]:
+                continue
+            try:
+                when = datetime.fromisoformat(started).astimezone(timezone.utc)
+            except ValueError:
+                continue
+            if finished_at < when <= file_time:
+                raise RuntimeError("SQLITE_LOCKED_RUN_NEWER_EXECUTION_DETECTED")
+        # Confirm that the workbook actually agrees with saved SQLite
+        # classification checkpoints. The earlier run recorded 219 hits;
+        # require substantive per-SKU overlap rather than trusting a timestamp.
+        known = {}
+        for brand, model, body in db.execute(
+            "SELECT brand,model,result_json FROM classification_results "
+            "WHERE rules_hash=? AND pipeline_version=?",
+            (rules.hash, p.PIPELINE_VERSION),
+        ):
+            try:
+                parsed = json.loads(body)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(parsed, dict):
+                known.setdefault((p.safe(brand), p.safe(model)), []).append(parsed)
+        checked = 0
+        conflicted = []
+        core = ("Resolution State", "O que é (Tipo)",
+                "Category General", "FAMILY")
+        for record in records:
+            pair = (p.safe(record.get("Marca")), p.safe(record.get("Modelo")))
+            matches_at_pair = known.get(pair, ())
+            if not matches_at_pair:
+                continue
+            if any(all(p.safe(saved.get(col)) == p.safe(record.get(col))
+                       for col in core) for saved in matches_at_pair):
+                checked += 1
+            else:
+                conflicted.append(pair)
+        required = min(50, max(1, len(records) // 4))
+        if conflicted:
+            raise RuntimeError(
+                "SQLITE_LOCKED_RUN_CHECKPOINT_CONFLICT:" + repr(conflicted[:5])
+            )
+        if checked < required:
+            raise RuntimeError(
+                f"SQLITE_LOCKED_RUN_CHECKPOINT_COVERAGE_LOW:{checked}<{required}"
+            )
+    return {"source": "FAILED_SQLITE_RUN_WITH_COHORT_AND_CHECKPOINTS",
+            "matched_checkpoints": checked, "cohort_hash": fingerprint,
+            "run_id": matches[0][0]}
+
+
+def read_result(path, count, rules, db_path=None):
     import pandas as pd
     with pd.ExcelFile(path) as xls:
         if not {"Resultados", "Resumo"}.issubset(set(xls.sheet_names)):
@@ -49,16 +149,29 @@ def read_result(path, count, rules):
         raise RuntimeError("RESULT_BUSINESS_SCHEMA_INVALID")
     if not {"Métrica", "Valor"}.issubset(summary.columns):
         raise RuntimeError("RESULT_SUMMARY_INVALID")
-    metrics = {p.safe(x["Métrica"]): x["Valor"] for _, x in summary.iterrows()}
+    # Excel summary labels may be rendered in a legacy console codepage.
+    # Use the first two physical columns; do not rely on a Unicode header
+    # being typed correctly into a Windows PowerShell here-string.
+    if summary.shape[1] < 2:
+        raise RuntimeError("RESULT_SUMMARY_ONLY_ONE_COLUMN")
+    metrics = {p.safe(row.iloc[0]): row.iloc[1] for _, row in summary.iterrows()}
     if int(metrics.get("cohort_size", -1)) != count:
         raise RuntimeError("RESULT_COHORT_SIZE_MISMATCH")
-    if "BASELINE_FILE_LOCKED" not in p.safe(metrics.get("Baseline Warning")):
-        raise RuntimeError("RESULT_NOT_FAILED_BY_EXCEL_LOCK")
     if p.safe(metrics.get("Rules Hash")) != rules.hash:
         raise RuntimeError("RESULT_RULES_HASH_CHANGED")
     if p.safe(metrics.get("Pipeline Version")) != p.PIPELINE_VERSION:
         raise RuntimeError("RESULT_PIPELINE_VERSION_CHANGED")
     records = frame.to_dict("records")
+    if "BASELINE_FILE_LOCKED" not in p.safe(metrics.get("Baseline Warning")):
+        if db_path is None:
+            raise RuntimeError("RESULT_NOT_FAILED_BY_EXCEL_LOCK")
+        evidence = verify_failed_sqlite_run(db_path, path, metrics, records, rules)
+        p.LOG.info(
+            "RECOVERY SOURCE VERIFIED IN SQLITE | run=%s | cohort=%s | "
+            "checkpoint_matches=%d | 0 APIs",
+            evidence["run_id"], evidence["cohort_hash"],
+            evidence["matched_checkpoints"],
+        )
     # JEV proposals must remain in DOUBLE_CHECK; stripped public Final cannot
     # infer that safely from a missing or stale action.
     for record in records:
@@ -159,7 +272,9 @@ def run(args):
         if not path.is_file():
             raise RuntimeError(f"REPLAY_FILE_MISSING:{name}:{path}")
 
-    source_rows, cohort = read_result(result, args.expected_rows, rules)
+    source_rows, cohort = read_result(
+        result, args.expected_rows, rules, db_path=paths["classification_db"]
+    )
     before_hash = {key: digest(paths[key]) for key in ("master", "final", "cache", "classification_db")}
     before_hash["result"] = digest(result)
     audit_dir = root / "auditorias"
