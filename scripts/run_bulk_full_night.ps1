@@ -152,7 +152,7 @@ for ($lot=1; $lot -le $MaxBatches; $lot++) {
         '--max-items', [string]$ClassifyPerBatch,
         '--max-api-calls', [string]$callsLimit,
         '--max-tokens', [string]$tokenLimit,
-        '--recollect-empty','--yes'
+        '--yes'  # Previously consulted RAW_EMPTY is skipped, not recollected.
     )
     # Python's logging uses stderr; avoid PowerShell 5.1 treating log lines as terminating errors.
     $ErrorActionPreference='Continue'
