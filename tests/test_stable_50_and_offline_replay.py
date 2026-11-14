@@ -65,6 +65,7 @@ class OfflineReplayTests(unittest.TestCase):
                    "FAMILY":"DRILLERS", "Título Real":"Brand drill"},
                   {"Marca":"BRAND","Modelo":"SKU-00001",
                    "Resolution State":"CLASSIFIED_CLEF","Review Required":"SIM",
+                   "Próxima Ação":"DOUBLE_CHECK",
                    "Classification Identity":"PROBABLE",
                    "O que é (Tipo)":"DRILL", "Category General":"OTHERS",
                    "FAMILY":"DRILLERS", "Título Real":"Brand drill 2"}]
