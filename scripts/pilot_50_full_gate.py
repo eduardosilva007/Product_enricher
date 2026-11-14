@@ -149,7 +149,7 @@ def prepare(args):
         "fresh":metrics,
         "limits":{"Search":args.count,"JEV HTTP":args.max_calls,
                   "JEV tokens":args.max_tokens},
-        "next_command":f'& "C:\\p\\venv\\Scripts\\python.exe" .\\scripts\\pilot_50_full_gate.py execute --manifest "{manifest_path}"',
+        "next_command":f'& "C:\\p\\venv\\Scripts\\python.exe" .\\scripts\\pilot_50_full_gate.py execute --manifest "{manifest_path}" --confirm EXECUTAR_50',
     },ensure_ascii=False,indent=2))
     return 0
 
