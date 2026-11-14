@@ -18,6 +18,7 @@ param(
     [int]$TotalSearchBudget = 19000,
     [int]$TotalCallsBudget = 14000,
     [int]$TotalTokensBudget = 30000000,
+    [string]$PilotReport = "",
     [switch]$ExecuteLive
 )
 $ErrorActionPreference = 'Stop'
@@ -57,8 +58,25 @@ Write-Host "ENTRADA: $inputAbs"
 Write-Host 'Cada lote realiza coleta -> classificação -> gravação -> validação; falha bloqueia os seguintes.'
 Write-Host 'A revisão humana continua obrigatória para PROVÁVEL / DOUBLE_CHECK.'
 if (-not $ExecuteLive) {
-    Write-Host 'DRY_RUN_PASS: 0 APIs, 0 arquivos oficiais alterados. Adicione -ExecuteLive para iniciar.'
+    Write-Host 'DRY_RUN_PASS: 0 APIs, 0 arquivos oficiais alterados. Para iniciar é obrigatório um piloto de 50 aprovado.'
     exit 0
+}
+if (-not $PilotReport) {
+    throw 'MASS_RUN_BLOCKED: informe -PilotReport do piloto de 50, com 10 revisões humanas OK.'
+}
+if (-not (Test-Path -LiteralPath $PilotReport -PathType Leaf)) {
+    throw "MASS_RUN_BLOCKED_PILOT_REPORT_NOT_FOUND: $PilotReport"
+}
+& $py ".\\tools\\verify_pilot_50_release.py" --report $PilotReport --source $inputAbs
+if ($LASTEXITCODE -ne 0) {
+    throw 'MASS_RUN_BLOCKED: piloto de 50 nao comprovado integralmente.'
+}
+# Excel lock check before ANY paid call, including historical 1030 and Final.
+foreach ($name in @([string]$config.files.master,[string]$config.files.final)) {
+    $file = Join-Path $root $name
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "BASELINE_NOT_FOUND: $file" }
+    $handle = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    $handle.Dispose()
 }
 # Snapshot immutable workbooks and consistent SQLite backups BEFORE any paid request.
 $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
