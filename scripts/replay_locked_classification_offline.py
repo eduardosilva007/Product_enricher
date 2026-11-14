@@ -412,9 +412,9 @@ def run(args):
                         p.LOG.exception("ROLLBACK FAILED for %s: restore manually from %s", key, backups)
                 if registry_refresh_started:
                     try:
-                        with closing(sqlite3.connect(backups / paths["classification_db"].name)) as saved, \\
-                             closing(sqlite3.connect(paths["classification_db"])) as destination:
-                            saved.backup(destination)
+                        with closing(sqlite3.connect(backups / paths["classification_db"].name)) as saved:
+                            with closing(sqlite3.connect(paths["classification_db"])) as destination:
+                                saved.backup(destination)
                     except (OSError, sqlite3.Error):
                         p.LOG.exception(
                             "SQLITE REGISTRY ROLLBACK FAILED: recover manually from %s",
