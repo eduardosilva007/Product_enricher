@@ -7933,9 +7933,20 @@ def _manual_review_bundle(raw: RawEvidence) -> Dict[str, str]:
     audits = {_url_key(r.get("url", "")): r for r in (coll.get("source_audit") or [])
               if isinstance(r, dict) and _url_key(r.get("url", ""))}
     evidence = [r for r in (coll.get("evidence_cache") or []) if isinstance(r, dict)]
+    curated = [r for r in (coll.get("curated_results") or []) if isinstance(r, dict)]
     evidence_by_url = {_url_key(r.get("url", "")): r for r in evidence if _url_key(r.get("url", ""))}
     rows = []
-    source = results[:10] if results else evidence[:10]
+    # The prior results[:10] branch ignored usable curated/evidence titles
+    # whenever at least one RAW result existed. Preserve the raw title
+    # inventory and include curated/evidence titles as fallbacks.
+    source = []
+    seen_sources = set()
+    for item in results[:10] + curated[:10] + evidence[:10]:
+        fingerprint = (_url_key(item.get("url", "")), safe(item.get("title")))
+        if fingerprint in seen_sources:
+            continue
+        seen_sources.add(fingerprint)
+        source.append(item)
     for n, item in enumerate(source, 1):
         url = safe(item.get("url"))
         ev = evidence_by_url.get(_url_key(url), item if not results else {})
@@ -8985,12 +8996,13 @@ def _export_base_final(
                                   "Título Referência Identity"):
                         if not safe(rec.get(field)) and bundle.get(field):
                             out.at[idx, field] = bundle[field]
-                    # Título Real só recebe referência com identidade comprovada.
-                    # Outros títulos permanecem visíveis em Título Referência/Fontes.
-                    identity = safe(bundle.get("Título Referência Identity")).upper()
-                    decision = safe(bundle.get("Qualidade Referência")).upper()
-                    if (not safe(rec.get("Título Real")) and identity == "STRONG"
-                            and not decision.startswith("REJECT")
+                    # Operational visibility: the public Final must retain
+                    # a found Search title even on REVIEW_CACHE_EVIDENCE.
+                    # Weak/rejected titles remain a *reference*, not proof of
+                    # the physical SKU: classification/status are unchanged and
+                    # identity/decision stay in Master/SQLite for audit.
+                    # Never overwrite a previously recorded actual title.
+                    if (not safe(rec.get("Título Real"))
                             and safe(bundle.get("Título Referência"))):
                         out.at[idx, "Título Real"] = bundle["Título Referência"]
                         if not safe(rec.get("Fonte URL")):
@@ -9263,8 +9275,10 @@ def _hydrate_input_collection_from_cache(
                     master_df.at[idx, "Título Referência Identity"] = identity
             if title:
                 stats["cache_reference_titles"] += 1
-                if (identity == "STRONG" and not decision.startswith("REJECT")
-                        and not safe(old.get("Título Real"))):
+                # Preserve the collected title even for REVIEW. The source
+                # identity/decision remains in the technical Master columns;
+                # filling a title NEVER approves or classifies the SKU.
+                if not safe(old.get("Título Real")):
                     master_df.at[idx, "Título Real"] = title
                     if not safe(old.get("Fonte URL")):
                         master_df.at[idx, "Fonte URL"] = safe(
