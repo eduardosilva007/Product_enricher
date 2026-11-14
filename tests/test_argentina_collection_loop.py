@@ -189,7 +189,7 @@ class CollectionAutoProviderTests(unittest.TestCase):
                  patch.object(p,"search_product_once",return_value=payload) as search, \
                  patch.object(p,"TavilyWritableStore"), \
                  patch.object(p,"_export_collection_quality_report"), \
-                 patch("builtins.input",return_value="S"):
+                 patch("builtins.input",side_effect=["S", "CONFIRMAR"]):
                 self.assertTrue(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
                 self.assertEqual(build.call_count,2)
                 self.assertTrue(build.call_args.kwargs["recollect_empty"])
