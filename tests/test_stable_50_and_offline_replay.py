@@ -46,6 +46,7 @@ def local_fixture(root, *, input_count=2):
         "cache":cache.name,"classification_db":db.name,
         "output":result.name,
         "collection_report":"Coleta.xlsx",
+        "collection_policy":"collection_quality_policy.json",
     }}
     cfg_file = root / "pipeline_config.json"
     cfg_file.write_text(json.dumps(config),encoding="utf-8")
