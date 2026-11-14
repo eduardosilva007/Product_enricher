@@ -64,47 +64,47 @@ def verify_failed_sqlite_run(db_path, result_path, metrics, records, rules):
         # necessarily of the older failed run. A later completed run can
         # overwrite Classificacao_v3.xlsx while keeping the same 338 rows.
         # Pair the actual file timestamp with the nearest matching SQLite run.
-        candidates = []
+        contemporary = []
         for entry in rows:
             rid, started, finished, status, mode, version, rhash, note = entry
-            if (mode != "classify" or version != p.PIPELINE_VERSION
-                    or rhash != rules.hash or not finished):
+            if mode != "classify" or not finished:
                 continue
             try:
                 started_at = datetime.fromisoformat(started).astimezone(timezone.utc)
                 finished_at = datetime.fromisoformat(finished).astimezone(timezone.utc)
             except (ValueError, TypeError):
                 continue
-            if not (started_at <= file_time <= finished_at + timedelta(minutes=30)):
-                continue
-            # A successful later run has its full summary in the SQLite note.
-            if status == "COMPLETED":
-                try:
-                    saved_summary = json.loads(note or "{}")
-                except (TypeError, ValueError):
-                    continue
-                if (p.safe(saved_summary.get("Pilot Cohort Hash")) != fingerprint
-                        or int(saved_summary.get("Elegíveis", -1)) != len(records)):
-                    continue
-            elif status == "FAILED" and "BASELINE_FILE_LOCKED" in (note or ""):
-                pass
-            else:
-                # Other failures, incomplete runs, or warnings are not
-                # sufficient evidence to replay a workbook safely.
-                continue
-            candidates.append((rid, started_at, finished_at, status))
-        if not candidates:
+            if started_at <= file_time <= finished_at + timedelta(minutes=30):
+                contemporary.append((rid, started_at, finished_at, status, version,
+                                     rhash, note))
+        if not contemporary:
+            raise RuntimeError("SQLITE_RESULT_PROVENANCE_NOT_FOUND: no contemporaneous classify run")
+        contemporary.sort(key=lambda item: (item[1], item[2]), reverse=True)
+        rid, started_at, finished_at, source_status, version, rhash, note = contemporary[0]
+        # IMPORTANT: Do not fall back to an older Excel-lock incident if a
+        # newer run wrote the same output pathname. Validate the LATEST run.
+        if version != p.PIPELINE_VERSION or rhash != rules.hash:
+            raise RuntimeError("SQLITE_RESULT_LATEST_RUN_RULES_OR_VERSION_CHANGED")
+        if source_status == "COMPLETED":
+            try:
+                saved_summary = json.loads(note or "{}")
+                same_cohort = (
+                    p.safe(saved_summary.get("Pilot Cohort Hash")) == fingerprint
+                    and int(saved_summary.get("Elegíveis", -1)) == len(records)
+                )
+            except (TypeError, ValueError):
+                same_cohort = False
+            if not same_cohort:
+                raise RuntimeError("SQLITE_RESULT_LATEST_COMPLETED_RUN_COHORT_MISMATCH")
+        elif source_status == "FAILED" and (
+                "BASELINE_PERSISTENCE_FAILED" in (note or "")
+                or "BASELINE_FILE_LOCKED" in (note or "")):
+            pass
+        else:
             raise RuntimeError(
-                "SQLITE_RESULT_PROVENANCE_NOT_FOUND: no matching completed or "
-                "Excel-locked classification run for the workbook timestamp"
+                f"SQLITE_RESULT_LATEST_RUN_NOT_REPLAYABLE: status={source_status}"
             )
-        # If the workbook was rewritten by a later successful classification,
-        # use that completed run's *full cohort hash*, not an older failed run.
-        # A failed run's timestamp alone is never sufficient without the
-        # exact checkpoint comparisons below.
-        candidates.sort(key=lambda item: (item[1], item[2]), reverse=True)
-        selected = candidates[0]
-        _, started_at, finished_at, source_status = selected
+        selected = (rid, started_at, finished_at, source_status)
         # Confirm that the workbook actually agrees with saved SQLite
         # classification checkpoints. The earlier run recorded 219 hits;
         # require substantive per-SKU overlap rather than trusting a timestamp.
@@ -145,7 +145,7 @@ def verify_failed_sqlite_run(db_path, result_path, metrics, records, rules):
             )
     return {"source": ("SQLITE_COMPLETED_RUN_AND_CHECKPOINTS"
                        if source_status == "COMPLETED"
-                       else "SQLITE_FAILED_EXCEL_LOCK_AND_CHECKPOINTS"),
+                       else "SQLITE_FAILED_BASELINE_AND_CHECKPOINTS"),
             "matched_checkpoints": checked, "cohort_hash": fingerprint,
             "run_id": selected[0], "run_status": source_status,
             "newer_snapshot": source_status == "COMPLETED"}
