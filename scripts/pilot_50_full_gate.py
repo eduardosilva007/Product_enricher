@@ -180,6 +180,8 @@ def inspect_final(paths, selected, before_accept, before_bi, result_file):
     source_titles = 0
     missing_title = []
     cache_states = Counter()
+    cache_titles = {}
+    cache_decisions = {}
     with closing(p.TavilyReadOnlyStore(paths["cache"])) as store:
         for pair in wanted:
             raw = store.get(*pair)
@@ -187,7 +189,12 @@ def inspect_final(paths, selected, before_accept, before_bi, result_file):
             if raw.state not in {"RAW_OK","RAW_OK_MERGED","RAW_EMPTY"}:
                 raise RuntimeError("PILOT_MISSING_SEARCH_ATTEMPT:" + repr(pair))
             if raw.state in {"RAW_OK","RAW_OK_MERGED"}:
-                title = p.safe(p._manual_review_bundle(raw).get("Título Referência"))
+                bundle = p._manual_review_bundle(raw)
+                title = p.safe(bundle.get("Título Referência"))
+                cache_titles[pair] = title
+                cache_decisions[pair] = (p.safe(bundle.get("Título Referência Identity")),
+                                         p.safe(bundle.get("Qualidade Referência")),
+                                         p.safe(bundle.get("Fonte Referência URL")))
                 if title:
                     source_titles += 1
                     if not any(p.safe(row.get("Título Real")) for row in final_lookup.get(pair,[])):
@@ -217,6 +224,45 @@ def inspect_final(paths, selected, before_accept, before_bi, result_file):
             mismatches.append(pair)
     if mismatches:
         raise RuntimeError("PILOT_RESULT_BASELINE_CONFLICT:" + repr(mismatches[:8]))
+
+    # Independent physical 50-row QA workbook, including a fixed 10-SKU
+    # human-review sample. No changes to Final/Consolidado.
+    qa_rows = []
+    result_by_pair = {(p.safe(x.get("Marca")),p.safe(x.get("Modelo"))):x for x in records}
+    for pair in sorted(wanted):
+        final_row = final_lookup.get(pair,[{}])[0]
+        source = result_by_pair.get(pair,{})
+        identity, decision, url = cache_decisions.get(pair,("","",""))
+        qa_rows.append({
+            "Marca":pair[0], "Modelo":pair[1],
+            "Título Search":cache_titles.get(pair,""),
+            "Título Real na Base Final":p.safe(final_row.get("Título Real")),
+            "Identidade da Fonte":identity,"Decisão da Fonte":decision,
+            "URL da Fonte":url,
+            "O que é (Tipo)":p.safe(final_row.get("O que é (Tipo)")),
+            "Alimentação":p.safe(final_row.get("Alimentação")),
+            "Category General":p.safe(final_row.get("Category General")),
+            "FAMILY":p.safe(final_row.get("FAMILY")),
+            "Revisão":p.safe(final_row.get("Revisão")),
+            "Próxima Ação":p.safe(final_row.get("Próxima Ação")),
+            "Resolution State":p.safe(source.get("Resolution State")),
+            "Auditoria Manual (OK/ERRO)": "",
+        })
+    by_review = defaultdict(list)
+    for row in qa_rows:
+        by_review[row["Revisão"]].append(row)
+    sample = []
+    for label in ("AUTO_APROVADO", "PROVÁVEL", "REVISAR", "PENDENTE_CLASSIFICACAO"):
+        sample.extend(by_review[label][:3])
+    picked = {(x["Marca"],x["Modelo"]) for x in sample}
+    sample = sample[:10]
+    picked = {(x["Marca"],x["Modelo"]) for x in sample}
+    sample.extend([x for x in qa_rows if (x["Marca"],x["Modelo"]) not in picked][:10-len(sample)])
+    quality_path = Path(input_50).parent / "pilot_50_quality_review.xlsx"
+    with pd.ExcelWriter(quality_path,engine="openpyxl") as writer:
+        pd.DataFrame(sample).to_excel(writer,sheet_name="Amostra_10_Validar",index=False)
+        pd.DataFrame(qa_rows).to_excel(writer,sheet_name="Todos_50",index=False)
+
     return {"final_rows":output_rows,"search_cache_states":dict(cache_states),
             "complete_classifications":completed,"auto_accepted":accepted,
             "review_or_partial_results":partial,
@@ -225,7 +271,8 @@ def inspect_final(paths, selected, before_accept, before_bi, result_file):
             "result_rows":len(records),
             "prior_accepted_preserved":len(before_accept),
             "bi_locks_preserved":len(before_bi),
-            "complete_rate_of_fifty":round(completed/50,3)}
+            "complete_rate_of_fifty":round(completed/50,3),
+            "quality_review_file":str(quality_path)}
 
 
 def execute(args):
