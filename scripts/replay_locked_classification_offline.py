@@ -125,6 +125,11 @@ def verify_failed_sqlite_run(db_path, result_path, metrics, records, rules):
         core = ("Resolution State", "O que é (Tipo)",
                 "Category General", "FAMILY")
         for record in records:
+            # Historical completed checkpoints must NOT invalidate a more
+            # recent unresolved/review decision for the same business key.
+            if p.safe(record.get("Resolution State")).upper() not in {
+                    "RESOLVED", "CLASSIFIED_CLEF"}:
+                continue
             pair = (p.safe(record.get("Marca")), p.safe(record.get("Modelo")))
             matches_at_pair = known.get(pair, ())
             if not matches_at_pair:
