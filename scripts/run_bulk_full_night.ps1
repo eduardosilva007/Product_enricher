@@ -71,6 +71,9 @@ foreach ($name in @([string]$config.files.master,[string]$config.files.final)) {
     Copy-Item -LiteralPath $src -Destination (Join-Path $backup ([IO.Path]::GetFileName($src))) -ErrorAction Stop
 }
 Copy-Item -LiteralPath $inputAbs -Destination (Join-Path $backup 'input_original.xlsx') -ErrorAction Stop
+# Operate against a frozen copy; later edits to the source workbook cannot
+# silently change the cohort after a paid overnight batch has started.
+$frozenInput = Join-Path $backup 'input_original.xlsx'
 $sqliteSnapshot = @'
 import sqlite3,sys
 from pathlib import Path
@@ -144,7 +147,7 @@ for ($lot=1; $lot -le $MaxBatches; $lot++) {
     Write-Host "LOTE $n | search_cap=$searchLimit | classificacao_max=$ClassifyPerBatch | jev_cap=$callsLimit | tokens_cap=$tokenLimit"
     $cmd = @(
         '.\pipeline_produtos.py', '--mode', 'full',
-        '--input', $inputAbs, '--search-provider','tavily','--llm-provider','jev',
+        '--input', $frozenInput, '--search-provider','tavily','--llm-provider','jev',
         '--max-search-new', [string]$searchLimit,
         '--max-items', [string]$ClassifyPerBatch,
         '--max-api-calls', [string]$callsLimit,
@@ -180,6 +183,38 @@ for ($lot=1; $lot -le $MaxBatches; $lot++) {
     $jsonText = & $py -c $summaryCode $resPath
     if ($LASTEXITCODE -ne 0) { throw 'RESULT_SUMMARY_UNREADABLE' }
     $metrics = $jsonText | ConvertFrom-Json
+    # Verify every complete classified SKU against the actual public Final,
+    # not merely against a successful subprocess return code.
+    $verifyFinal = @'
+import sys
+import pandas as pd
+import pipeline_produtos as p
+results=pd.read_excel(sys.argv[1],sheet_name="Resultados",dtype=object,keep_default_na=False)
+final,_=p._read_business_sheet(__import__("pathlib").Path(sys.argv[2]))
+pairs={}
+for _,x in final.iterrows():
+    pair=(p.safe(x.get("Marca")),p.safe(x.get("Modelo")))
+    pairs.setdefault(pair,[]).append(x)
+errors=[]
+checked=0
+for _,x in results.iterrows():
+    if p.safe(x.get("Resolution State")).upper() not in {"RESOLVED","CLASSIFIED_CLEF"}:
+        continue
+    cols=("O que é (Tipo)","Category General","FAMILY")
+    if not all(p.safe(x.get(col)) for col in cols):
+        continue
+    pair=(p.safe(x.get("Marca")),p.safe(x.get("Modelo")))
+    checked+=1
+    if not any(all(p.safe(v.get(col))==p.safe(x.get(col)) for col in cols)
+               for v in pairs.get(pair,[])):
+        errors.append(pair)
+print(f"POST_LOT_FINAL_INTEGRITY | complete={checked} | missing_or_conflicted={len(errors)}")
+if errors:
+    print("EXAMPLES:",errors[:8])
+    raise SystemExit(2)
+'@
+    $verifyFinal | & $py - $resPath (Join-Path $root ([string]$config.files.final))
+    if ($LASTEXITCODE -ne 0) { throw "POST_LOT_FINAL_INTEGRITY_FAILED: $log" }
     if ($metrics.calls -lt 0 -or $metrics.calls -gt $callsLimit -or
         $metrics.tokens -lt 0 -or $metrics.tokens -gt $tokenLimit) {
         throw 'OBSERVED_LLM_BUDGET_EXCEEDED'
