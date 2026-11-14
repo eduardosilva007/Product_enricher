@@ -48,7 +48,7 @@ def verify_failed_sqlite_run(db_path, result_path, metrics, records, rules):
         raise RuntimeError("SQLITE_LOCKED_RUN_PROVENANCE_DB_MISSING")
     keys = [p.business_key(p.safe(x.get("Marca")), p.safe(x.get("Modelo")))
             for x in records]
-    fingerprint = hashlib.sha256("\\n".join(keys).encode("utf-8")).hexdigest()[:12]
+    fingerprint = hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()[:12]
     if p.safe(metrics.get("Pilot Cohort Hash")) != fingerprint:
         raise RuntimeError("SQLITE_LOCKED_RUN_COHORT_HASH_MISMATCH")
     file_time = datetime.fromtimestamp(Path(result_path).stat().st_mtime,
