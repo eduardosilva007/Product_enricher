@@ -91,6 +91,72 @@ class OfflineReplayTests(unittest.TestCase):
             self.assertEqual(status,0)
             self.assertEqual(before,{x.name:sha(x) for x in (master,final,cache,db,result)})
 
+    def test_excel_warning_missing_can_be_proven_by_exact_failed_sqlite_run(self):
+        import sqlite3
+        from datetime import datetime, timezone, timedelta
+
+        with TemporaryDirectory() as d:
+            cfg, master, final, cache, db, inp, result = local_fixture(d)
+            rules = p.Rules(Path(p.__file__).with_name("regras_negocio.json"))
+            records = [
+                {"Marca": "BRAND", "Modelo": f"SKU-{i:05d}",
+                 "Resolution State": "RESOLVED",
+                 "Review Required": "NÃO", "Classification Identity": "STRONG",
+                 "O que é (Tipo)": "DRILL", "Category General": "OTHERS",
+                 "FAMILY": "DRILLERS", "Título Real": f"Brand drill {i}",
+                 "Próxima Ação": "CONCLUIDO"}
+                for i in range(4)
+            ]
+            keylines = "\\n".join(
+                p.business_key(x["Marca"], x["Modelo"]) for x in records)
+            cohort_hash = hashlib.sha256(keylines.encode("utf-8")).hexdigest()[:12]
+            summary = {
+                "cohort_size": 4,
+                "Pilot Cohort Hash": cohort_hash,
+                "Rules Hash": rules.hash,
+                "Pipeline Version": p.PIPELINE_VERSION,
+                "Baseline Warning": "",
+            }
+            with pd.ExcelWriter(result) as writer:
+                pd.DataFrame(records).to_excel(writer, sheet_name="Resultados", index=False)
+                pd.DataFrame([{"Métrica": k, "Valor": v}
+                              for k, v in summary.items()]).to_excel(
+                    writer, sheet_name="Resumo", index=False)
+
+            now = datetime.now(timezone.utc)
+            with sqlite3.connect(db) as conn:
+                conn.execute(
+                    "INSERT INTO runs(run_id,started_at,finished_at,status,mode,"
+                    "pipeline_version,rules_hash,model,note)"
+                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("run_locked", (now - timedelta(minutes=4)).isoformat(),
+                     (now - timedelta(minutes=2)).isoformat(), "FAILED",
+                     "classify", p.PIPELINE_VERSION, rules.hash,
+                     "jev:jev-latest",
+                     "BASELINE_PERSISTENCE_FAILED: PermissionError: BASELINE_FILE_LOCKED"),
+                )
+                for idx, row in enumerate(records):
+                    conn.execute(
+                        "INSERT INTO classification_results("
+                        "checkpoint_id,business_key,brand,model,raw_hash,"
+                        "rules_hash,pipeline_version,result_json,updated_at)"
+                        " VALUES(?,?,?,?,?,?,?,?,?)",
+                        (str(idx), p.business_key(row["Marca"],row["Modelo"]),
+                         row["Marca"], row["Modelo"], "raw", rules.hash,
+                         p.PIPELINE_VERSION, json.dumps(row), now.isoformat()),
+                    )
+                conn.commit()
+            extracted, keys = read_result(result, 4, rules, db_path=db)
+            self.assertEqual(len(extracted), 4)
+            self.assertEqual(len(keys), 4)
+            with sqlite3.connect(db) as conn:
+                conn.execute("UPDATE classification_results SET result_json=? "
+                             "WHERE checkpoint_id='0'",
+                             (json.dumps({**records[0], "FAMILY": "ENGINE"}),))
+                conn.commit()
+            with self.assertRaisesRegex(RuntimeError, "CHECKPOINT_CONFLICT"):
+                read_result(result, 4, rules, db_path=db)
+
     def test_wrong_failure_reason_blocks_replay_before_any_writes(self):
         with TemporaryDirectory() as d:
             cfg, master, final, cache, db, inp, result=local_fixture(d)
