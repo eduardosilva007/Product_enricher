@@ -7,6 +7,15 @@ Escopo: leitura estática da branch `fix/sqlite-canonical-sku-merge-20261113` e 
 
 **Correção proposta, ainda NÃO implementada:** estagiar ambos os Excel, comprovar igualdade física e HARD LOCK, verificar hashes, preparar backups imutáveis, coordenar gravação e journal de recuperação, simular falha após o primeiro commit e testar rollback/reconciliação. Não mudar esse caminho enquanto uma execução real está ativa.
 
+## P0 — JEV proposta incorretamente aceita no Excel público (reproduzido RED→GREEN)
+`_record_is_accepted` rejeita corretamente `CLASSIFIED_CLEF` com `Review Required=SIM` (proposta não homologada). Porém, `_export_base_final` publica apenas 11 colunas, sem `Resolution State`; a função `_baseline_row_accepted` originalmente considerava `Revisão=PROVÁVEL` suficiente, mesmo com `Próxima Ação=DOUBLE_CHECK`.
+
+**Falha reproduzida:** no commit `4e3a555`, 2 testes falharam na CI porque a mesma proposta era rejeitada no Consolidado e aceita pela Base Final. A validação pós-exportação compara números de aceites com a projeção da classificação e pode disparar `BASELINE_COHORT_MISMATCH` **depois de gravar** os arquivos. Não é prova de que os resultados foram perdidos.
+
+**Correção isolada:** `af52dbc` impede que `PROVÁVEL` junto com `DOUBLE_CHECK`, `AGUARDAR_REVISAO_PRODUTO_CANONICO` ou `REVISAR_CONFLITO_EQUIVALENCIA` vire aceite automático; `Manual` e `BI_OK` continuam prioritários. Testes Windows e Linux passaram em GH Actions, mas falta revisão da baseline real. **Não usar a branch em uma execução real ativa.**
+
+**Risco a verificar antes de escala:** propostas preservadas para B.I. não devem entrar repetidamente na fila de classificação como se nunca tivessem sido processadas. A política de `processed` precisa distinguir aceitação automática de classificação técnica concluída e aguardando revisão. Esse gate de fila ainda não foi comprovado com dados reais.
+
 ## P1 — Coortes e contagens não têm equivalência 1:1
 `collect_products` escreve `Coleta_Search_R9_6p7_2_3.xlsx`, enquanto `build_classification_cohort` remove processados, locks, RAW inválido e evidência insuficiente. O `--max-search-new 850` é teto de requests, não quantidade de linhas classificáveis. A antiga seleção do modo `full` limitava antes do filtro de processados; corrigida em `93f55cb`, com CI verde, mas não reproduzida localmente.
 
