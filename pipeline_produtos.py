@@ -3380,11 +3380,17 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         print("Não serão pesquisados automaticamente. Uma recoleta pode consumir novos créditos.")
         print(f"Limite por execução: {limit if limit > 0 else 'SEM LIMITE (NÃO RECOMENDADO)'} request(s).")
         print("Opções: [S] autorizar uma recoleta limitada | [N] manter cache e não consultar.")
-        while True:
-            decision = input("Autorizar recoleta de RAW_EMPTY nesta execução? (S/N): ").strip().upper()
-            if decision in {"S", "N"}:
-                break
-            print("Informe S ou N.")
+        if args.yes:
+            # Headless FULL mode must NEVER turn old RAW_EMPTY into paid Search.
+            # Explicit --recollect-empty must be provided to authorize retry.
+            decision = "N"
+            LOG.info("RAW_EMPTY SKIPPED UNATTENDED | count=%d | --recollect-empty=NO | new_paid_requests=0", raw_empty_count)
+        else:
+            while True:
+                decision = input("Autorizar recoleta de RAW_EMPTY nesta execução? (S/N): ").strip().upper()
+                if decision in {"S", "N"}:
+                    break
+                print("Informe S ou N.")
         if decision == "S":
             if limit <= 0:
                 raise RuntimeError(
