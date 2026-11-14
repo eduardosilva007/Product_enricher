@@ -67,7 +67,9 @@ def verify_failed_sqlite_run(db_path, result_path, metrics, records, rules):
         contemporary = []
         for entry in rows:
             rid, started, finished, status, mode, version, rhash, note = entry
-            if mode != "classify" or not finished:
+            # FULL and recovery runs also overwrite Classificacao_v3.xlsx.
+            # Never associate such a file with an older CLASSIFY failure.
+            if mode not in {"classify", "full", "recover"} or not finished:
                 continue
             try:
                 started_at = datetime.fromisoformat(started).astimezone(timezone.utc)
