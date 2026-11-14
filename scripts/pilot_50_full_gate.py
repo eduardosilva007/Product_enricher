@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""50 new SKU real FULL pilot. Offline prepare -> explicit paid execute -> audit.
+"""50 new SKU real FULL pilot from configured Base de Produtos.xlsx.
 
 The pilot uses the SAME official baseline and SQLite that production uses.
 No production rollout is initiated by this script, even after success.
@@ -61,8 +61,14 @@ def get_fresh(source, paths, count):
     rows = p.read_input_rows(source)
     eligible = [(p.safe(r.brand_original), p.safe(r.model_original),
                  p.business_key(r.brand_original, r.model_original)) for r in rows if r.valid]
-    if len(eligible) < 15000:
-        raise RuntimeError(f"PILOT_SOURCE_TOO_SMALL: valid={len(eligible)}; expected >=15000 (19K source)")
+    # The input is the configured Base de Produtos.xlsx, which may contain
+    # 1,030 today and 19,000 later. Only FIFTY valid distinct unseen keys
+    # matter for this experiment; never reject by arbitrary 15K threshold.
+    if len(eligible) < count:
+        raise RuntimeError(
+            f"PILOT_INPUT_INSUFFICIENT: valid={len(eligible)}; required={count}; "
+            f"source={source}"
+        )
     cached = set()
     with closing(p.TavilyReadOnlyStore(paths["cache"])) as store:
         cached = {key for _, _, key in store.catalog()}
@@ -78,7 +84,15 @@ def get_fresh(source, paths, count):
             continue
         fresh.append((brand, model, key))
     if len(fresh) < count:
-        raise RuntimeError(f"PILOT_FRESH_COHORT_INSUFFICIENT: {len(fresh)}<{count}")
+        raise RuntimeError(
+            "PILOT_FRESH_COHORT_INSUFFICIENT: "
+            f"new_unsearched={len(fresh)} required={count}; "
+            f"input_rows={len(rows)} valid={len(eligible)} "
+            f"unique={len(seen)} cached={len(seen & cached)} "
+            f"previous_attempts={len(seen & attempts)} "
+            f"already_accepted={len(seen & locked)}. "
+            "No paid requests made; add new SKUs to Base de Produtos.xlsx."
+        )
 
     # Deterministic, brand-diversified sample; do not cherry-pick easy products.
     by_brand = defaultdict(list)
@@ -110,7 +124,9 @@ def prepare(args):
     import pandas as pd
     config = Path(args.config).resolve()
     cfg, paths = config_paths(config)
-    source = Path(args.source).resolve()
+    # Use the EXACT project-configured input by default; no interactive
+    # Read-Host or alternate filename assumption.
+    source = Path(args.source).resolve() if args.source else paths["input"]
     if not source.is_file():
         raise RuntimeError("PILOT_SOURCE_FILE_MISSING:" + str(source))
     for key in ("master", "final", "cache", "classification_db"):
@@ -382,18 +398,44 @@ def main():
     subs = parser.add_subparsers(dest="action",required=True)
     setup = subs.add_parser("prepare")
     setup.add_argument("--config",default=str(ROOT / "pipeline_config.json"))
-    setup.add_argument("--source",required=True,help="Actual 19K Excel, not the 1030-SKU input")
+    setup.add_argument(
+        "--source", default="",
+        help="Optional override; default is files.input (Base de Produtos.xlsx)"
+    )
     setup.add_argument("--count",type=int,default=50,choices=[50])
     setup.add_argument("--max-calls",type=int,default=65)
     setup.add_argument("--max-tokens",type=int,default=350000)
     live = subs.add_parser("execute")
-    live.add_argument("--manifest",required=True)
+    live.add_argument("--manifest",default="")
+    live.add_argument(
+        "--latest",action="store_true",
+        help="Use most recent PREPARED_OFFLINE 50-SKU manifest; fail if ambiguous"
+    )
     live.add_argument("--confirm",default="")
     args = parser.parse_args()
     if args.action=="prepare":
         if args.max_calls<50 or args.max_tokens<100000:
             parser.error("API caps insufficient for meaningful 50-SKU pilot")
         return prepare(args)
+    if args.latest and args.manifest:
+        parser.error("use --latest or --manifest, never both")
+    if args.latest:
+        folder = ROOT / "pilotos"
+        candidates = []
+        for path in folder.glob("stable_50_*/manifest.json"):
+            try:
+                meta = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if meta.get("state") == "PREPARED_OFFLINE" and meta.get("count") == 50:
+                candidates.append(path)
+        if not candidates:
+            parser.error("PILOT_MANIFEST_NOT_FOUND: run prepare first")
+        # Most recent preparation; execution still verifies complete hashes,
+        # exact original configured input and all 50 never-attempted SKUs.
+        args.manifest = str(max(candidates, key=lambda x: x.stat().st_mtime))
+    elif not args.manifest:
+        parser.error("provide --latest or --manifest")
     return execute(args)
 
 
