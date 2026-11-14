@@ -30,7 +30,7 @@ FIELDS = (
 
 
 def route_one(final, raw, master=None):
-    master = master or {}
+    master = master if master is not None else {}
     payload = raw.payload or {}
     collection = payload.get("_collection")
     collection = collection if isinstance(collection, dict) else {}
