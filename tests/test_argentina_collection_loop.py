@@ -149,13 +149,30 @@ class CollectionAutoProviderTests(unittest.TestCase):
                 self.assertTrue(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
                 self.assertEqual(build.call_count,1)
 
+    def test_unattended_never_recollects_raw_empty_without_opt_in(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = argparse.Namespace(
+                search_provider="tavily", auto_providers=True, input="test.xlsx",
+                cache=str(Path(d)/"cache.sqlite"), db=str(Path(d)/"db.sqlite"),
+                master="", final="", precollection_output=str(Path(d)/"pre.xlsx"),
+                recollect_empty=False, recollect_low_evidence=False,
+                max_tavily_new=20, yes=True)
+            plan = SimpleNamespace(candidates=[], summary={"RAW_EMPTY":1030})
+            cfg = {"files": {"cache":args.cache,"classification_db":args.db}}
+            with patch.object(p, "validate_collection_cost_policy", return_value=[]), \
+                 patch.object(p, "load_baseline_inventory", return_value={"processed":set()}), \
+                 patch.object(p, "build_precollection_plan", return_value=plan) as build, \
+                 patch("builtins.input", side_effect=AssertionError("No prompts in overnight run")):
+                self.assertTrue(p.collect_products(args, cfg, SimpleNamespace(hash="test")))
+                self.assertEqual(build.call_count, 1)
+
     def test_raw_empty_yes_replans_with_20_limit(self):
         with tempfile.TemporaryDirectory() as d:
             args = argparse.Namespace(
                 search_provider="tavily", auto_providers=True, input="test.xlsx",
                 cache=str(Path(d)/"cache.sqlite"),db=str(Path(d)/"db.sqlite"),
                 master="",final="",precollection_output=str(Path(d)/"pre.xlsx"),
-                recollect_empty=False,recollect_low_evidence=False,max_tavily_new=20,yes=True)
+                recollect_empty=False,recollect_low_evidence=False,max_tavily_new=20,yes=False)
             plan_empty = SimpleNamespace(candidates=[],summary={"RAW_EMPTY":1030})
             plan_selected = SimpleNamespace(
                 candidates=[SimpleNamespace(brand_original="CNH",model_original="47408215",raw_state="RAW_EMPTY")],
