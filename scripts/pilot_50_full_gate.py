@@ -132,6 +132,9 @@ def prepare(args):
         "count":args.count,"selected":[{"brand":b,"model":m,"key":k} for b,m,k in selected],
         "baseline_sha256": {name:checksum(paths[name])
                             for name in ("master","final","cache","classification_db")},
+        "pipeline_sha256":checksum(ROOT / "pipeline_produtos.py"),
+        "rules_sha256":checksum(ROOT / "regras_negocio.json"),
+        "collection_policy_sha256":checksum(ROOT / cfg["files"]["collection_policy"]),
         "readiness":metrics, "prepared_at":datetime.now().isoformat(),
         "max_search":args.count, "max_llm_calls":args.max_calls,
         "max_tokens":args.max_tokens,
@@ -235,6 +238,11 @@ def execute(args):
     pilot_input = Path(m["pilot_input"])
     if checksum(config) != m["config_sha256"]:
         raise RuntimeError("PILOT_CONFIG_CHANGED_AFTER_PREPARE")
+    for filename, key in (("pipeline_produtos.py","pipeline_sha256"),
+                          ("regras_negocio.json","rules_sha256"),
+                          (cfg["files"]["collection_policy"],"collection_policy_sha256")):
+        if checksum(ROOT / filename) != m[key]:
+            raise RuntimeError("PILOT_CODE_OR_RULES_CHANGED_AFTER_PREPARE:" + filename)
     if checksum(pilot_input) != m["pilot_input_sha256"]:
         raise RuntimeError("PILOT_FROZEN_INPUT_CHANGED")
     if checksum(Path(m["source"])) != m["source_sha256"]:
@@ -260,8 +268,12 @@ def execute(args):
     initial_bi = p._load_bi_lock_snapshot(paths["final"])
     backup_dir = manifest_path.parent / "before_live_backup"
     backup_dir.mkdir(exist_ok=False)
-    for key in ("master","final"):
-        shutil.copy2(paths[key],backup_dir / paths[key].name)
+    for key in ("master","final","output","collection_report"):
+        if paths[key].is_file():
+            shutil.copy2(paths[key],backup_dir / paths[key].name)
+    precollection = (config.parent / cfg["files"].get("precollection_report","Pre_Coleta_R9_6.xlsx")).resolve()
+    if precollection.is_file():
+        shutil.copy2(precollection,backup_dir / precollection.name)
     for key in ("cache","classification_db"):
         sqlite_backup(paths[key],backup_dir / paths[key].name)
 
