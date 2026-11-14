@@ -60,37 +60,51 @@ def verify_failed_sqlite_run(db_path, result_path, metrics, records, rules):
             "SELECT run_id,started_at,finished_at,status,mode,pipeline_version,"
             "rules_hash,note FROM runs WHERE mode IN ('classify','full','recover') "
             "ORDER BY started_at DESC LIMIT 30").fetchall()
-        matches = []
+        # The report is a snapshot of the LAST run that wrote it, not
+        # necessarily of the older failed run. A later completed run can
+        # overwrite Classificacao_v3.xlsx while keeping the same 338 rows.
+        # Pair the actual file timestamp with the nearest matching SQLite run.
+        candidates = []
         for entry in rows:
             rid, started, finished, status, mode, version, rhash, note = entry
-            if (status != "FAILED" or mode != "classify"
-                    or version != p.PIPELINE_VERSION or rhash != rules.hash
-                    or "BASELINE_FILE_LOCKED" not in (note or "")
-                    or not finished):
+            if (mode != "classify" or version != p.PIPELINE_VERSION
+                    or rhash != rules.hash or not finished):
                 continue
             try:
                 started_at = datetime.fromisoformat(started).astimezone(timezone.utc)
                 finished_at = datetime.fromisoformat(finished).astimezone(timezone.utc)
             except (ValueError, TypeError):
                 continue
-            # Excel regeneration outside the failed-run window is ambiguous.
-            if started_at <= file_time <= finished_at + timedelta(minutes=30):
-                matches.append((rid, started_at, finished_at))
-        if len(matches) != 1:
+            if not (started_at <= file_time <= finished_at + timedelta(minutes=30)):
+                continue
+            # A successful later run has its full summary in the SQLite note.
+            if status == "COMPLETED":
+                try:
+                    saved_summary = json.loads(note or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if (p.safe(saved_summary.get("Pilot Cohort Hash")) != fingerprint
+                        or int(saved_summary.get("Elegíveis", -1)) != len(records)):
+                    continue
+            elif status == "FAILED" and "BASELINE_FILE_LOCKED" in (note or ""):
+                pass
+            else:
+                # Other failures, incomplete runs, or warnings are not
+                # sufficient evidence to replay a workbook safely.
+                continue
+            candidates.append((rid, started_at, finished_at, status))
+        if not candidates:
             raise RuntimeError(
-                f"SQLITE_LOCKED_RUN_PROVENANCE_NOT_UNIQUE: matches={len(matches)}"
+                "SQLITE_RESULT_PROVENANCE_NOT_FOUND: no matching completed or "
+                "Excel-locked classification run for the workbook timestamp"
             )
-        _, started_at, finished_at = matches[0]
-        for entry in rows:
-            started = entry[1]
-            if not started or entry[0] == matches[0][0]:
-                continue
-            try:
-                when = datetime.fromisoformat(started).astimezone(timezone.utc)
-            except ValueError:
-                continue
-            if finished_at < when <= file_time:
-                raise RuntimeError("SQLITE_LOCKED_RUN_NEWER_EXECUTION_DETECTED")
+        # If the workbook was rewritten by a later successful classification,
+        # use that completed run's *full cohort hash*, not an older failed run.
+        # A failed run's timestamp alone is never sufficient without the
+        # exact checkpoint comparisons below.
+        candidates.sort(key=lambda item: (item[1], item[2]), reverse=True)
+        selected = candidates[0]
+        _, started_at, finished_at, source_status = selected
         # Confirm that the workbook actually agrees with saved SQLite
         # classification checkpoints. The earlier run recorded 219 hits;
         # require substantive per-SKU overlap rather than trusting a timestamp.
@@ -129,9 +143,12 @@ def verify_failed_sqlite_run(db_path, result_path, metrics, records, rules):
             raise RuntimeError(
                 f"SQLITE_LOCKED_RUN_CHECKPOINT_COVERAGE_LOW:{checked}<{required}"
             )
-    return {"source": "FAILED_SQLITE_RUN_WITH_COHORT_AND_CHECKPOINTS",
+    return {"source": ("SQLITE_COMPLETED_RUN_AND_CHECKPOINTS"
+                       if source_status == "COMPLETED"
+                       else "SQLITE_FAILED_EXCEL_LOCK_AND_CHECKPOINTS"),
             "matched_checkpoints": checked, "cohort_hash": fingerprint,
-            "run_id": matches[0][0]}
+            "run_id": selected[0], "run_status": source_status,
+            "newer_snapshot": source_status == "COMPLETED"}
 
 
 def read_result(path, count, rules, db_path=None):
@@ -167,9 +184,9 @@ def read_result(path, count, rules, db_path=None):
             raise RuntimeError("RESULT_NOT_FAILED_BY_EXCEL_LOCK")
         evidence = verify_failed_sqlite_run(db_path, path, metrics, records, rules)
         p.LOG.info(
-            "RECOVERY SOURCE VERIFIED IN SQLITE | run=%s | cohort=%s | "
+            "RECOVERY SOURCE VERIFIED IN SQLITE | run=%s status=%s | cohort=%s | "
             "checkpoint_matches=%d | 0 APIs",
-            evidence["run_id"], evidence["cohort_hash"],
+            evidence["run_id"], evidence["run_status"], evidence["cohort_hash"],
             evidence["matched_checkpoints"],
         )
     # JEV proposals must remain in DOUBLE_CHECK; stripped public Final cannot
