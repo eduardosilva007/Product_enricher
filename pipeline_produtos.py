@@ -10121,6 +10121,11 @@ def run_cache_recovery(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                 ledger.write(key + "\n")
 
 
+def _use_input_scoped_evidence_cohort(mode: str) -> bool:
+    """Classify and full both limit eligible input SKUs, not historical cache rows."""
+    return mode in {"classify", "full"}
+
+
 def run_pipeline(
     args: argparse.Namespace,
     cfg: Dict[str, Any],
@@ -10282,7 +10287,7 @@ def run_pipeline(
         stats = defaultdict(int)
 
         if explicit_targets is None:
-            if args.mode == "classify":
+            if _use_input_scoped_evidence_cohort(args.mode):
                 flow_cfg = cfg.get("classification_flow", {}) or {}
                 restrict_to_input = bool(flow_cfg.get("restrict_classify_to_input", True))
                 allowed_keys: Optional[set] = None
@@ -10367,7 +10372,7 @@ def run_pipeline(
             cohort_stats.get("cohort_bi_ok_lock", 0),
             cohort_hash,
         )
-        if args.mode == "classify" and explicit_targets is None:
+        if _use_input_scoped_evidence_cohort(args.mode) and explicit_targets is None:
             LOG.info(
                 "CLASSIFICATION QUEUE | targets=%d | ready=%d | partial=%d | legacy_curated=%d | "
                 "safe_aux_rescue=%d | fora_input=%d | no_evidence_fora_da_fila=%d | raw_indisponivel=%d | "
