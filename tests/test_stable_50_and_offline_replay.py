@@ -149,6 +149,24 @@ class OfflineReplayTests(unittest.TestCase):
             extracted, keys = read_result(result, 4, rules, db_path=db)
             self.assertEqual(len(extracted), 4)
             self.assertEqual(len(keys), 4)
+            # Regression: a second successful 338-like run rewrites the Excel.
+            # Do NOT reuse the older Excel-lock failure as provenance.
+            with sqlite3.connect(db) as conn:
+                conn.execute(
+                    "INSERT INTO runs(run_id,started_at,finished_at,status,mode,"
+                    "pipeline_version,rules_hash,model,note)"
+                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("run_newer", (now - timedelta(minutes=1)).isoformat(),
+                     (now - timedelta(seconds=20)).isoformat(), "COMPLETED",
+                     "classify", p.PIPELINE_VERSION, rules.hash,
+                     "jev:jev-latest",
+                     json.dumps({"Pilot Cohort Hash": cohort_hash,
+                                 "Elegíveis": 4})),
+                )
+                conn.commit()
+            extracted, keys = read_result(result, 4, rules, db_path=db)
+            self.assertEqual(len(extracted), 4)
+            self.assertEqual(len(keys), 4)
             with sqlite3.connect(db) as conn:
                 conn.execute("UPDATE classification_results SET result_json=? "
                              "WHERE checkpoint_id='0'",
