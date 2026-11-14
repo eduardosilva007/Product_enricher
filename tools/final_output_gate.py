@@ -16,7 +16,8 @@ def _norm(value):
 
 
 def _key(row):
-    return (_norm(row.get("Marca")).casefold(), _norm(row.get("Modelo")).casefold())
+    # Exact physical Marca+Modelo. Normalized cache keys are not approval authority.
+    return (_norm(row.get("Marca")), _norm(row.get("Modelo")))
 
 
 def _read(path):
@@ -50,14 +51,13 @@ def validate(input_path, output_path):
 
     if not inputs:
         failures.append("EMPTY_INPUT")
-    if len(inputs) != len(outputs):
-        failures.append(f"ROW_COUNT:{len(inputs)}!={len(outputs)}")
+    # The official Base Final is CUMULATIVE, not a one-run 1:1 output.
+    # Require every physical input occurrence; unrelated historical rows are valid.
     input_keys = Counter(_key(row) for row in inputs)
     output_keys = Counter(_key(row) for row in outputs)
-    if input_keys != output_keys:
-        missing = list((input_keys - output_keys).items())[:5]
-        extra = list((output_keys - input_keys).items())[:5]
-        failures.append(f"KEY_MULTIPLICITY:missing={missing}:extra={extra}")
+    missing = list((input_keys - output_keys).items())[:5]
+    if missing:
+        failures.append(f"KEY_MULTIPLICITY:missing={missing}")
 
     # A non-empty source title/URL provided in the input must be represented in
     # the same product's exported row. Use an exact key match and duplicate-aware
@@ -71,8 +71,9 @@ def validate(input_path, output_path):
     evidence_cols = ("Resumo Evidências", "Fontes Pesquisa", "Evidence Extract")
     if not any(c in out_columns for c in title_cols):
         failures.append("NO_TITLE_COLUMNS")
-    if not any(c in out_columns for c in url_cols):
-        failures.append("NO_SOURCE_URL_COLUMNS")
+    # BASELINE_PUBLIC_COLUMNS intentionally excludes URLs and reference evidence.
+    # Their preservation must be audited against the Consolidado, not invented
+    # as a required field in the 11-column public Final.
 
     for key, in_count in input_keys.items():
         # Input records may be duplicates with differing evidence; match
@@ -100,6 +101,8 @@ def validate(input_path, output_path):
     # Observed reference title should not disappear from unresolved output:
     # check row-level consistency even when input did not carry source data.
     for row in outputs:
+        if _key(row) not in input_keys:
+            continue  # Historic cumulative rows are outside this run's gate.
         reference = _norm(row.get("Título Referência"))
         real = _norm(row.get("Título Real"))
         if reference and not real and "Título Real" in out_columns:
