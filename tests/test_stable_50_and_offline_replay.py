@@ -14,6 +14,7 @@ import pandas as pd
 import pipeline_produtos as p
 from scripts.pilot_50_full_gate import prepare, execute
 from scripts.replay_locked_classification_offline import read_result, run
+from tools.verify_pilot_50_release import check as verify_mass_gate
 
 
 def sha(path):
@@ -141,6 +142,52 @@ class New50PilotTests(unittest.TestCase):
                                     max_calls=65,max_tokens=350000)
             with self.assertRaisesRegex(RuntimeError,"PILOT_SOURCE_TOO_SMALL"):
                 prepare(args)
+
+
+
+class MassReleaseManualQATests(unittest.TestCase):
+    def test_cannot_release_without_ten_human_approvals(self):
+        with TemporaryDirectory() as d:
+            base=Path(d)
+            source=base/"19k.xlsx"
+            source.write_bytes(b"source frozen")
+            pilot=base/"pilot"
+            pilot.mkdir()
+            quality=pilot/"pilot_50_quality_review.xlsx"
+            review=[{"Marca":"BRAND","Modelo":f"M-{i:03d}",
+                     "Auditoria Manual (OK/ERRO)":"",
+                     "Título Real na Base Final":f"Brand product {i}",
+                     "O que é (Tipo)":"DRILL",
+                     "Category General":"OTHERS","FAMILY":"DRILLERS"}
+                    for i in range(10)]
+            with pd.ExcelWriter(quality) as w:
+                pd.DataFrame(review).to_excel(w,sheet_name="Amostra_10_Validar",index=False)
+                pd.DataFrame(review*5).to_excel(w,sheet_name="Todos_50",index=False)
+            report=pilot/"pilot_50_result.json"
+            report.write_text(json.dumps({
+                "status":"TECHNICAL_PASS_AWAITING_QUALITY_REVIEW",
+                "audited":{"complete_classifications":40,
+                           "search_titles_missing_in_final":0,
+                           "prior_accepted_preserved":100,
+                           "bi_locks_preserved":20,
+                           "quality_review_file":str(quality)},
+            }),encoding="utf-8")
+            (pilot/"manifest.json").write_text(json.dumps({
+                "source":str(source),"source_sha256":sha(source),
+                "state":"TECHNICAL_PASS_AWAITING_QUALITY_REVIEW",
+            }),encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError,"PILOT_QA_NOT_MANUALLY_APPROVED"):
+                verify_mass_gate(report,source)
+            for rec in review:
+                rec["Auditoria Manual (OK/ERRO)"]="OK"
+            with pd.ExcelWriter(quality) as w:
+                pd.DataFrame(review).to_excel(w,sheet_name="Amostra_10_Validar",index=False)
+                pd.DataFrame(review*5).to_excel(w,sheet_name="Todos_50",index=False)
+            self.assertEqual(verify_mass_gate(report,source)["human_reviews_approved"],10)
+            source.write_bytes(b"modified")
+            with self.assertRaisesRegex(RuntimeError,"MASS_SOURCE_CHANGED_AFTER_PILOT_50"):
+                verify_mass_gate(report,source)
+
 
 
 if __name__=="__main__":
