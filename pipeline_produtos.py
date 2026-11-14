@@ -10134,6 +10134,42 @@ def run_cache_recovery(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                 ledger.write(key + "\n")
 
 
+def _current_proposal_keys_for_queue(master_path: Optional[Path], rules: Rules) -> set:
+    """Exclude complete, current JEV proposals from repetitive ordinary runs.
+
+    CLASSIFIED_CLEF remains NOT accepted. It stays visible in Final as
+    PROVAVEL/DOUBLE_CHECK and can be reprocessed only with explicit --reprocess
+    or when rules/pipeline version changes. Uses Master (technical authority),
+    never the stripped eleven-column Final.
+    """
+    if not master_path or not master_path.exists():
+        return set()
+    frame, _ = _read_business_sheet(master_path)
+    bcol = find_col(frame, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    mcol = find_col(frame, ["Modelo", "Model", "SKU", "Part Number"])
+    needed = ("Resolution State", "Review Required", "Rules Hash", "Pipeline Version")
+    if any(col not in frame.columns for col in needed):
+        return set()
+    result = set()
+    for _, row in frame.iterrows():
+        if safe(row.get("Resolution State")).upper() != "CLASSIFIED_CLEF":
+            continue
+        if safe(row.get("Review Required")).upper() != "SIM":
+            continue
+        if safe(row.get("Revisão")).upper() not in {"PROVÁVEL", "PROVAVEL"}:
+            continue
+        if safe(row.get("Rules Hash")) != rules.hash or safe(row.get("Pipeline Version")) != PIPELINE_VERSION:
+            continue
+        if not all(safe(row.get(col)) for col in ("O que é (Tipo)", "Category General", "FAMILY", "Título Real")):
+            continue
+        if safe(row.get("O que é (Tipo)")).upper() in {"REVISAR", "UNKNOWN", "N/A"}:
+            continue
+        b, m = safe(row.get(bcol)), safe(row.get(mcol))
+        if b and m:
+            result.add(business_key(b, m))
+    return result
+
+
 def _use_input_scoped_evidence_cohort(mode: str) -> bool:
     """Classify and full both limit eligible input SKUs, not historical cache rows."""
     return mode in {"classify", "full"}
@@ -10251,6 +10287,10 @@ def run_pipeline(
         else set()
     )
     processed = baseline_inventory["processed"]
+    if explicit_targets is None and args.mode in {"full", "classify"} and not args.reprocess:
+        current_proposals = _current_proposal_keys_for_queue(master_path, rules)
+        processed = processed | current_proposals
+        LOG.info("CLASSIFICATION CURRENT PROPOSALS SKIPPED | count=%d | reprocess=N | human_approval=UNCHANGED", len(current_proposals))
     manual = baseline_inventory["manual"]
     bi_locked = baseline_inventory["bi_locked"]
     hard_lock = baseline_inventory["hard_lock"]
