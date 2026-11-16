@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from pipeline_produtos import load_env_file,configured_slots,_provider_credentials,validate_collection_cost_policy,DurableRouter
+from pipeline_produtos import load_env_file,configured_slots,_provider_credentials,validate_collection_cost_policy,DurableRouter,_normalize_brightdata_results
 
 class TestBrightDataMultiZone(unittest.TestCase):
     def test_two_independent_zones(self):
@@ -74,6 +74,14 @@ class TestBrightDataMultiZone(unittest.TestCase):
                 self.assertIsNone(router.reserve("new"))
                 self.assertEqual(router.conn.execute("SELECT COUNT(*) FROM collection_attempt_reservations").fetchone()[0],0)
             finally: router.close()
+
+    def test_brightdata_empty_serp_is_not_schema_error(self):
+        self.assertEqual(_normalize_brightdata_results({"general":{"query":"rare sku"}}),[])
+        self.assertEqual(_normalize_brightdata_results({"body":{"organic":[]}}),[])
+        with self.assertRaisesRegex(RuntimeError,"organic"):
+            _normalize_brightdata_results({"status":"ok"})
+        with self.assertRaisesRegex(RuntimeError,"organic"):
+            _normalize_brightdata_results({"general":{},"error":"denied"})
 
     def test_json_policy(self):
         cfg={"collection":{"hard_limits":{"max_requests_per_product":1},
