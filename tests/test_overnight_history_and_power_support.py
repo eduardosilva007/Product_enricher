@@ -71,6 +71,87 @@ class HistoricalReservationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Conflicting historical reservation"):
                 import_prior_reservations(root / "new.sqlite", root)
 
+    def test_legacy_single_tavily_is_reconciled_only_in_isolated_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            history_run(root, "first", ["dca|ajet15"], [
+                ("dca|ajet15", "tavily:1", "tavily")
+            ])
+            canonical = root / "canonical.sqlite"
+            with closing(sqlite3.connect(canonical)) as db, db:
+                db.execute(
+                    "CREATE TABLE collection_attempt_reservations "
+                    "(business_key TEXT PRIMARY KEY, account TEXT, provider TEXT)"
+                )
+                db.execute(
+                    "INSERT INTO collection_attempt_reservations VALUES (?,?,?)",
+                    ("dca|ajet15", "single:tavily", "tavily"),
+                )
+            isolated = root / "isolated.sqlite"
+            isolated.write_bytes(canonical.read_bytes())
+            report = import_prior_reservations(isolated, root)
+            self.assertEqual(report["legacy_tavily_accounts_reconciled"], 1)
+            with closing(sqlite3.connect(isolated)) as db:
+                rows = db.execute(
+                    "SELECT business_key, account, provider "
+                    "FROM collection_attempt_reservations"
+                ).fetchall()
+                self.assertEqual(rows, [("dca|ajet15", "tavily:1", "tavily")])
+            with closing(sqlite3.connect(canonical)) as db:
+                original = db.execute(
+                    "SELECT account, provider FROM collection_attempt_reservations "
+                    "WHERE business_key='dca|ajet15'"
+                ).fetchone()
+                self.assertEqual(original, ("single:tavily", "tavily"))
+
+    def test_real_concrete_account_conflict_is_never_reconciled(self):
+        for original in [("tavily:2", "tavily"),
+                         ("brightdata:1", "brightdata"),
+                         ("single:brightdata", "brightdata")]:
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                history_run(root, "first", ["a|123"], [
+                    ("a|123", "tavily:1", "tavily")
+                ])
+                isolated = root / "isolated.sqlite"
+                with closing(sqlite3.connect(isolated)) as db, db:
+                    db.execute(
+                        "CREATE TABLE collection_attempt_reservations "
+                        "(business_key TEXT PRIMARY KEY, account TEXT, provider TEXT)"
+                    )
+                    db.execute(
+                        "INSERT INTO collection_attempt_reservations VALUES (?,?,?)",
+                        ("a|123", *original),
+                    )
+                with self.assertRaisesRegex(
+                        RuntimeError, "Conflicting production/historical reservation"):
+                    import_prior_reservations(isolated, root)
+                with closing(sqlite3.connect(isolated)) as db:
+                    saved = db.execute(
+                        "SELECT account, provider FROM collection_attempt_reservations"
+                    ).fetchone()
+                    self.assertEqual(saved, original)
+
+    def test_unmatched_legacy_single_tavily_account_cannot_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            history_run(root, "first", ["a|123"], [
+                ("a|123", "tavily:external", "tavily")
+            ])
+            isolated = root / "isolated.sqlite"
+            with closing(sqlite3.connect(isolated)) as db, db:
+                db.execute(
+                    "CREATE TABLE collection_attempt_reservations "
+                    "(business_key TEXT PRIMARY KEY, account TEXT, provider TEXT)"
+                )
+                db.execute(
+                    "INSERT INTO collection_attempt_reservations VALUES (?,?,?)",
+                    ("a|123", "single:tavily", "tavily"),
+                )
+            with self.assertRaisesRegex(
+                    RuntimeError, "Conflicting production/historical reservation"):
+                import_prior_reservations(isolated, root)
+
     def test_missing_current_run_reservation_never_borrows_previous_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
