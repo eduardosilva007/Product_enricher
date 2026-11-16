@@ -12993,6 +12993,11 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
             actual[key] = (account, provider)
     # Existing production snapshot rows are also attempts; avoid silent
     # account rewrites and count all reservations across previous pilots.
+    # The historical single-provider CLI recorded account="single:tavily",
+    # whereas the controlled router records "tavily:N". An audited matching
+    # historical account can refine that LEGACY placeholder in the ISOLATED
+    # copy only. Do not permit provider changes or rewrites of concrete slots.
+    legacy_account_reconciled = 0
     with closing(sqlite3.connect(destination)) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
             business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
@@ -13003,8 +13008,26 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
                 (key,),
             ).fetchone()
             if prior and prior != (account, provider):
-                raise RuntimeError(f"Conflicting production/historical reservation: {key}")
-            if not prior:
+                # A legacy single:tavily entry is not a separate request:
+                # its attempt was already reserved under the same business_key.
+                # Reconcile to the historical concrete slot so per-account
+                # quota accounting remains conservative after importing.
+                # Never rewrite a concrete slot or a different provider.
+                if (prior == ("single:tavily", "tavily")
+                        and provider == "tavily"
+                        and re.fullmatch(r"tavily:[1-9][0-9]*", account)):
+                    conn.execute(
+                        "UPDATE collection_attempt_reservations SET account=?, provider=? "
+                        "WHERE business_key=? AND account=? AND provider=?",
+                        (account, provider, key, prior[0], prior[1]),
+                    )
+                    legacy_account_reconciled += 1
+                else:
+                    raise RuntimeError(
+                        f"Conflicting production/historical reservation: {key}; "
+                        f"canonical={prior!r}; historical={(account, provider)!r}"
+                    )
+            elif not prior:
                 conn.execute(
                     "INSERT INTO collection_attempt_reservations(business_key, account, provider) VALUES (?, ?, ?)",
                     (key, account, provider),
@@ -13020,15 +13043,17 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
         conn.commit()
     LOG.info(
         "OVERNIGHT HISTORY OK | reports=%d audited_runs=%d unique_keys=%d "
-        "duplicate_keys=%d reservations=%d disabled_accounts=%d",
+        "duplicate_keys=%d reservations=%d disabled_accounts=%d "
+        "legacy_tavily_accounts_reconciled=%d",
         len(reports), scanned_runs, len(expected), len(overlap_keys),
-        len(actual), len(disabled_accounts),
+        len(actual), len(disabled_accounts), legacy_account_reconciled,
     )
     return {"historical_cohort_keys": len(expected),
             "historical_reservation_keys": len(actual),
             "historical_overlapping_keys": len(overlap_keys),
             "historical_runs_scanned": scanned_runs,
-            "historical_disabled_accounts": len(disabled_accounts)}
+            "historical_disabled_accounts": len(disabled_accounts),
+            "legacy_tavily_accounts_reconciled": legacy_account_reconciled}
 
 
 def create_run(cfg,args):
