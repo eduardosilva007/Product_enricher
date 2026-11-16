@@ -58,7 +58,7 @@ class ProviderResponseContractTests(unittest.TestCase):
             self.assertEqual(error.exception.code,"SERPER_LIMIT")
             self.assertEqual(post.call_count,1)
 
-    def test_bright_request_contract_uses_parsed_light_raw(self):
+    def test_bright_request_contract_uses_official_serp_json(self):
         cfg = {"collection":{"providers":{"brightdata":{"base_url":"https://api.brightdata.com/request",
              "max_results":10}}}}
         limiter = SimpleNamespace(wait=lambda:None)
@@ -69,8 +69,9 @@ class ProviderResponseContractTests(unittest.TestCase):
              patch.object(p,"_provider_post_once",return_value=response) as request:
             p._provider_request_once("brightdata","CNH 123",cfg,limiter,budget)
             body = request.call_args.args[3]
-            self.assertEqual(body["format"],"raw")
-            self.assertEqual(body["data_format"],"parsed_light")
+            self.assertEqual(body["format"],"json")
+            self.assertNotIn("data_format",body)
+            self.assertNotIn("brd_json",body["url"])
 
 class RuntimeModuleContractTests(unittest.TestCase):
     def test_runtime_module_contract(self):
@@ -155,7 +156,7 @@ class CollectionAutoProviderTests(unittest.TestCase):
                 search_provider="tavily", auto_providers=True, input="test.xlsx",
                 cache=str(Path(d)/"cache.sqlite"),db=str(Path(d)/"db.sqlite"),
                 master="",final="",precollection_output=str(Path(d)/"pre.xlsx"),
-                recollect_empty=False,recollect_low_evidence=False,max_tavily_new=20,yes=True)
+                recollect_empty=False,recollect_low_evidence=False,max_tavily_new=20,yes=False)
             plan_empty = SimpleNamespace(candidates=[],summary={"RAW_EMPTY":1030})
             plan_selected = SimpleNamespace(
                 candidates=[SimpleNamespace(brand_original="CNH",model_original="47408215",raw_state="RAW_EMPTY")],
