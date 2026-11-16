@@ -2907,6 +2907,10 @@ def _provider_request_once(
                     raise OperationalPause("BRIGHTDATA_UPSTREAM", f"Bright Data upstream HTTP {upstream_status}")
                 if upstream_status in (429, 432, 433):
                     raise OperationalPause("BRIGHTDATA_UPSTREAM", f"Bright Data upstream HTTP {upstream_status}")
+                if 500 <= upstream_status <= 599:
+                    # An upstream 5xx is a transient per-request target failure,
+                    # not a Bright Data key/zone authentication or quota failure.
+                    raise OperationalPause("BRIGHTDATA_UPSTREAM_5XX", f"Bright Data upstream HTTP {upstream_status}")
                 if not 200 <= upstream_status < 300:
                     raise OperationalPause("BRIGHTDATA_UPSTREAM", f"Bright Data upstream HTTP {upstream_status}")
         try:
@@ -3668,19 +3672,19 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                     "Estado Anterior": prior_state, "Collection State": exc.code,
                     "Provider Requests": 1, "Data": now_iso(),
                 })
-                if exc.code == "BRIGHTDATA_SCHEMA" and router and active_slot:
-                    # Malformed content for one SKU is not an account failure.
-                    # Do not retry the SKU or poison the RAW cache. Circuit-break
-                    # after two consecutive failures to cap potential wasted spend.
+                if exc.code in {"BRIGHTDATA_SCHEMA", "BRIGHTDATA_UPSTREAM_5XX"} and router and active_slot:
+                    # Both are per-SKU response failures, not evidence of a
+                    # broken account. Never retry the same SKU. Allow one next
+                    # SKU, then stop after two consecutive malformed/5xx outcomes.
                     consecutive_schema_failures += 1
                     LOG.warning(
-                        "ROUTER | SKU com resposta Bright Data inválida; conta=%s; "
-                        "sequencia_schema=%d/2; sem retry | %s",
-                        active_slot.account, consecutive_schema_failures, safe(exc),
+                        "ROUTER | falha transitória de resposta; conta=%s; tipo=%s; "
+                        "sequencia_falhas=%d/2; sem retry | %s",
+                        active_slot.account, exc.code, consecutive_schema_failures, safe(exc),
                     )
                     if consecutive_schema_failures >= 2:
                         completed = False
-                        LOG.error("ROUTER | pausa preventiva após 2 respostas inválidas consecutivas")
+                        LOG.error("ROUTER | pausa preventiva após 2 falhas de resposta consecutivas")
                         break
                     continue
                 if router and active_slot and (
@@ -12302,6 +12306,39 @@ def main() -> int:
                 "FULL_1TO1_LIMIT_MISMATCH: "
                 f"coleta={collect_limit} > classificacao={classify_limit}. "
                 "O PROCESSO COMPLETO exige capacidade de fechamento para todo SKU coletado."
+            )
+
+        # Validate the actual JEV/Clef + local semantic funnel BEFORE
+        # spending any Search credits. The later cohort preflight remains
+        # in place as a second gate before LLM calls.
+        llm_provider = safe(getattr(args, "llm_provider", "")).lower() or safe(
+            cfg.get("classification_v42", {}).get("default_provider")
+        ).lower() or "clef"
+        if llm_provider not in {"jev", "clef", "local"}:
+            raise RuntimeError(f"CLASSIFICATION_PROVIDER_INVALID: {llm_provider}")
+        if llm_provider != "local" and not bool(getattr(args, "no_clef", False)):
+            llm_model = (
+                safe(cfg.get("jev", {}).get("model")) or "jev-latest"
+                if llm_provider == "jev"
+                else safe(getattr(args, "clef_model", "")) or
+                os.getenv("CLOUDFLARE_CLEF_MODEL", "").strip() or
+                safe(cfg.get("clef", {}).get("model")) or DEFAULT_CLEF_MODEL
+            )
+            try:
+                preflight_classifier = ClefFunnelClassifier(
+                    rules=rules, cfg=cfg, db=None,
+                    provider=llm_provider, model=llm_model,
+                )
+                preflight_classifier.preflight()
+            except OperationalPause as exc:
+                raise RuntimeError(
+                    f"FULL_PRECOLLECTION_{exc.code}: {exc}. "
+                    "Coleta NÃO iniciada; créditos Search preservados."
+                ) from exc
+            LOG.info(
+                "FULL PRE-COLLECTION CLASSIFIER PREFLIGHT OK | provider=%s | "
+                "local_funnel=READY | search_requests=0",
+                llm_provider,
             )
 
         provider = _resolve_search_provider(args, cfg)
