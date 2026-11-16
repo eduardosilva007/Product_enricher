@@ -2878,7 +2878,11 @@ def _provider_request_once(
         max_results = min(10, max_results)
         url = safe(pcfg.get("base_url")) or "https://api.brightdata.com/request"
         headers = {"Authorization": f"Bearer {creds['api_key']}", "Content-Type": "application/json"}
-        google_url = "https://www.google.com/search?" + urlencode({"q": query, "num": max_results})
+        # Bright Data requires brd_json=1 on the TARGET URL for structured
+        # Google SERP output. data_format alone does not guarantee JSON.
+        # Google's num parameter is deprecated; the light contract supplies
+        # up to ten organic results without a second request.
+        google_url = "https://www.google.com/search?" + urlencode({"q": query, "brd_json": "1"})
         body = {
             "zone": creds["zone"],
             "url": google_url,
@@ -2890,6 +2894,21 @@ def _provider_request_once(
             "data_format": "parsed_light",
         }
         payload = _provider_post_once(provider, url, headers, body, timeout, limiter, budget)
+        # format=json wraps the *upstream* HTTP status in the response body.
+        # Outer HTTP 200 does NOT prove Google responded successfully.
+        if "body" in payload:
+            upstream_status = payload.get("status_code")
+            if upstream_status is not None:
+                try:
+                    upstream_status = int(upstream_status)
+                except (TypeError, ValueError):
+                    raise OperationalPause("BRIGHTDATA_UPSTREAM", "Bright Data upstream status invalid") from None
+                if upstream_status in (401, 403):
+                    raise OperationalPause("BRIGHTDATA_UPSTREAM", f"Bright Data upstream HTTP {upstream_status}")
+                if upstream_status in (429, 432, 433):
+                    raise OperationalPause("BRIGHTDATA_UPSTREAM", f"Bright Data upstream HTTP {upstream_status}")
+                if not 200 <= upstream_status < 300:
+                    raise OperationalPause("BRIGHTDATA_UPSTREAM", f"Bright Data upstream HTTP {upstream_status}")
         try:
             results = _normalize_brightdata_results(payload)
         except RuntimeError as exc:
@@ -2903,9 +2922,13 @@ def _provider_request_once(
                     wrapper = None
             top_keys = sorted(str(k) for k in payload.keys())[:20]
             body_keys = sorted(str(k) for k in wrapper.keys())[:20] if isinstance(wrapper, dict) else []
+            raw_body = payload.get("body")
+            body_format = "html" if isinstance(raw_body, str) and raw_body.lstrip().startswith(("<", "<!DOCTYPE")) else "non_json"
             raise OperationalPause(
                 "BRIGHTDATA_SCHEMA",
-                f"{safe(exc)}; payload_keys={top_keys}; body_type={type(wrapper).__name__}; body_keys={body_keys}",
+                f"{safe(exc)}; upstream_status={payload.get('status_code', 'NA')}; "
+                f"body_format={body_format}; payload_keys={top_keys}; "
+                f"body_type={type(wrapper).__name__}; body_keys={body_keys}",
             ) from exc
         return results, {
             "requests": budget.used,
@@ -3515,6 +3538,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     query_rows: List[Dict[str, Any]] = []
     completed = True
     total_requests = 0
+    consecutive_schema_failures = 0
     # FULL mode usa esta lista para fechar exatamente o mesmo lote que consumiu Search.
     # Nada de selecionar outro cohort histórico depois da coleta.
     executed_targets: List[Tuple[str, str, str]] = []
@@ -3559,6 +3583,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             executed_targets.append((brand, model, key))
             try:
                 payload = search_product_once(brand, model, cfg, limiter, provider)
+                consecutive_schema_failures = 0
                 coll = payload.get("_collection", {}) or {}
                 usage = coll.get("usage", {}) or {}
                 req_count = int(usage.get("requests", 0) or 0)
@@ -3643,6 +3668,21 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                     "Estado Anterior": prior_state, "Collection State": exc.code,
                     "Provider Requests": 1, "Data": now_iso(),
                 })
+                if exc.code == "BRIGHTDATA_SCHEMA" and router and active_slot:
+                    # Malformed content for one SKU is not an account failure.
+                    # Do not retry the SKU or poison the RAW cache. Circuit-break
+                    # after two consecutive failures to cap potential wasted spend.
+                    consecutive_schema_failures += 1
+                    LOG.warning(
+                        "ROUTER | SKU com resposta Bright Data inválida; conta=%s; "
+                        "sequencia_schema=%d/2; sem retry | %s",
+                        active_slot.account, consecutive_schema_failures, safe(exc),
+                    )
+                    if consecutive_schema_failures >= 2:
+                        completed = False
+                        LOG.error("ROUTER | pausa preventiva após 2 respostas inválidas consecutivas")
+                        break
+                    continue
                 if router and active_slot and (
                     exc.code.endswith("_LIMIT")
                     or exc.code.endswith("_AUTH")
