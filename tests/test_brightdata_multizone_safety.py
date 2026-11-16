@@ -1,6 +1,7 @@
 """Offline Bright Data multizone regression checks (no API/DB)."""
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 import sys
 import tempfile
@@ -43,7 +44,9 @@ class TestBrightDataMultiZone(unittest.TestCase):
              "BRIGHTDATA_API_KEY_2":"b","BRIGHTDATA_ZONE_2":"serp_api2","BRIGHTDATA_LIMIT_2":"3"}
         with tempfile.TemporaryDirectory() as d, patch.dict(os.environ,env,clear=True):
             db=Path(d)/"ledger.sqlite"
-            with sqlite3.connect(db) as con:
+            # sqlite3.Connection.__exit__ commits but does NOT close on Windows.
+            # Closing first-class prevents WinError 32 during TemporaryDirectory cleanup.
+            with closing(sqlite3.connect(db)) as con, con:
                 con.execute("CREATE TABLE collection_attempt_reservations (business_key TEXT PRIMARY KEY, account TEXT NOT NULL, provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)")
                 con.executemany("INSERT INTO collection_attempt_reservations(business_key,account,provider) VALUES(?,?,?)",
                                 [(f"old-{n}","brightdata:1","brightdata") for n in range(5000)])
