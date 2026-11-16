@@ -9482,6 +9482,7 @@ def persist_baseline_excels(
     cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, int]:
     """Grava Consolidado -> Base Final sem jamais alterar linhas Revisão B.I=OK."""
+    started_baseline_export = time.perf_counter()
     import pandas as pd
 
     if not master_path and not final_path:
@@ -9644,10 +9645,13 @@ def persist_baseline_excels(
     # A previously successful, fully verified export is the ONLY event that
     # authorizes later starts to skip rebuilding identical Excel baselines.
     # This cannot bypass the classifier, rules or central integrity gates.
-    if (cfg and not cfg.get("_nightly_output_only") and all(
-            p is not None and Path(p).is_file()
-            for p in (input_path, master_path, final_path, cache_path, rules.path)
-    )):
+    if (cfg and not cfg.get("_nightly_output_only")
+            and stats.get("baseline_missing_in_final") == 0
+            and stats.get("sqlite_registry_status") == "SQLITE_MERGED"
+            and all(
+                p is not None and Path(p).is_file()
+                for p in (input_path, master_path, final_path, cache_path, rules.path)
+            )):
         from input_sync_manifest import record_success
         try:
             sync_files = {
@@ -9660,6 +9664,8 @@ def persist_baseline_excels(
         except Exception as exc:
             # Cache publication is optional, baseline persistence is not.
             LOG.warning("INPUT BASELINE SYNC SNAPSHOT SKIPPED | %s", type(exc).__name__)
+    LOG.info("BASELINE PERSIST DURATION | elapsed=%.1fs | rows=%d",
+             time.perf_counter() - started_baseline_export, len(rows))
     return stats
 
 def reconcile_baseline_before_run(
@@ -12312,6 +12318,7 @@ def main() -> int:
             "cache": cache_sync, "rules": rules_path, "config": cfg_path,
         }
         try:
+            baseline_sync_started = time.perf_counter()
             # Only an exact byte-for-byte match to a previously successful
             # FULL export may skip repeated expensive baseline synchronization.
             # Any change or unreadable marker runs the authoritative workflow.
@@ -12329,6 +12336,8 @@ def main() -> int:
                 )
                 LOG.info("INPUT BASELINE SYNC OK | inserted=%s | final_rows=%s",
                          sync_stats.get("input_registered", 0), sync_stats.get("final_rows", 0))
+            LOG.info("INPUT BASELINE SYNC DURATION | elapsed=%.1fs",
+                     time.perf_counter()-baseline_sync_started)
         except Exception as exc:
             LOG.error("INPUT BASELINE SYNC FAILED; interrompendo para preservar os dados: %s", exc)
             return 2
