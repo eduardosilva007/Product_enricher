@@ -12894,6 +12894,25 @@ def gate(cfg,args):
     jev=cfg.get("jev",{})
     key=jev.get("api_key_env") or "TYPESAFE_API_KEY"
     if not os.getenv(key):raise ValueError(f"JEV credential not configured: {key}")
+    # Cheap but mandatory before cloning large workbooks or paying Search.
+    # The worker's full classifier preflight still validates all model paths.
+    missing=[]
+    for name in ("requests", "torch", "sentence_transformers", "transformers"):
+        try:
+            __import__(name)
+        except ImportError:
+            missing.append(name)
+    if missing:
+        raise RuntimeError(
+            "OVERNIGHT_CLASSIFIER_DEPENDENCY_MISSING: " + ", ".join(missing)
+        )
+    models=cfg.get("semantic_funnel",{}) or {}
+    if models.get("local_files_only"):
+        for name in ("embedding_model", "reranker_model"):
+            path=safe(models.get(name))
+            if not path or not Path(path).expanduser().exists():
+                raise RuntimeError("OVERNIGHT_LOCAL_MODEL_MISSING: " + name)
+    LOG.info("OVERNIGHT PREFLIGHT OK | dependencies=4 | local_models=CHECKED | search_requests=0")
 
 def import_prior_reservations(destination: Path, history_root: Path = OUT) -> dict:
     """Seed the NEW isolated SQLite with earlier real reservation attempts.
