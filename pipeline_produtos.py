@@ -2884,7 +2884,20 @@ def _provider_request_once(
         try:
             results = _normalize_brightdata_results(payload)
         except RuntimeError as exc:
-            raise OperationalPause("BRIGHTDATA_SCHEMA", safe(exc)) from exc
+            # Preserve safe structural diagnostics only: never log the SERP
+            # response body, credentials, submitted query or result content.
+            wrapper = payload.get("body", payload)
+            if isinstance(wrapper, str):
+                try:
+                    wrapper = json.loads(wrapper)
+                except (ValueError, TypeError):
+                    wrapper = None
+            top_keys = sorted(str(k) for k in payload.keys())[:20]
+            body_keys = sorted(str(k) for k in wrapper.keys())[:20] if isinstance(wrapper, dict) else []
+            raise OperationalPause(
+                "BRIGHTDATA_SCHEMA",
+                f"{safe(exc)}; payload_keys={top_keys}; body_type={type(wrapper).__name__}; body_keys={body_keys}",
+            ) from exc
         return results, {
             "requests": budget.used,
             "provider_units": 1,
@@ -3628,10 +3641,14 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                     or exc.code.endswith("_CONFIG")
                 ):
                     router.disable(active_slot.account, exc.code)
-                    # Configuration/authentication problems require a human
-                    # preflight. Do not burn the next SKU on another bad zone.
-                    if exc.code.endswith(("_CONFIG", "_AUTH")):
-                        LOG.error("ROUTER | conta=%s bloqueada por %s; campanha pausada", active_slot.account, exc.code)
+                    # A schema mismatch is not proof that the account is
+                    # exhausted. Stop after one SKU rather than disabling
+                    # every provider slot and losing the remaining cohort.
+                    if exc.code.endswith(("_CONFIG", "_AUTH", "_SCHEMA")):
+                        LOG.error(
+                            "ROUTER | conta=%s bloqueada por %s; campanha pausada; detalhe=%s",
+                            active_slot.account, exc.code, safe(exc),
+                        )
                         completed = False
                         break
                     LOG.warning("ROUTER | conta desabilitada=%s | reason=%s", active_slot.account, exc.code)
