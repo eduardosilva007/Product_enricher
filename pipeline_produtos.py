@@ -9629,6 +9629,26 @@ def persist_baseline_excels(
         stats["sqlite_registry_status"] = registry["status"]
         if registry["status"] == "SQLITE_MERGED":
             stats["sqlite_registry_keys"] = registry["unique_final_keys"]
+
+    # A previously successful, fully verified export is the ONLY event that
+    # authorizes later starts to skip rebuilding identical Excel baselines.
+    # This cannot bypass the classifier, rules or central integrity gates.
+    if (cfg and not cfg.get("_nightly_output_only") and all(
+            p is not None and Path(p).is_file()
+            for p in (input_path, master_path, final_path, cache_path, rules.path)
+    )):
+        from input_sync_manifest import record_success
+        try:
+            sync_files = {
+                "input": input_path, "master": master_path,
+                "final": final_path, "cache": cache_path, "rules": rules.path,
+                "config": Path(cfg.get("_source_config_path", "pipeline_config.json")),
+            }
+            record_success(sync_files)
+            LOG.info("INPUT BASELINE SYNC SNAPSHOT SAVED | source_hashes=6 | api_calls=0")
+        except Exception as exc:
+            # Cache publication is optional, baseline persistence is not.
+            LOG.warning("INPUT BASELINE SYNC SNAPSHOT SKIPPED | %s", type(exc).__name__)
     return stats
 
 def reconcile_baseline_before_run(
@@ -12017,6 +12037,7 @@ def main() -> int:
     rules_path = (base / args.rules).resolve() if not Path(args.rules).is_absolute() else Path(args.rules)
     env_info = load_env_file(base / ".env")
     cfg = read_json(cfg_path)
+    cfg["_source_config_path"] = str(cfg_path)
     collection_policy_name = args.collection_policy or safe((cfg.get("files", {}) or {}).get("collection_policy")) or "collection_quality_policy.json"
     collection_policy_path = (base / collection_policy_name).resolve() if not Path(collection_policy_name).is_absolute() else Path(collection_policy_name)
     collection_policy = read_json(collection_policy_path)
@@ -12260,26 +12281,37 @@ def main() -> int:
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
     if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and args.auto_providers):
+        from input_sync_manifest import is_current
         files_cfg = cfg.get("files", {}) or {}
         input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
-        master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
-        final_sync = Path(files_cfg.get("final", "Base Final Produtos Enriquecida.xlsx"))
+        master_sync = Path(args.master or files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
+        final_sync = Path(args.final or files_cfg.get("final", "Base Final Produtos Enriquecida.xlsx"))
+        cache_sync = Path(args.cache or files_cfg.get("cache", "cache_tavily.sqlite"))
         if not input_sync.exists():
             LOG.error("Sincronização não iniciada: Base de entrada ausente: %s", input_sync)
             return 2
+        sync_sources = {
+            "input": input_sync, "master": master_sync, "final": final_sync,
+            "cache": cache_sync, "rules": rules_path, "config": cfg_path,
+        }
         try:
-            _backup_baseline_files(
-                master_sync, final_sync,
-                Path(files_cfg.get("baseline_backup_dir", "Backups_Baseline")),
-            )
-            sync_stats = persist_baseline_excels(
-                rows=[], master_path=master_sync, final_path=final_sync,
-                input_path=input_sync, rules=rules,
-                cache_path=Path(args.cache or files_cfg.get("cache", "cache_tavily.sqlite")),
-                cfg=cfg,
-            )
-            LOG.info("INPUT BASELINE SYNC OK | inserted=%s | final_rows=%s",
-                     sync_stats.get("input_registered", 0), sync_stats.get("final_rows", 0))
+            # Only an exact byte-for-byte match to a previously successful
+            # FULL export may skip repeated expensive baseline synchronization.
+            # Any change or unreadable marker runs the authoritative workflow.
+            if args.mode != "sync-input" and is_current(sync_sources):
+                LOG.info("INPUT BASELINE SYNC CACHE_HIT | files=6 | skipped_excel_rebuild=SIM")
+            else:
+                LOG.info("INPUT BASELINE SYNC CACHE_MISS | full_authoritative_sync=SIM")
+                _backup_baseline_files(
+                    master_sync, final_sync,
+                    Path(files_cfg.get("baseline_backup_dir", "Backups_Baseline")),
+                )
+                sync_stats = persist_baseline_excels(
+                    rows=[], master_path=master_sync, final_path=final_sync,
+                    input_path=input_sync, rules=rules, cache_path=cache_sync, cfg=cfg,
+                )
+                LOG.info("INPUT BASELINE SYNC OK | inserted=%s | final_rows=%s",
+                         sync_stats.get("input_registered", 0), sync_stats.get("final_rows", 0))
         except Exception as exc:
             LOG.error("INPUT BASELINE SYNC FAILED; interrompendo para preservar os dados: %s", exc)
             return 2
