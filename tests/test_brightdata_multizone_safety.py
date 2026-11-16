@@ -101,8 +101,10 @@ class TestBrightDataMultiZone(unittest.TestCase):
         with patch.dict(os.environ,env,clear=True), patch("pipeline_produtos._provider_post_once",side_effect=fake_post):
             results, usage=_provider_request_once("brightdata","BRAND MODEL",cfg,None,CollectionRequestBudget("brightdata"))
         self.assertEqual(len(calls),1)
-        self.assertIn("brd_json=1",calls[0]["url"])
-        self.assertEqual(calls[0]["data_format"],"parsed_light")
+        self.assertIn("q=BRAND+MODEL",calls[0]["url"])
+        self.assertNotIn("brd_json",calls[0]["url"])
+        self.assertEqual(calls[0]["format"],"json")
+        self.assertNotIn("data_format",calls[0])
         self.assertEqual(results[0]["title"],"SKU part")
         self.assertEqual(usage["requests"],1)
 
@@ -130,4 +132,5 @@ class TestBrightDataMultiZone(unittest.TestCase):
         cfg={"collection":{"hard_limits":{"max_requests_per_product":1},
                            "providers":{"brightdata":{"format":"raw","data_format":"parsed_light"}}}}
         self.assertTrue(any("format deve ser json" in x for x in validate_collection_cost_policy(cfg)))
+        self.assertTrue(any("remova data_format" in x for x in validate_collection_cost_policy(cfg)))
 if __name__=="__main__": unittest.main()
