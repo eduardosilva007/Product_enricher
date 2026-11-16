@@ -31,7 +31,7 @@ def main():
     response=requests.post(
         "https://api.brightdata.com/request",
         headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
-        json={"zone":zone,"url":"https://www.google.com/search?q=pizza","format":"json","data_format":"parsed_light"},
+        json={"zone":zone,"url":"https://www.google.com/search?q=pizza&brd_json=1","format":"json","data_format":"parsed_light"},
         timeout=60,allow_redirects=False)
     print(f"HTTP_STATUS={response.status_code} HTTP_REQUESTS=1 DB_WRITES=0")
     if not 200<=response.status_code<300:
@@ -40,7 +40,13 @@ def main():
     if response.headers.get("x-brd-error") or response.headers.get("x-brd-error-code"):
         print("BRIGHTDATA_PROVIDER_ERROR_HEADER")
         return 3
-    try: results=_normalize_brightdata_results(response.json())
+    try:
+        payload=response.json()
+        upstream=payload.get("status_code",200) if isinstance(payload,dict) else None
+        if upstream is None or not 200 <= int(upstream) < 300:
+            print(f"BRIGHTDATA_UPSTREAM_FAILED status={upstream}")
+            return 4
+        results=_normalize_brightdata_results(payload)
     except (ValueError,TypeError,RuntimeError):
         print("BRIGHTDATA_RESPONSE_SCHEMA_INVALID")
         return 4
