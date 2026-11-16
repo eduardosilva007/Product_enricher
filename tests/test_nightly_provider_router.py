@@ -65,9 +65,9 @@ class RouterIntegrationTests(unittest.TestCase):
         with patch.dict(os.environ, {"TAVILY_API_KEY":"test-key", "TAVILY_LIMIT_1":""},clear=True):
             self.assertEqual(configured_slots(),[])
     def test_multi_key_config(self):
-        env={"BRIGHTDATA_API_KEY":"a","BRIGHTDATA_API_KEY_2":"b",
-             "BRIGHTDATA_ZONE":"z", "BRIGHTDATA_LIMIT_1":"2",
-             "BRIGHTDATA_LIMIT_2":"3"}
+        env={"BRIGHTDATA_API_KEY_1":"a","BRIGHTDATA_API_KEY_2":"b",
+             "BRIGHTDATA_ZONE_1":"serp_api1", "BRIGHTDATA_ZONE_2":"serp_api2",
+             "BRIGHTDATA_LIMIT_1":"2","BRIGHTDATA_LIMIT_2":"3"}
         with patch.dict(os.environ,env,clear=True):
             self.assertEqual([s.account for s in configured_slots()], ["brightdata:1","brightdata:2"])
 if __name__ == "__main__":
