@@ -1925,9 +1925,10 @@ def validate_collection_cost_policy(cfg: Dict[str, Any]) -> List[str]:
         response_format = safe(bright.get("format", "json")).casefold() or "json"
         if response_format != "json":
             errors.append(f"BRIGHTDATA_CONFIG: format deve ser json; recebido={response_format}")
-        fmt = safe(bright.get("data_format", "parsed_light")).casefold() or "parsed_light"
-        if fmt != "parsed_light":
-            errors.append(f"BRIGHTDATA_CONFIG: somente parsed_light permitido; recebido={fmt}")
+        # REST SERP JSON is selected by format=json. The REST reference
+        # documents data_format only for other transformations, not parsed_light.
+        if safe(bright.get("data_format")):
+            errors.append("BRIGHTDATA_CONFIG: remova data_format; SERP JSON usa format=json")
     return errors
 
 
@@ -2878,20 +2879,15 @@ def _provider_request_once(
         max_results = min(10, max_results)
         url = safe(pcfg.get("base_url")) or "https://api.brightdata.com/request"
         headers = {"Authorization": f"Bearer {creds['api_key']}", "Content-Type": "application/json"}
-        # Bright Data requires brd_json=1 on the TARGET URL for structured
-        # Google SERP output. data_format alone does not guarantee JSON.
-        # Google's num parameter is deprecated; the light contract supplies
-        # up to ten organic results without a second request.
-        google_url = "https://www.google.com/search?" + urlencode({"q": query, "brd_json": "1"})
+        # Official REST SERP API example: standard Google query URL,
+        # format=json; no undocumented data_format or brd_json parameters.
+        google_url = "https://www.google.com/search?" + urlencode({"q": query})
         body = {
             "zone": creds["zone"],
             "url": google_url,
-            # Bright Data SERP API contract for parsed Light JSON.
-            # Hardcoded fail-closed: no Raw HTML / Full JSON / Bing / Markdown fallback.
-            # JSON + parsed_light: matches Bright Data's configured sample.
-            # The strict adapter accepts a JSON wrapper or direct body.
+            # Official REST SERP API: response is structured JSON.
+            # Strict adapter accepts either direct organic[] or a JSON envelope.
             "format": "json",
-            "data_format": "parsed_light",
         }
         payload = _provider_post_once(provider, url, headers, body, timeout, limiter, budget)
         # format=json wraps the *upstream* HTTP status in the response body.
