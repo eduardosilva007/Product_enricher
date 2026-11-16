@@ -9617,6 +9617,17 @@ def persist_baseline_excels(
             input_path=input_path,
             cache_path=cache_path,
         )
+        if rows:
+            from final_cohort_coverage import audit_final_cohort
+            physical = audit_final_cohort(final_path, rows)
+            stats["final_cohort_exact_present"] = physical["present"]
+            stats["final_cohort_exact_missing"] = physical["missing"]
+            LOG.info(
+                "FULL FINAL ROW COVERAGE | attempted=%d | unique_exact=%d | "
+                "present=%d | missing=%d | status=%s",
+                physical["attempted"], physical["unique_exact"],
+                physical["present"], physical["missing"], physical["status"],
+            )
 
     inv_after = load_baseline_inventory(master_path, final_path)
     stats["master_accepted_total"] = len(inv_after["master_accepted"])
@@ -10888,6 +10899,12 @@ def run_pipeline(
                         "BASELINE EXCEL NÃO ATUALIZADA: %s",
                         baseline_warning,
                     )
+                    if args.mode == "full" and explicit_targets is not None:
+                        # A FULL campaign must not report success if physical
+                        # Final row coverage or the Excel export failed.
+                        raise RuntimeError(
+                            f"FULL_FINAL_PERSISTENCE_FAILED: {baseline_warning}"
+                        ) from exc
 
             summary = {
                 "Pipeline Version": PIPELINE_VERSION,
@@ -13178,6 +13195,10 @@ def outcome_audit(run,state,isolated):
             if (len(set(result_keys)) != len(result_keys)
                     or not set(result_keys).issubset(cohort_keys)):
                 result_errors.append("RESULT_COHORT_MISMATCH")
+            # A new output-only overnight run must account for ALL attempted
+            # SKUs, even those without evidence or accepted classification.
+            if output_only and set(result_keys) != cohort_keys:
+                result_errors.append("NIGHT_RESULT_EXACT_COHORT_COVERAGE_FAILED")
             for _, row in results.iterrows():
                 resolved = safe(row.get("Resolution State")) == "RESOLVED"
                 eligible = safe(row.get("Auto Eligible")).upper() == "SIM"
