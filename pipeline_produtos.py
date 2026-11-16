@@ -12385,8 +12385,29 @@ class DurableRouter:
         self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
             account TEXT PRIMARY KEY, reason TEXT NOT NULL,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        # Bright Data LIMIT_N is the remaining NEW-request authorization at
+        # activation, not a lifetime counter. Persist the historical watermark
+        # once; it is never recalculated on restart or env edits.
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_budget_epochs (
+            account TEXT PRIMARY KEY, baseline_attempts INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
         self.conn.commit()
         self.slots=slots
+        if any(slot.provider == "brightdata" for slot in slots):
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                for slot in slots:
+                    if slot.provider != "brightdata":
+                        continue
+                    self.conn.execute(
+                        """INSERT OR IGNORE INTO collection_budget_epochs(account, baseline_attempts)
+                           SELECT ?, COUNT(*) FROM collection_attempt_reservations WHERE account=?""",
+                        (slot.account, slot.account),
+                    )
+                self.conn.commit()
+            except BaseException:
+                self.conn.rollback()
+                raise
 
     def choose(self, key: str) -> Optional[Slot]:
         if self.conn.execute("SELECT 1 FROM collection_attempt_reservations WHERE business_key=?", (key,)).fetchone():
@@ -12395,15 +12416,35 @@ class DurableRouter:
             if self.conn.execute("SELECT 1 FROM collection_disabled_accounts WHERE account=?", (slot.account,)).fetchone():
                 continue
             used = self.conn.execute("SELECT COUNT(*) FROM collection_attempt_reservations WHERE account=?", (slot.account,)).fetchone()[0]
+            if slot.provider == "brightdata":
+                baseline = self.conn.execute(
+                    "SELECT baseline_attempts FROM collection_budget_epochs WHERE account=?",
+                    (slot.account,),
+                ).fetchone()
+                if baseline is None:
+                    raise RuntimeError("BRIGHTDATA_BUDGET_BASELINE_MISSING")
+                used -= baseline[0]
+                if used < 0:
+                    raise RuntimeError("BRIGHTDATA_BUDGET_LEDGER_INCONSISTENT")
             if used >= slot.limit:
                 continue
-            # A shared billing group requires *the same total cap* configured on each key.
+            # Shared billing-group limits also subtract historical Bright Data
+            # reservations, but never erase them from the attempt ledger.
             group_slots = [s for s in self.slots if s.group == slot.group]
             group_limit = group_slots[0].limit
             group_used = self.conn.execute(
                 "SELECT COUNT(*) FROM collection_attempt_reservations WHERE account IN (" +
                 ",".join("?" for _ in group_slots) + ")",
                 [s.account for s in group_slots]).fetchone()[0]
+            if slot.provider == "brightdata":
+                group_baseline = sum(
+                    self.conn.execute(
+                        "SELECT baseline_attempts FROM collection_budget_epochs WHERE account=?",
+                        (other.account,),
+                    ).fetchone()[0]
+                    for other in group_slots
+                )
+                group_used -= group_baseline
             if group_used >= group_limit:
                 continue
             return slot
