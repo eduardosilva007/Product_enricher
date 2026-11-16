@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from pipeline_produtos import load_env_file,configured_slots,_provider_credentials,validate_collection_cost_policy,DurableRouter,_normalize_brightdata_results
+from pipeline_produtos import load_env_file,configured_slots,_provider_credentials,validate_collection_cost_policy,DurableRouter,_normalize_brightdata_results,_provider_request_once,CollectionRequestBudget,OperationalPause
 
 class TestBrightDataMultiZone(unittest.TestCase):
     def test_two_independent_zones(self):
@@ -85,6 +85,45 @@ class TestBrightDataMultiZone(unittest.TestCase):
             _normalize_brightdata_results({"status":"ok"})
         with self.assertRaisesRegex(RuntimeError,"organic"):
             _normalize_brightdata_results({"general":{},"error":"denied"})
+
+    def test_structured_serp_url_and_wrapped_json(self):
+        env={"BRIGHTDATA_API_KEY_1":"a","BRIGHTDATA_ZONE_1":"serp_api1"}
+        cfg={"collection":{"providers":{"brightdata":{"max_results":10}}},
+             "_active_search_slot":{"provider":"brightdata",
+                                    "key_env":"BRIGHTDATA_API_KEY_1",
+                                    "zone_env":"BRIGHTDATA_ZONE_1"}}
+        calls=[]
+        def fake_post(provider,url,headers,body,timeout,limiter,budget):
+            calls.append(body)
+            budget.reserve()
+            return {"status_code":200,"headers":{},
+                    "body":'{"organic":[{"title":"SKU part","link":"https://example.com/a","description":"part"}]}'}
+        with patch.dict(os.environ,env,clear=True), patch("pipeline_produtos._provider_post_once",side_effect=fake_post):
+            results, usage=_provider_request_once("brightdata","BRAND MODEL",cfg,None,CollectionRequestBudget("brightdata"))
+        self.assertEqual(len(calls),1)
+        self.assertIn("brd_json=1",calls[0]["url"])
+        self.assertEqual(calls[0]["data_format"],"parsed_light")
+        self.assertEqual(results[0]["title"],"SKU part")
+        self.assertEqual(usage["requests"],1)
+
+    def test_upstream_error_and_html_not_evidence(self):
+        env={"BRIGHTDATA_API_KEY_1":"a","BRIGHTDATA_ZONE_1":"serp_api1"}
+        cfg={"collection":{"providers":{"brightdata":{}}},
+             "_active_search_slot":{"provider":"brightdata",
+                                    "key_env":"BRIGHTDATA_API_KEY_1",
+                                    "zone_env":"BRIGHTDATA_ZONE_1"}}
+        for payload, code in [
+            ({"status_code":403,"body":"<html>Access denied</html>","headers":{}},"BRIGHTDATA_UPSTREAM"),
+            ({"status_code":200,"body":"<!DOCTYPE html><html>interstitial</html>","headers":{}},"BRIGHTDATA_SCHEMA"),
+        ]:
+            with self.subTest(code=code), patch.dict(os.environ,env,clear=True), patch(
+                "pipeline_produtos._provider_post_once",return_value=payload
+            ):
+                with self.assertRaises(OperationalPause) as cm:
+                    _provider_request_once("brightdata","BRAND MODEL",cfg,None,CollectionRequestBudget("brightdata"))
+                self.assertEqual(cm.exception.code,code)
+                self.assertNotIn("Access denied",str(cm.exception))
+                self.assertNotIn("interstitial",str(cm.exception))
 
     def test_json_policy(self):
         cfg={"collection":{"hard_limits":{"max_requests_per_product":1},
