@@ -10,7 +10,11 @@ def main():
     p.add_argument("--env",default=".env")
     p.add_argument("--slot",type=int,choices=(1,2,3,4),default=1)
     p.add_argument("--live",action="store_true",help="Authorize one potentially billed POST")
+    p.add_argument("--reactivate-schema",action="store_true",help="After a successful live preflight, clear only this account\u0027s BRIGHTDATA_SCHEMA lock, with an audit record")
+    p.add_argument("--db",default="pipeline_v3.sqlite",help="Existing operational SQLite database")
     a=p.parse_args()
+    if a.reactivate_schema and not a.live:
+        p.error("--reactivate-schema requires --live")
     sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
     from pipeline_produtos import load_env_file,configured_slots,_normalize_brightdata_results
     load_env_file(Path(a.env))
@@ -41,6 +45,46 @@ def main():
         print("BRIGHTDATA_RESPONSE_SCHEMA_INVALID")
         return 4
     print(f"BRIGHTDATA_LIVE_OK ORGANIC_RESULTS={len(results)}")
+    if a.reactivate_schema:
+        if not results:
+            print("REACTIVATION_BLOCKED: live preflight returned no organic results")
+            return 5
+        import sqlite3
+        db=Path(a.db)
+        if not db.is_file():
+            print("REACTIVATION_BLOCKED: operational database does not exist")
+            return 6
+        with sqlite3.connect(db,timeout=30) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            table=conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='collection_disabled_accounts'"
+            ).fetchone()
+            if not table:
+                print("REACTIVATION_BLOCKED: router disabled-account table missing")
+                return 7
+            reason=conn.execute(
+                "SELECT reason FROM collection_disabled_accounts WHERE account=?",
+                (slot.account,),
+            ).fetchone()
+            if reason is None:
+                print("REACTIVATION_NOT_NEEDED: account is not disabled")
+            elif reason[0]!="BRIGHTDATA_SCHEMA":
+                print(f"REACTIVATION_BLOCKED: current lock={reason[0]}")
+                return 8
+            else:
+                conn.execute("""CREATE TABLE IF NOT EXISTS collection_router_reactivations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL,
+                    previous_reason TEXT NOT NULL, verification TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                conn.execute(
+                    "INSERT INTO collection_router_reactivations(account,previous_reason,verification) VALUES(?,?,?)",
+                    (slot.account,"BRIGHTDATA_SCHEMA","LIVE_PREFLIGHT_HTTP_200_WITH_ORGANIC"),
+                )
+                conn.execute(
+                    "DELETE FROM collection_disabled_accounts WHERE account=? AND reason=?",
+                    (slot.account,"BRIGHTDATA_SCHEMA"),
+                )
+                print(f"SCHEMA_LOCK_REACTIVATED account={slot.account}; old SKU reservations preserved")
     return 0
 
 if __name__=="__main__": raise SystemExit(main())
