@@ -31,7 +31,7 @@ def main():
     response=requests.post(
         "https://api.brightdata.com/request",
         headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
-        json={"zone":zone,"url":"https://www.google.com/search?q=pizza&brd_json=1","format":"json","data_format":"parsed_light"},
+        json={"zone":zone,"url":"https://www.google.com/search?q=pizza","format":"json"},
         timeout=60,allow_redirects=False)
     db_write_state = "PENDING_REACTIVATION" if a.reactivate_schema else "0"
     print(f"HTTP_STATUS={response.status_code} HTTP_REQUESTS=1 DB_WRITES={db_write_state}")
