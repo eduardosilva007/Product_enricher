@@ -11951,14 +11951,28 @@ def main() -> int:
         return 2
 
     if env_info["exists"]:
+        # Diagnóstico por slot, sem exibir tokens ou depender de variáveis
+        # legadas sem sufixo. Não ativa slots nem consome créditos.
+        bright_slots_status = []
+        for n in range(1, 5):
+            suffix = f"_{n}"
+            api_key = os.getenv(f"BRIGHTDATA_API_KEY{suffix}", "").strip()
+            zone = os.getenv(f"BRIGHTDATA_ZONE{suffix}", "").strip()
+            limit = os.getenv(f"BRIGHTDATA_LIMIT{suffix}", "").strip()
+            if api_key or zone or limit:
+                state = "OK" if api_key and zone and limit.isdigit() and int(limit) > 0 else "INCOMPLETO"
+                bright_slots_status.append(f"{n}:{state}")
+        if not bright_slots_status:
+            legacy_key = os.getenv("BRIGHTDATA_API_KEY", "").strip()
+            legacy_zone = os.getenv("BRIGHTDATA_ZONE", "").strip()
+            bright_slots_status = ["LEGACY:CONFIGURADA" if legacy_key and legacy_zone else "AUSENTE"]
         LOG.info(
-            ".env carregado: %s | CLEF=%s | TAVILY=%s | SERPER=%s | BRIGHTDATA=%s | BRIGHTDATA_ZONE=%s",
+            ".env carregado: %s | CLEF=%s | TAVILY=%s | SERPER=%s | BRIGHTDATA_SLOTS=%s",
             env_info["path"],
             "CONFIGURADA" if bool(os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()) and bool((os.getenv("CLOUDFLARE_API_TOKEN", "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip())) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("TAVILY_API_KEY", "").strip()) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("SERPER_API_KEY", "").strip()) else "AUSENTE",
-            "CONFIGURADA" if bool(os.getenv("BRIGHTDATA_API_KEY", "").strip()) else "AUSENTE",
-            "CONFIGURADA" if bool(os.getenv("BRIGHTDATA_ZONE", "").strip()) else "AUSENTE",
+            ",".join(bright_slots_status),
         )
     else:
         LOG.warning(".env não encontrado em: %s", env_info["path"])
