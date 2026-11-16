@@ -33,7 +33,8 @@ def main():
         headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
         json={"zone":zone,"url":"https://www.google.com/search?q=pizza&brd_json=1","format":"json","data_format":"parsed_light"},
         timeout=60,allow_redirects=False)
-    print(f"HTTP_STATUS={response.status_code} HTTP_REQUESTS=1 DB_WRITES={\u0027PENDING_REACTIVATION\u0027 if a.reactivate_schema else 0}")
+    db_write_state = "PENDING_REACTIVATION" if a.reactivate_schema else "0"
+    print(f"HTTP_STATUS={response.status_code} HTTP_REQUESTS=1 DB_WRITES={db_write_state}")
     if not 200<=response.status_code<300:
         print("BRIGHTDATA_REQUEST_FAILED; inspect provider dashboard")
         return 2
