@@ -7212,10 +7212,10 @@ def _baseline_row_accepted(row: Any, df: Any) -> bool:
         return False
     return True
 
-def _accepted_keys_from_baseline_file(
+def _accepted_keys_from_baseline_file_uncached(
     path: Optional[Path],
 ) -> Tuple[set, set, set]:
-    """Retorna (aceitos, manuais, bi_ok_locked) de um baseline."""
+    """Leitura autoritativa da planilha; nunca usa cache."""
     accepted: set = set()
     manual: set = set()
     bi_locked: set = set()
@@ -7252,6 +7252,31 @@ def _accepted_keys_from_baseline_file(
             accepted.add(key)
 
     return accepted, manual, bi_locked
+
+def _accepted_keys_from_baseline_file(
+    path: Optional[Path],
+) -> Tuple[set, set, set]:
+    """Content-addressed optimization, preserving original loader semantics."""
+    if not path or not path.is_file():
+        return _accepted_keys_from_baseline_file_uncached(path)
+    from baseline_inventory_cache import cached_baseline_keys
+    # Any changes to the baseline-acceptance logic or its source file invalidate
+    # all persisted derived inventories automatically. No business taxonomy is
+    # ever read from this cache.
+    from pathlib import Path as _Path
+    import hashlib as _hashlib
+    logic_hasher = _hashlib.sha256()
+    with _Path(__file__).open("rb") as logic_source:
+        while True:
+            block = logic_source.read(1024 * 1024)
+            if not block:
+                break
+            logic_hasher.update(block)
+    return cached_baseline_keys(
+        path, _accepted_keys_from_baseline_file_uncached,
+        logic_digest=logic_hasher.hexdigest(),
+    )
+
 
 def load_baseline_inventory(
     master_path: Optional[Path],
