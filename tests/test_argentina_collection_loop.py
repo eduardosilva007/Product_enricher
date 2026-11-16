@@ -200,11 +200,11 @@ class CollectionAutoProviderTests(unittest.TestCase):
                 summary={"RAW_EMPTY":1})
             cfg = {"files":{"cache":args.cache,"classification_db":args.db}}
             slot = Slot("tavily","tavily:1","TAVILY_API_KEY","",20,"t")
-            with patch.object(p,"validate_collection_cost_policy",return_value=[]), \\
-                 patch.object(p,"load_baseline_inventory",return_value={"processed":set()}), \\
-                 patch.object(p,"build_precollection_plan",side_effect=[empty,selected]), \\
-                 patch.object(p,"configured_slots",return_value=[slot]), \\
-                 patch.object(p,"search_product_once") as search, \\
+            with patch.object(p,"validate_collection_cost_policy",return_value=[]), \
+                 patch.object(p,"load_baseline_inventory",return_value={"processed":set()}), \
+                 patch.object(p,"build_precollection_plan",side_effect=[empty,selected]), \
+                 patch.object(p,"configured_slots",return_value=[slot]), \
+                 patch.object(p,"search_product_once") as search, \
                  patch("builtins.input",side_effect=["S","N"]) as prompts:
                 self.assertFalse(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
                 self.assertEqual(prompts.call_count,2)
