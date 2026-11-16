@@ -9645,19 +9645,25 @@ def persist_baseline_excels(
     # A previously successful, fully verified export is the ONLY event that
     # authorizes later starts to skip rebuilding identical Excel baselines.
     # This cannot bypass the classifier, rules or central integrity gates.
+    # Tests and maintenance tools can pass a minimal Rules-like object.
+    # A missing source path must disable the optional optimization, never
+    # break the authoritative baseline export or weaken the integrity checks.
+    rules_source = getattr(rules, "path", None)
+    config_source = cfg.get("_source_config_path") if cfg else None
     if (cfg and not cfg.get("_nightly_output_only")
             and stats.get("baseline_missing_in_final") == 0
             and stats.get("sqlite_registry_status") == "SQLITE_MERGED"
             and all(
                 p is not None and Path(p).is_file()
-                for p in (input_path, master_path, final_path, cache_path, rules.path)
+                for p in (input_path, master_path, final_path, cache_path,
+                          rules_source, config_source)
             )):
         from input_sync_manifest import record_success
         try:
             sync_files = {
                 "input": input_path, "master": master_path,
-                "final": final_path, "cache": cache_path, "rules": rules.path,
-                "config": Path(cfg.get("_source_config_path", "pipeline_config.json")),
+                "final": final_path, "cache": cache_path,
+                "rules": rules_source, "config": config_source,
             }
             record_success(sync_files)
             LOG.info("INPUT BASELINE SYNC SNAPSHOT SAVED | source_hashes=6 | api_calls=0")
