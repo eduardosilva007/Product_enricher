@@ -173,12 +173,14 @@ class CollectionAutoProviderTests(unittest.TestCase):
                  patch.object(p,"search_product_once",return_value=payload) as search, \
                  patch.object(p,"TavilyWritableStore"), \
                  patch.object(p,"_export_collection_quality_report"), \
-                 patch("builtins.input",return_value="S"):
+                 patch("builtins.input",side_effect=["S", "CONFIRMAR"]) as confirm:
                 self.assertTrue(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
                 self.assertEqual(build.call_count,2)
                 self.assertTrue(build.call_args.kwargs["recollect_empty"])
                 self.assertEqual(build.call_args.kwargs["max_tavily_new"],20)
                 self.assertEqual(search.call_count,1)
+                self.assertEqual(confirm.call_count,2)
+                self.assertIn("CONFIRMAR", confirm.call_args_list[1].args[0])
 
     def test_no_explicit_budget_does_not_start_collection(self):
         with tempfile.TemporaryDirectory() as d:
