@@ -1,12 +1,13 @@
 """Offline Bright Data multizone regression checks (no API/DB)."""
 import os
+import sqlite3
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from pipeline_produtos import load_env_file,configured_slots,_provider_credentials,validate_collection_cost_policy
+from pipeline_produtos import load_env_file,configured_slots,_provider_credentials,validate_collection_cost_policy,DurableRouter
 
 class TestBrightDataMultiZone(unittest.TestCase):
     def test_two_independent_zones(self):
@@ -37,6 +38,43 @@ class TestBrightDataMultiZone(unittest.TestCase):
             path.write_text("BRIGHTDATA_ZONE=serp_api1\nBRIGHTDATA_ZONE=serp_api2\n")
             with patch.dict(os.environ,{},clear=True):
                 with self.assertRaisesRegex(ValueError,"DUPLICATE_PROVIDER_ENV_KEY"): load_env_file(path)
+    def test_remaining_budget_excludes_historical_reservations(self):
+        env={"BRIGHTDATA_API_KEY_1":"a","BRIGHTDATA_ZONE_1":"serp_api1","BRIGHTDATA_LIMIT_1":"2",
+             "BRIGHTDATA_API_KEY_2":"b","BRIGHTDATA_ZONE_2":"serp_api2","BRIGHTDATA_LIMIT_2":"3"}
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ,env,clear=True):
+            db=Path(d)/"ledger.sqlite"
+            with sqlite3.connect(db) as con:
+                con.execute("CREATE TABLE collection_attempt_reservations (business_key TEXT PRIMARY KEY, account TEXT NOT NULL, provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+                con.executemany("INSERT INTO collection_attempt_reservations(business_key,account,provider) VALUES(?,?,?)",
+                                [(f"old-{n}","brightdata:1","brightdata") for n in range(5000)])
+            router=DurableRouter(db,configured_slots())
+            try:
+                self.assertEqual(router.reserve("new-1").account,"brightdata:1")
+                self.assertEqual(router.reserve("new-2").account,"brightdata:1")
+                self.assertEqual(router.reserve("new-3").account,"brightdata:2")
+                self.assertIsNone(router.reserve("old-1"))
+                baseline=router.conn.execute("SELECT baseline_attempts FROM collection_budget_epochs WHERE account='brightdata:1'").fetchone()[0]
+                self.assertEqual(baseline,5000)
+            finally: router.close()
+            router=DurableRouter(db,configured_slots())
+            try:
+                self.assertEqual(router.conn.execute("SELECT baseline_attempts FROM collection_budget_epochs WHERE account='brightdata:1'").fetchone()[0],5000)
+                self.assertEqual(router.reserve("new-4").account,"brightdata:2")
+            finally: router.close()
+
+    def test_schema_block_not_silently_cleared(self):
+        env={"BRIGHTDATA_API_KEY_1":"a","BRIGHTDATA_ZONE_1":"serp_api1","BRIGHTDATA_LIMIT_1":"2"}
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ,env,clear=True):
+            db=Path(d)/"ledger.sqlite"
+            router=DurableRouter(db,configured_slots())
+            router.disable("brightdata:1","BRIGHTDATA_SCHEMA")
+            router.close()
+            router=DurableRouter(db,configured_slots())
+            try:
+                self.assertIsNone(router.reserve("new"))
+                self.assertEqual(router.conn.execute("SELECT COUNT(*) FROM collection_attempt_reservations").fetchone()[0],0)
+            finally: router.close()
+
     def test_json_policy(self):
         cfg={"collection":{"hard_limits":{"max_requests_per_product":1},
                            "providers":{"brightdata":{"format":"raw","data_format":"parsed_light"}}}}
