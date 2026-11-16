@@ -68,7 +68,10 @@ class OvernightQualityGatesTests(unittest.TestCase):
         self.assertIn('FALSE_AUTO_ELIGIBLE', src)
         self.assertIn('RESULT_COHORT_MISMATCH', src)
         self.assertIn('set(result_keys).issubset(cohort_keys)', src)
-        self.assertNotIn('set(result_keys) != cohort_keys', src)
+        # Isolated output-only work must account for every attempted SKU;
+        # conventional runs still permit audited partial classification.
+        self.assertIn('if output_only and set(result_keys) != cohort_keys:', src)
+        self.assertIn('NIGHT_RESULT_EXACT_COHORT_COVERAGE_FAILED', src)
 
 
 if __name__ == "__main__":
