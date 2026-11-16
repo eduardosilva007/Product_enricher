@@ -182,6 +182,34 @@ class CollectionAutoProviderTests(unittest.TestCase):
                 self.assertEqual(confirm.call_count,2)
                 self.assertIn("CONFIRMAR", confirm.call_args_list[1].args[0])
 
+    def test_raw_empty_authorized_but_payment_not_confirmed_makes_zero_requests(self):
+        # "S" merely unlocks replanning; a second explicit CONFIRMAR
+        # is mandatory before any paid Search request/reservation.
+        with tempfile.TemporaryDirectory() as d:
+            args = argparse.Namespace(
+                search_provider="tavily", auto_providers=True, input="test.xlsx",
+                cache=str(Path(d)/"cache.sqlite"), db=str(Path(d)/"db.sqlite"),
+                master="", final="", precollection_output=str(Path(d)/"pre.xlsx"),
+                recollect_empty=False, recollect_low_evidence=False,
+                max_tavily_new=20, yes=False)
+            empty = SimpleNamespace(candidates=[],summary={"RAW_EMPTY":1})
+            selected = SimpleNamespace(
+                candidates=[SimpleNamespace(
+                    brand_original="CNH", model_original="47408215",
+                    raw_state="RAW_EMPTY")],
+                summary={"RAW_EMPTY":1})
+            cfg = {"files":{"cache":args.cache,"classification_db":args.db}}
+            slot = Slot("tavily","tavily:1","TAVILY_API_KEY","",20,"t")
+            with patch.object(p,"validate_collection_cost_policy",return_value=[]), \\
+                 patch.object(p,"load_baseline_inventory",return_value={"processed":set()}), \\
+                 patch.object(p,"build_precollection_plan",side_effect=[empty,selected]), \\
+                 patch.object(p,"configured_slots",return_value=[slot]), \\
+                 patch.object(p,"search_product_once") as search, \\
+                 patch("builtins.input",side_effect=["S","N"]) as prompts:
+                self.assertFalse(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
+                self.assertEqual(prompts.call_count,2)
+                search.assert_not_called()
+
     def test_no_explicit_budget_does_not_start_collection(self):
         with tempfile.TemporaryDirectory() as d:
             args = argparse.Namespace(
