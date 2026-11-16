@@ -2100,7 +2100,16 @@ def _normalize_brightdata_results(payload: Dict[str, Any]) -> List[Dict[str, Any
             raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: body JSON invalid") from exc
     if not isinstance(body, dict):
         raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: body not an object")
+    # A valid parsed SERP may have zero organic links for an uncommon SKU.
+    # Only accept this as an empty result when recognizable SERP metadata is
+    # present; do NOT treat arbitrary 200/error JSON as successful evidence.
     rows = body.get("organic")
+    if rows is None and (
+        isinstance(body.get("general"), dict)
+        or isinstance(body.get("related"), list)
+        or isinstance(body.get("people_also_ask"), list)
+    ) and not any(body.get(k) for k in ("error", "errors", "message")):
+        rows = []
     if not isinstance(rows, list):
         raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: organic[] absent in parsed response")
     out: List[Dict[str, Any]] = []
