@@ -115,6 +115,7 @@ class TestBrightDataMultiZone(unittest.TestCase):
         for payload, code in [
             ({"status_code":403,"body":"<html>Access denied</html>","headers":{}},"BRIGHTDATA_UPSTREAM"),
             ({"status_code":200,"body":"<!DOCTYPE html><html>interstitial</html>","headers":{}},"BRIGHTDATA_SCHEMA"),
+            ({"status_code":502,"body":"<html>Bad Gateway</html>","headers":{}},"BRIGHTDATA_UPSTREAM_5XX"),
         ]:
             with self.subTest(code=code), patch.dict(os.environ,env,clear=True), patch(
                 "pipeline_produtos._provider_post_once",return_value=payload
