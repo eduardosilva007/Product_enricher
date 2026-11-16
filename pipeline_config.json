@@ -207,7 +207,6 @@
         "requests_per_minute": 30,
         "timeout_seconds": 60,
         "max_results": 10,
-        "data_format": "parsed_light",
         "format": "json"
       }
     },
