@@ -7213,7 +7213,7 @@ def _baseline_row_accepted(row: Any, df: Any) -> bool:
     return True
 
 def _accepted_keys_from_baseline_file_uncached(
-    path: Optional[Path],
+    path: Optional[Path], *, strict: bool = False,
 ) -> Tuple[set, set, set]:
     """Leitura autoritativa da planilha; nunca usa cache."""
     accepted: set = set()
@@ -7227,6 +7227,8 @@ def _accepted_keys_from_baseline_file_uncached(
         df, _ = _read_business_sheet(path)
     except Exception as exc:
         LOG.warning("Baseline %s não pôde ser lida: %s", path, exc)
+        if strict:
+            raise RuntimeError(f"BASELINE_INVENTORY_READ_FAILED: {path.name}") from exc
         return accepted, manual, bi_locked
 
     b = find_col(df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
@@ -7273,7 +7275,8 @@ def _accepted_keys_from_baseline_file(
                 break
             logic_hasher.update(block)
     return cached_baseline_keys(
-        path, _accepted_keys_from_baseline_file_uncached,
+        path,
+        lambda p: _accepted_keys_from_baseline_file_uncached(p, strict=True),
         logic_digest=logic_hasher.hexdigest(),
     )
 
