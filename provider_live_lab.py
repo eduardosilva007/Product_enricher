@@ -19,6 +19,41 @@ import requests
 from provider_lab import capture_payload, inspect
 
 
+
+def read_lab_env(path: Path) -> dict[str, str]:
+    """Read simple KEY=VALUE dotenv entries without an extra dependency.
+
+    Supports quoted values, comments and UTF-8 BOM. Ambient environment wins.
+    Only provider lab keys are imported; never modifies os.environ.
+    """
+    if not path.is_file():
+        return {}
+    allowed = ("BRIGHTDATA_", "SERPER_", "SCRAPERAPI_")
+    values: dict[str, str] = {}
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        if not name.startswith(allowed):
+            continue
+        value = value.strip()
+        if value.startswith(('"', "'")):
+            quote = value[0]
+            if len(value) < 2 or quote not in value[1:]:
+                raise ValueError("LAB_ENV_UNCLOSED_QUOTE")
+            value = value[1:value.index(quote, 1)]
+        else:
+            value = value.split(" #", 1)[0].strip()
+        values[name] = value
+    return values
+
+
 def prepare(provider: str, query: str, environ: dict, brightdata_slot: int = 1) -> tuple[str, str, dict, dict]:
     if not query.strip():
         raise ValueError("NONEMPTY_QUERY_REQUIRED")
@@ -71,13 +106,8 @@ def run(argv=None) -> int:
         env_path = args.env_file
     else:
         env_path = Path(__file__).resolve().parent / ".env"
-    try:
-        from dotenv import load_dotenv
-        if env_path.is_file():
-            load_dotenv(env_path, override=False)
-    except ImportError as exc:
-        if args.execute_live:
-            raise ValueError("PYTHON_DOTENV_REQUIRED_FOR_LIVE_LAB") from exc
+    # Dependency-free and read-only. Shell environment overrides file values.
+    lab_env = {**read_lab_env(env_path), **os.environ}
     if args.provider == "octoparse":
         if args.execute_live:
             raise ValueError("OCTOPARSE_LIVE_NOT_IMPLEMENTED: use task export JSON")
@@ -110,14 +140,14 @@ def run(argv=None) -> int:
         return 0
     if not args.ack_distinct_new_sku:
         raise ValueError("REQUIRE_ACK_DISTINCT_NEW_SKU: do not reuse a Tavily SKU or historical attempt")
-    method, url, headers, kwargs = prepare(args.provider, args.query, os.environ, args.brightdata_slot)
+    method, url, headers, kwargs = prepare(args.provider, args.query, lab_env, args.brightdata_slot)
     if args.provider == "scraperapi":
         # A single Google SERP can cost 25 credits. This is a per-request
         # authorization gate, NOT a persisted remaining-balance counter.
         # Never silently interpret the LIMIT as number of free searches.
         from scraperapi_adapter import ScraperAPIBudget, build_request_plan
-        raw_limit = (os.getenv("SCRAPERAPI_LIMIT_1") or
-                     os.getenv("SCRAPERAPI_LIMIT") or "").strip()
+        raw_limit = (lab_env.get("SCRAPERAPI_LIMIT_1") or
+                     lab_env.get("SCRAPERAPI_LIMIT") or "").strip()
         if not raw_limit:
             raise ValueError("SCRAPERAPI_LIMIT_REQUIRED: set credit allowance in .env")
         try:
