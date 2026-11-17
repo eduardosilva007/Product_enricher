@@ -3423,6 +3423,8 @@ def _enforce_central_search_paths(args: argparse.Namespace, cfg: Dict[str, Any],
     if getattr(args, "mode", "") not in {"collect", "full"}:
         return
     production = {
+        "input": ("Base de Produtos.xlsx", "input"),
+        "output": ("Classificacao_v3.xlsx", "output"),
         "cache": ("cache_tavily.sqlite", "cache"),
         "classification_db": ("pipeline_v3.sqlite", "db"),
         "master": ("Consolidado Base de Produtos Enriquecida.xlsx", "master"),
@@ -3602,6 +3604,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     query_rows: List[Dict[str, Any]] = []
     completed = True
     total_requests = 0
+    experimental_targets = []
     try:
         for idx, (brand, model, prior_state) in enumerate(candidates, 1):
             key = business_key(brand, model)
@@ -3666,6 +3669,8 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                             else f"COLLECT_{provider.upper()}_{COLLECTION_LABEL}"
                         ),
                     )
+                if provider in {"openserp", "scraperapi"} and curated:
+                    experimental_targets.append((brand, model, key))
                 reported_credits = usage.get("reported_credits")
                 product_rows.append({
                     "Marca": brand, "Modelo": model, "Search Model": safe(coll.get("search_model")),
@@ -3756,6 +3761,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             f"COLLECTION {COLLECTION_LABEL} FINAL | provider=%s | produtos=%d | requests=%d | hard_cap=%d/produto | relatório=%s",
             provider, len(product_rows), total_requests, MAX_COLLECTION_REQUESTS_PER_PRODUCT, report_path,
         )
+        if provider in {"openserp", "scraperapi"}:
+            cfg["_experimental_collected_targets"] = list(experimental_targets)
+            LOG.info("EXPERIMENTAL CLASSIFICATION SCOPE | ready_targets=%d", len(experimental_targets))
         return completed
     except KeyboardInterrupt:
         _export_collection_quality_report(product_rows, source_rows, query_rows, report_path)
@@ -12123,7 +12131,15 @@ def main() -> int:
         if not completed:
             LOG.warning("PROCESSO COMPLETO interrompido após a coleta. Classificação não iniciada.")
             return 3
-        run_pipeline(args, cfg, rules)
+        if provider in {"openserp", "scraperapi"}:
+            targets = cfg.pop("_experimental_collected_targets", [])
+            if not targets:
+                LOG.info("EXPERIMENTAL FULL: nenhum SKU com evidência curada nesta coleta; classificação não iniciada")
+                return 0
+            LOG.info("EXPERIMENTAL FULL: classificação restrita aos %d SKUs da coleta atual", len(targets))
+            run_pipeline(args, cfg, rules, explicit_targets=targets)
+        else:
+            run_pipeline(args, cfg, rules)
         return 0
     return 0
 
