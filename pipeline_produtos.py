@@ -3474,75 +3474,74 @@ def _enforce_central_search_paths(args: argparse.Namespace, cfg: Dict[str, Any],
 
 def recover_confirmed_serper_quota_reservations(
     db_path: Path, plan: PreCollectionPlan, max_releases: int = 0,
+    allowed_keys: Optional[set] = None,
 ) -> int:
-    """Recover only RAW_MISSING keys with a *recorded* SERPER_LIMIT response.
+    """Release RAW_MISSING only after explicit Serper no-credit response.
 
-    Audit is retained in events. Unknown outcomes, HTTP timeouts, success,
-    non-Serper accounts and valid RAW are never released. This is not a
-    blanket reset of the historical attempt ledger.
+    Preserve every historical event, do not release ambiguous outcomes or RAW
+    evidence, and do not create a separate database. One scan of the history
+    avoids per-SKU full-table queries on large production datasets.
     """
+    allowed = set(allowed_keys) if allowed_keys is not None else None
     candidates = [
         r.key for r in plan.representatives
         if r.raw_state == "RAW_MISSING"
         and r.action == "TENTATIVA_ANTERIOR_PRESERVADA"
+        and (allowed is None or r.key in allowed)
     ]
     if not candidates:
         return 0
+    selected = set(candidates)
     recovered = 0
     with sqlite3.connect(db_path, timeout=30) as conn:
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("BEGIN IMMEDIATE")
         try:
+            # The latest decisive event wins. A later recovery or unrelated
+            # search attempt must never be mistaken for the old quota failure.
+            latest = {}
+            for event_id, key, event_type in conn.execute(
+                """SELECT id,business_key,event_type FROM events
+                   WHERE event_type IN (
+                       'SERPER_LIMIT',
+                       'SEARCH_R9.6p7.2.3_SAVED',
+                       'SEARCH_R9.6p7.2.3_ERROR_NO_RETRY',
+                       'SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA'
+                   ) ORDER BY id"""
+            ):
+                if key in selected:
+                    latest[key] = (event_id, event_type)
+            reservations = {
+                key: (account, provider)
+                for key, account, provider in conn.execute(
+                    "SELECT business_key,account,provider FROM collection_attempt_reservations"
+                ) if key in selected
+            }
             for key in candidates:
-                reservation = conn.execute(
-                    "SELECT account,provider FROM collection_attempt_reservations WHERE business_key=?",
-                    (key,),
-                ).fetchone()
+                reservation = reservations.get(key)
+                event = latest.get(key)
                 if not reservation or reservation[1] != "serper":
                     continue
-                event = conn.execute(
-                    """SELECT id,event_type,detail FROM events
-                       WHERE business_key=?
-                         AND event_type IN (
-                             'SERPER_LIMIT',
-                             'SEARCH_R9.6p7.2.3_SAVED',
-                             'SEARCH_R9.6p7.2.3_ERROR_NO_RETRY',
-                             'SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA'
-                         )
-                       ORDER BY id DESC LIMIT 1""",
-                    (key,),
-                ).fetchone()
                 if not event or event[1] != "SERPER_LIMIT":
-                    # Historical error or unknown outcome stays blocked.
                     continue
-                # One recovery per matching quota event: prevent repeated retries
-                # when later attempts have a different outcome.
-                already_recovered = conn.execute(
-                    """SELECT 1 FROM events WHERE business_key=?
-                       AND event_type='SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA'
-                       AND id>? LIMIT 1""",
-                    (key,event[0]),
-                ).fetchone()
-                if already_recovered:
-                    continue
+                account = reservation[0]
                 conn.execute(
                     """INSERT INTO events(run_id,business_key,created_at,event_type,detail)
                        VALUES(?,?,?,?,?)""",
                     ("QUOTA_RECOVERY", key, now_iso(),
                      "SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA",
-                     f"prior_account={reservation[0]}; quota_event_id={event[0]}"),
+                     f"prior_account={account}; quota_event_id={event[0]}"),
                 )
                 conn.execute(
                     "DELETE FROM collection_attempt_reservations WHERE business_key=? AND provider='serper'",
                     (key,),
                 )
-                # The disabled account remains disabled in the durable router.
-                if safe(reservation[0]).startswith("serper:"):
+                if safe(account).startswith("serper:"):
                     conn.execute(
                         """INSERT INTO collection_disabled_accounts(account,reason)
                            VALUES(?,?) ON CONFLICT(account) DO UPDATE SET
                            reason=excluded.reason,updated_at=CURRENT_TIMESTAMP""",
-                        (reservation[0],"SERPER_LIMIT_HISTORICAL"),
+                        (account, "SERPER_LIMIT_HISTORICAL"),
                     )
                 recovered += 1
                 if max_releases and recovered >= max_releases:
@@ -3598,8 +3597,19 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     )
     # Historical Serper quota failures are not product evidence. Unlock only
     # explicitly confirmed no-credit responses, preserving all audit events.
+    artifact_keys = None
+    if provider == "openserp":
+        staging = read_json(Path(_provider_credentials("openserp", cfg)["artifact_path"]))
+        cohorts = staging.get("cohorts") if isinstance(staging, dict) else None
+        if not isinstance(cohorts, list):
+            raise ValueError("OPENSERP_ARTIFACT_COHORTS_INVALID")
+        artifact_keys = {
+            business_key(safe(c.get("brand")), safe(c.get("model")))
+            for c in cohorts if isinstance(c, dict)
+        }
     recovered_quota = recover_confirmed_serper_quota_reservations(
-        db_path, plan, max_releases=int(args.max_tavily_new or 0)
+        db_path, plan, max_releases=int(args.max_tavily_new or 0),
+        allowed_keys=artifact_keys,
     )
     if recovered_quota:
         LOG.info("SERPER QUOTA RECOVERY | released=%d | evidence=RAW_MISSING + SERPER_LIMIT | remaining reservations preserved", recovered_quota)
