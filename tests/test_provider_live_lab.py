@@ -9,6 +9,26 @@ from provider_lab import inspect, capture_payload
 
 
 class ProviderLiveLabTests(unittest.TestCase):
+    def test_dotenv_reader_no_extra_dependency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ".env"
+            path.write_text(
+                '# comment\\n'
+                'BRIGHTDATA_API_KEY_1="slot-one"\\n'
+                'BRIGHTDATA_ZONE_1=zone # comment\\n'
+                'SCRAPERAPI_LIMIT_1=5000\\n'
+                'OTHER_SECRET=ignored\\n',
+                encoding="utf-8"
+            )
+            result = lab.read_lab_env(path)
+            self.assertEqual(result["BRIGHTDATA_API_KEY_1"], "slot-one")
+            self.assertEqual(result["BRIGHTDATA_ZONE_1"], "zone")
+            self.assertEqual(result["SCRAPERAPI_LIMIT_1"], "5000")
+            self.assertNotIn("OTHER_SECRET", result)
+
+    def test_dotenv_reader_missing_file_is_safe(self):
+        self.assertEqual(lab.read_lab_env(Path("not_existing_test_env_file")), {})
+
     def test_brightdata_builds_full_json_with_slot_two_only(self):
         method, url, headers, kw = lab.prepare(
             "brightdata", "BRAND NEW", {"BRIGHTDATA_API_KEY_2": "abc", "BRIGHTDATA_ZONE_2": "z2"}, brightdata_slot=2)
