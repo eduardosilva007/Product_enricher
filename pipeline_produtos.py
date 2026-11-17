@@ -3572,7 +3572,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     if policy_errors:
         raise CollectionCostPolicyError(" | ".join(policy_errors))
     auto_route = bool(getattr(args, "auto_providers", False))
-    if auto_route and args.mode == "full":
+    if auto_route and getattr(args, "mode", "collect") == "full":
         if not 1 <= int(args.max_tavily_new or 0) <= 10:
             raise ValueError("AUTO_ROUTE_PILOT_SEARCH_CAP_REQUIRED: --max-search-new 1..10")
         if args.mode == "full" and (
