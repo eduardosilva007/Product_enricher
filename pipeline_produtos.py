@@ -81,7 +81,7 @@ DEFAULT_STRUCTURAL_EDGE_DECORATOR_REGEXES = (
 STRUCTURAL_CORE_MIN_COMPACT_CHARS = 6
 STRUCTURAL_CORE_MAX_EDGE_DECORATORS = 2
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
-ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata", "scraperapi"}
+ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata", "scraperapi", "openserp"}
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -1942,6 +1942,13 @@ def _provider_credentials(provider: str, cfg: Dict[str, Any]) -> Dict[str, str]:
         if not api_key:
             raise RuntimeError(f"{key_env} não configurada no .env")
         return {"api_key": api_key, "key_env": key_env}
+    if provider == "openserp":
+        artifact = safe(cfg.get("_openserp_artifact_path")) or safe(pcfg.get("artifact_path"))
+        if not artifact:
+            raise RuntimeError("OPENSERP_ARTIFACT_REQUIRED: informe --openserp-artifact")
+        if not Path(artifact).is_file():
+            raise RuntimeError(f"OPENSERP_ARTIFACT_NOT_FOUND: {artifact}")
+        return {"artifact_path": artifact}
     if provider == "scraperapi":
         key_env = safe(pcfg.get("api_key_env")) or "SCRAPERAPI_API_KEY"
         api_key = os.getenv(key_env, "").strip()
@@ -2843,6 +2850,27 @@ def _provider_request_once(
             },
         }
 
+    if provider == "openserp":
+        # Um artefato previamente capturado = uma busca lógica por SKU.
+        # ZERO novas requests Search; reservas de SKU impedem repetição silenciosa.
+        from search_provider_extensions import load_openserp_staging
+        budget.reserve()
+        results, artifact_meta = load_openserp_staging(
+            creds["artifact_path"], *cfg["_openserp_target"], query
+        )
+        return results, {
+            "requests": budget.used,
+            "network_requests": 0,
+            "artifact_searches_reused": 1,
+            "artifact_sha256": artifact_meta["artifact_sha256"],
+            "provider_units": 0,
+            "reported_credits": 0,
+            "max_results_requested": len(results),
+            "raw_result_count": len(results),
+            "raw_content_requested": False,
+            "query_meta": artifact_meta,
+        }
+
     if provider == "scraperapi":
         # Apenas seleção manual: nenhuma conta ScraperAPI é adicionada ao auto-router.
         # Uma GET autoparse, sem retries/paginação/redirect ou fallback de provedor.
@@ -2979,6 +3007,8 @@ def search_product_once(
         raise ValueError("Query de coleta vazia")
 
     budget = CollectionRequestBudget(provider=provider)
+    if provider == "openserp":
+        cfg["_openserp_target"] = (brand, model)
     raw_results, usage = _provider_request_once(provider, query, cfg, limiter, budget)
     if budget.used != 1:
         raise CollectionCostPolicyError(
@@ -3129,6 +3159,9 @@ def search_product_once(
             "detected_query": safe(query_meta.get("detected_query")),
             "spelling_present": bool(query_meta.get("spelling_present")),
             "request_count": budget.used,
+            "network_requests": int(usage.get("network_requests", budget.used)),
+            "artifact_searches_reused": int(usage.get("artifact_searches_reused", 0)),
+            "artifact_sha256": safe(usage.get("artifact_sha256")),
             "max_requests_per_product": MAX_COLLECTION_REQUESTS_PER_PRODUCT,
             "exact_match": False,
             "include_domains": False,
@@ -3482,7 +3515,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     print("Provider failover............................... DESABILITADO")
     print("Search.......................................... ABERTO / SEM DOMAIN-COUNTRY-LANGUAGE FILTER")
     print("Stage 1 recebe.................................. SOMENTE curated_results")
-    print(f"Requests máximas planejadas..................... {len(candidates)}")
+    print(f"Requests máximas planejadas..................... {0 if provider == 'openserp' else len(candidates)}")
+    if provider == "openserp":
+        print(f"Artefatos OpenSERP a reutilizar................. {len(candidates)}")
     print(f"Relatório pré-coleta............................ {pre_report}")
     print("=" * 86)
 
@@ -11024,7 +11059,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-stale-auto", action="store_true", help="Recuperar tambem autoaprovados antigos.")
     p.add_argument("--recovery-ledger", default="", help="Arquivo de chaves ja tentadas pela recuperacao, para execucao sequencial em lotes.")
     p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
-    p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata", "scraperapi"], default="")
+    p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata", "scraperapi", "openserp"], default="")
+    p.add_argument("--openserp-artifact", default="", help="Artefato OpenSERP staging local; nenhuma nova Search")
     p.add_argument("--recollect-empty", action="store_true")
     p.add_argument("--auto-providers", action="store_true", help="Rotação entre contas/provedores apenas para SKUs distintos")
     p.add_argument("--recollect-low-evidence", action="store_true")
@@ -11073,22 +11109,22 @@ def _menu_limit(prompt: str) -> int:
 
 def _menu_search_provider() -> str:
     """Seleção numérica explícita; nunca iniciar coleta com provider inválido."""
-    options = {"1": "tavily", "2": "serper", "3": "brightdata", "4": "scraperapi"}
+    options = {"1": "tavily", "2": "serper", "3": "brightdata", "4": "scraperapi", "5": "openserp"}
     while True:
         print("\nAPI DE COLETA / SEARCH")
         print("1 - TAVILY")
         print("2 - SERPER")
         print("3 - BRIGHT DATA")
         print("4 - SCRAPERAPI (MANUAL / EXPERIMENTAL)")
-        print("OPEN SERP: importação offline separada - não habilitada para Search ao vivo")
-        raw = input("Selecione [1/2/3/4] (ENTER = 1 / TAVILY): ").strip()
+        print("5 - OPENSERP (ARTEFATO VALIDADO / 0 NOVAS BUSCAS)")
+        raw = input("Selecione [1/2/3/4/5] (ENTER = 1 / TAVILY): ").strip()
         if not raw:
             raw = "1"
         if raw in options:
             choice = options[raw]
             print(f"API selecionada: {choice.upper()}")
             return choice
-        print("Opção inválida. Escolha 1, 2, 3 ou 4.")
+        print("Opção inválida. Escolha 1, 2, 3, 4 ou 5.")
 
 
 def _menu_llm_provider() -> str:
@@ -11752,6 +11788,8 @@ def main() -> int:
     rules_path = (base / args.rules).resolve() if not Path(args.rules).is_absolute() else Path(args.rules)
     env_info = load_env_file(base / ".env")
     cfg = read_json(cfg_path)
+    if safe(getattr(args, "openserp_artifact", "")):
+        cfg["_openserp_artifact_path"] = str(Path(args.openserp_artifact).resolve())
     collection_policy_name = args.collection_policy or safe((cfg.get("files", {}) or {}).get("collection_policy")) or "collection_quality_policy.json"
     collection_policy_path = (base / collection_policy_name).resolve() if not Path(collection_policy_name).is_absolute() else Path(collection_policy_name)
     collection_policy = read_json(collection_policy_path)
