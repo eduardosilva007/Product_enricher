@@ -120,6 +120,17 @@ class BrightDataManualEntrypointContractTests(unittest.TestCase):
         self.assertEqual(found, expected_modes)
 
 
+class BrightDataPreflightOrderTests(unittest.TestCase):
+    def test_manual_slot_preflight_precedes_baseline_sync(self):
+        import inspect
+        source = inspect.getsource(p.main)
+        marker = 'BRIGHTDATA MANUAL PREFLIGHT OK'
+        sync = 'INPUT BASELINE SYNC CACHE_HIT'
+        self.assertEqual(source.count(marker), 1)
+        self.assertLess(source.index(marker), source.index(sync))
+        self.assertIn('_provider_credentials("brightdata", slot_cfg)', source)
+        self.assertIn('for slot in bright_slots:', source)
+
 class RuntimeModuleContractTests(unittest.TestCase):
     def test_runtime_module_contract(self):
         self.assertTrue(callable(getattr(DurableRouter, "already_reserved", None)),
