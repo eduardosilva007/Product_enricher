@@ -102,11 +102,30 @@ class TestBrightDataMultiZone(unittest.TestCase):
             results, usage=_provider_request_once("brightdata","BRAND MODEL",cfg,None,CollectionRequestBudget("brightdata"))
         self.assertEqual(len(calls),1)
         self.assertIn("q=BRAND+MODEL",calls[0]["url"])
-        self.assertNotIn("brd_json",calls[0]["url"])
+        self.assertIn("brd_json=1",calls[0]["url"])
         self.assertEqual(calls[0]["format"],"json")
         self.assertNotIn("data_format",calls[0])
         self.assertEqual(results[0]["title"],"SKU part")
         self.assertEqual(usage["requests"],1)
+
+    def test_full_json_organic_schema_stays_strict(self):
+        # Full JSON contains additional Google sections; only organic links
+        # become candidate product evidence. Ads/knowledge are not trusted.
+        payload = {
+            "status_code": 200,
+            "body": {
+                "general": {"query": "BRAND MODEL", "detected_query": "BRAND MODEL"},
+                "organic": [{"rank": 1, "title": "BRAND MODEL",
+                             "link": "https://example.com/item",
+                             "description": "Exact SKU product"}],
+                "knowledge": {"title": "Unrelated"},
+                "top_ads": [{"title": "Unrelated advert", "link": "https://ads.example"}],
+            },
+        }
+        rows = _normalize_brightdata_results(payload)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["url"], "https://example.com/item")
+        self.assertNotIn("Unrelated", str(rows))
 
     def test_upstream_error_and_html_not_evidence(self):
         env={"BRIGHTDATA_API_KEY_1":"a","BRIGHTDATA_ZONE_1":"serp_api1"}
