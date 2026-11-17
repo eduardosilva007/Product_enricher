@@ -195,6 +195,47 @@ class ProviderExtensionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PILOT_CAP_REQUIRED"):
             _enforce_central_search_paths(args, cfg, "scraperapi")
 
+    def test_brightdata_two_suffixed_accounts_diagnostic(self):
+        from unittest.mock import patch
+        from pipeline_produtos import _brightdata_slot_diagnostic
+        environment = {
+            "BRIGHTDATA_API_KEY_1": "private_1",
+            "BRIGHTDATA_API_KEY_2": "private_2",
+            "BRIGHTDATA_ZONE_1": "zone_1",
+            "BRIGHTDATA_ZONE_2": "zone_2",
+        }
+        with patch.dict("os.environ", environment, clear=True):
+            self.assertEqual(
+                _brightdata_slot_diagnostic(),
+                ("CONFIGURADA(2_CONTAS)", "CONFIGURADA(2_CONTAS)")
+            )
+        with patch.dict("os.environ", {
+            "BRIGHTDATA_API_KEY": "legacy_key", "BRIGHTDATA_ZONE": "legacy_zone"
+        }, clear=True):
+            self.assertEqual(
+                _brightdata_slot_diagnostic(),
+                ("CONFIGURADA(1_CONTAS)", "CONFIGURADA(1_CONTAS)")
+            )
+
+    def test_accepted_cache_contract_matches_mirror_skip(self):
+        import pandas as pd
+        from pipeline_produtos import _cache_contract_human_or_accepted
+        df = pd.DataFrame([
+            {"Marca": "GRUNDFOS", "Modelo": "CM 102 ARAEAVBE FAAN",
+             "O que é (Tipo)": "PUMP", "Category General": "OTHERS",
+             "FAMILY": "PUMP", "Status": "Script", "Revisão": "AUTO_APROVADO",
+             "Resolution State": "RESOLVED", "Classification Identity": "STRONG",
+             "Status Processamento": "PROCESSADO", "Status Coleta": ""},
+            {"Marca": "STIHL", "Modelo": "FS250", "Status": "Script",
+             "Revisão": "PENDENTE_COLETA", "Resolution State": "PENDING_COLLECTION",
+             "Status Coleta": ""},
+            {"Marca": "STIHL", "Modelo": "MS382", "Status": "Manual",
+             "Revisão B.I": "OK", "Status Coleta": ""}
+        ]).fillna("")
+        self.assertTrue(_cache_contract_human_or_accepted(df.loc[0], df))
+        self.assertFalse(_cache_contract_human_or_accepted(df.loc[1], df))
+        self.assertTrue(_cache_contract_human_or_accepted(df.loc[2], df))
+
     def test_no_parallel_openserp_runner(self):
         self.assertFalse((ROOT / "run_openserp_full_pilot.py").exists())
 
