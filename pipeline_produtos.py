@@ -11437,20 +11437,40 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print(" COLLECTION HARD RULE: 1 produto = no máximo 1 request | sem retry/fallback/extract/advanced")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 86)
-    print(f"1 - COLETA / EXTRAÇÃO {COLLECTION_LABEL} (1 REQUEST/PRODUTO)")
-    print("2 - CLASSIFICAÇÃO")
-    print("3 - PROCESSO COMPLETO")
-    print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
-    print("5 - AUDITORIA / REPARO BASE (SEM CLEF)")
-    print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
-    print("7 - EXPORTAR EVIDENCE BUNDLE (SEM BUSCA / 0 CRÉDITOS)")
-    print("8 - SAIR")
-    print("9 - CENTRALIZAR CACHE DOS PILOTOS E GRAVAR BASE FINAL (0 APIS)")
-    print("10 - LIMPAR BASE FINAL: 11 COLUNAS (SEM BUSCA / SEM CLASSIFICACAO)")
-    print("11 - AUDITAR / RECUPERAR CLASSIFICACOES JA COLETADAS (0 APIS)")
-    print("12 - VALIDAR CHAVES / PROCV NA BASE FINAL (0 APIS)")
-    print("13 - UNIFICAR IDENTIDADES E CLASSIFICACOES NO SQLITE CENTRAL (0 APIS)")
-    op = input("Opção: ").strip()
+    print("1 - COLETAR PRODUTOS (escolher provedor ou automatico)")
+    print("2 - CLASSIFICAR PRODUTOS")
+    print("3 - PROCESSO COMPLETO (coleta + classificacao)")
+    print("4 - MANUTENCAO, AUDITORIA E FERRAMENTAS")
+    print("5 - SAIR")
+    op = input("Opcao: ").strip()
+    if op == "5":
+        raise SystemExit(0)
+    if op == "4":
+        print("\nMANUTENCAO, AUDITORIA E FERRAMENTAS")
+        print("1 - Recuperar pendencias do cache (sem busca)")
+        print("2 - Auditoria e reparo da base (sem Clef)")
+        print("3 - Curar cache legado (sem busca)")
+        print("4 - Exportar evidence bundle (sem busca)")
+        print("5 - Centralizar cache dos pilotos e gravar Base Final")
+        print("6 - Limpar Base Final (11 colunas; modo interativo)")
+        print("7 - Auditar/recuperar classificacoes ja coletadas")
+        print("8 - Validar chaves e PROCV da Base Final")
+        print("9 - Unificar identidades e classificacoes no SQLite")
+        print("0 - Voltar / sair sem executar")
+        maintenance = input("Ferramenta: ").strip()
+        if maintenance == "0":
+            raise SystemExit(0)
+        maintenance_routes = {
+            "1": "4", "2": "5", "3": "6", "4": "7",
+            "5": "9", "6": "10", "7": "11", "8": "12", "9": "13",
+        }
+        if maintenance not in maintenance_routes:
+            print("Opcao invalida. Nenhuma operacao executada.")
+            raise SystemExit(2)
+        op = maintenance_routes[maintenance]
+    elif op not in {"1", "2", "3"}:
+        print("Opcao invalida. Nenhuma operacao executada.")
+        raise SystemExit(2)
     if op == "1":
         provider = _menu_search_provider(allow_auto=True)
         # Diferente do piloto de classificacao (ENTER=100), coleta em branco
