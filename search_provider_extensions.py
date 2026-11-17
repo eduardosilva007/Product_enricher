@@ -5,7 +5,7 @@ exclusivamente no Source Sieve do pipeline.
 """
 from __future__ import annotations
 
-import json
+import ipaddress
 from typing import Any
 from urllib.parse import urlparse
 
@@ -29,6 +29,15 @@ def _direct_url(value: Any) -> str:
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             return ""
         hostname = parsed.hostname.lower()
+        if parsed.username or parsed.password:
+            return ""
+        try:
+            address = ipaddress.ip_address(hostname)
+            if not address.is_global:
+                return ""
+        except ValueError:
+            if hostname.endswith(".local") or hostname.endswith(".internal"):
+                return ""
         if hostname == "google.com" or hostname.endswith(".google.com"):
             if parsed.path.startswith("/goto"):
                 return ""
