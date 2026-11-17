@@ -9255,6 +9255,36 @@ def _hydrate_input_collection_from_cache(
     return stats
 
 
+def _refresh_sqlite_sku_registry(master_path: Path, final_path: Path,
+                                 cfg: Optional[Dict[str, Any]],
+                                 cohort_keys: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+    """Keep existing SQLite SKU lookup aligned after canonical Excel exports.
+
+    This is a synchronized registry/projection until SQLite-authoritative
+    Excel exports are separately implemented and tested. Zero paid APIs.
+    """
+    files = (cfg or {}).get("files") or {}
+    db_name = safe(files.get("classification_db"))
+    if not db_name:
+        return {"status": "SKIPPED_NO_DATABASE_CONFIG"}
+    db_path = (ROOT / db_name).resolve()
+    if not db_path.is_file():
+        raise RuntimeError(f"SQLITE_REGISTRY_DB_MISSING:{db_path}")
+    from sku_registry_sqlite import audit_sqlite_merge
+    result = audit_sqlite_merge(
+        final_path, master_path, db_path, set(cohort_keys or ()), commit=True)
+    if result["status"] != "SQLITE_MERGED":
+        raise RuntimeError(
+            "SQLITE_REGISTRY_NOT_SYNCHRONIZED:"
+            + json.dumps(result, ensure_ascii=False, default=str))
+    LOG.info("SQLITE REGISTRY SYNC OK | keys=%d | safe=%d | "
+             "ambiguous=%d | campaign=%d/%d | api_calls=0",
+             result["unique_final_keys"], result["lookup_safe_keys"],
+             result["global_ambiguous"], result["campaign_found_in_final"],
+             result["campaign_expected"])
+    return result
+
+
 def persist_baseline_excels(
     rows: List[Dict[str, Any]],
     master_path: Optional[Path],
@@ -9409,6 +9439,11 @@ def persist_baseline_excels(
     stats["baseline_union_total"] = len(inv_after["processed"])
     stats["bi_ok_hard_lock_total"] = len(inv_after["bi_locked"])
     stats["baseline_missing_in_final"] = len(inv_after["processed"] - inv_after["final_accepted"])
+    if master_path and final_path:
+        registry = _refresh_sqlite_sku_registry(master_path, final_path, cfg)
+        stats["sqlite_registry_status"] = registry["status"]
+        if registry["status"] == "SQLITE_MERGED":
+            stats["sqlite_registry_keys"] = registry["unique_final_keys"]
     return stats
 
 def reconcile_baseline_before_run(
@@ -10086,6 +10121,11 @@ def run_cache_recovery(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                 ledger.write(key + "\n")
 
 
+def _use_input_scoped_evidence_cohort(mode: str) -> bool:
+    """Classify and full both limit eligible input SKUs, not historical cache rows."""
+    return mode in {"classify", "full"}
+
+
 def run_pipeline(
     args: argparse.Namespace,
     cfg: Dict[str, Any],
@@ -10247,7 +10287,7 @@ def run_pipeline(
         stats = defaultdict(int)
 
         if explicit_targets is None:
-            if args.mode == "classify":
+            if _use_input_scoped_evidence_cohort(args.mode):
                 flow_cfg = cfg.get("classification_flow", {}) or {}
                 restrict_to_input = bool(flow_cfg.get("restrict_classify_to_input", True))
                 allowed_keys: Optional[set] = None
@@ -10332,7 +10372,7 @@ def run_pipeline(
             cohort_stats.get("cohort_bi_ok_lock", 0),
             cohort_hash,
         )
-        if args.mode == "classify" and explicit_targets is None:
+        if _use_input_scoped_evidence_cohort(args.mode) and explicit_targets is None:
             LOG.info(
                 "CLASSIFICATION QUEUE | targets=%d | ready=%d | partial=%d | legacy_curated=%d | "
                 "safe_aux_rescue=%d | fora_input=%d | no_evidence_fora_da_fila=%d | raw_indisponivel=%d | "
@@ -10948,7 +10988,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "final-lookup-index", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "final-lookup-index", "sqlite-sku-merge", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -11070,6 +11110,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print("10 - LIMPAR BASE FINAL: 11 COLUNAS (SEM BUSCA / SEM CLASSIFICACAO)")
     print("11 - AUDITAR / RECUPERAR CLASSIFICACOES JA COLETADAS (0 APIS)")
     print("12 - VALIDAR CHAVES / PROCV NA BASE FINAL (0 APIS)")
+    print("13 - UNIFICAR IDENTIDADES E CLASSIFICACOES NO SQLITE CENTRAL (0 APIS)")
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
@@ -11138,6 +11179,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(["--mode", "audit-central-cache"])
     if op == "12":
         return parser.parse_args(["--mode", "final-lookup-index"])
+    if op == "13":
+        return parser.parse_args(["--mode", "sqlite-sku-merge"])
     raise SystemExit(0)
 
 
@@ -11744,6 +11787,39 @@ def main() -> int:
         for e in errors[:50]:
             LOG.error(e)
         return 2
+    if args.mode == "sqlite-sku-merge":
+        from sku_registry_sqlite import audit_sqlite_merge
+        with exclusive_campaign_lock():
+            campaigns = []
+            for manifest in sorted((OUT / "campaigns").glob("*/campaign.json")):
+                state = read_json(manifest)
+                if (state.get("status") == "COMPLETE"
+                        and state.get("night_output_only")
+                        and (state.get("promotion") or {}).get("status") == "COMMITTED"
+                        and state.get("audited_products") == 50):
+                    campaigns.append((manifest, state))
+            if not campaigns:
+                raise RuntimeError("SQLITE_MERGE_COMMITTED_50_CAMPAIGN_NOT_FOUND")
+            manifest, campaign = campaigns[-1]
+            keys = [key for batch in campaign["batches"] for key in batch["cohort_keys"]]
+            if len(keys) != 50 or len(set(keys)) != 50:
+                raise RuntimeError("SQLITE_MERGE_INVALID_50_COHORT")
+            file_cfg = cfg["files"]
+            final = (ROOT / str(file_cfg["final"])).resolve()
+            master = (ROOT / str(file_cfg["master"])).resolve()
+            db = (ROOT / str(file_cfg["classification_db"])).resolve()
+            preview = audit_sqlite_merge(final, master, db, keys, commit=False)
+            preview["campaign"] = manifest.parent.name
+            print(json.dumps(preview, indent=2, ensure_ascii=False))
+            if preview["status"] != "DRY_RUN_PASS":
+                return 2
+            if input("Confirmar MERGE na base pipeline_v3.sqlite (0 APIs)? Digite GRAVAR: ").strip() != "GRAVAR":
+                print("SQLITE_MERGE_NOT_COMMITTED: dry-run apenas.")
+                return 0
+            report = audit_sqlite_merge(final, master, db, keys, commit=True)
+            report["campaign"] = manifest.parent.name
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+            return 0 if report["status"] == "SQLITE_MERGED" else 2
     if args.mode == "final-lookup-index":
         with exclusive_campaign_lock():
             preview = reconcile_final_sku_index(cfg, commit=False)
@@ -13552,10 +13628,18 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             stats = _night_stage_output_only_canonical(
                 originals, staged, cohort_pairs, raw_items, records, rules)
         else:
+            # NEVER allow an isolated staging run to update canonical SQLite
+            # while source integrity hashes are still being checked.
+            staging_cfg = {
+                **cfg, "files": {
+                    **cfg["files"],
+                    "classification_db": str(staged["classification_db"]),
+                },
+            }
             stats = persist_baseline_excels(
                 rows=records, master_path=staged["master"],
                 final_path=staged["final"], input_path=promotion_input,
-                rules=rules, cache_path=staged["cache"], cfg=cfg,
+                rules=rules, cache_path=staged["cache"], cfg=staging_cfg,
             )
             stats["master_scoped_overlay"] = _overnight_scoped_excel_overlay(
                 canonical["master"], staged["master"], cohort_pairs)
@@ -13596,6 +13680,15 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         # For promotion, compare EVERY original BI_OK row by its exact pair;
         # never relax the eight protected human fields.
         _overnight_assert_exact_human_locks(original_final, final)
+
+        # Refresh the registry on the STAGED database so either all four
+        # official files are promoted consistently or none are changed.
+        stage_registry = _refresh_sqlite_sku_registry(
+            staged["master"], staged["final"],
+            {"files": {"classification_db": str(staged["classification_db"])}},
+            keys)
+        stats["sqlite_registry_status"] = stage_registry["status"]
+        stats["sqlite_registry_campaign_keys"] = stage_registry["campaign_found_in_final"]
 
         # The physical-row gate above protects ALL original BI_OK/Manual
         # rows including historic exact duplicates. The old grouped forensic
