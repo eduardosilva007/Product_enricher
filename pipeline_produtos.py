@@ -9429,14 +9429,10 @@ def _hydrate_input_collection_from_cache(
                     master_df.at[idx, "Título Referência Identity"] = identity
             if title:
                 stats["cache_reference_titles"] += 1
-                # Preserve the collected title even for REVIEW. The source
-                # identity/decision remains in the technical Master columns;
-                # filling a title NEVER approves or classifies the SKU.
-                if not safe(old.get("Título Real")):
-                    master_df.at[idx, "Título Real"] = title
-                    if not safe(old.get("Fonte URL")):
-                        master_df.at[idx, "Fonte URL"] = safe(
-                            master_df.at[idx, "Fonte Referência URL"])
+                # RAW Search titles are untrusted review artifacts, even when
+                # the title looks plausible. NEVER copy them to Título Real
+                # or Fonte URL during cache hydration. Those fields are
+                # owned exclusively by audited classification/human review.
     finally:
         store.close()
     return stats
