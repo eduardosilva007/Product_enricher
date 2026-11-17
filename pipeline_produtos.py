@@ -3408,7 +3408,10 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     if policy_errors:
         raise CollectionCostPolicyError(" | ".join(policy_errors))
     auto_route = bool(getattr(args, "auto_providers", False))
-    if not auto_route:
+    # A fixed Bright Data selection still requires the same durable account
+    # router as AUTO: slot-specific keys, zones, limits and attempt reservations.
+    slot_route = auto_route or provider == "brightdata"
+    if not slot_route:
         _provider_credentials(provider, cfg)  # preflight antes da primeira request
 
     input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
@@ -3483,10 +3486,15 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         else:
             print("RECOLETA RAW_EMPTY RECUSADA. Nenhuma request por estes registros.")
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
-    slots = configured_slots() if auto_route and candidates else []
-    if auto_route and candidates and not slots:
-        raise RuntimeError("AUTO_PROVIDERS: configure ao menos um *_LIMIT_N positivo e a credencial correspondente no .env")
-    if auto_route and slots:
+    slots = configured_slots() if slot_route else []
+    if not auto_route and provider == "brightdata":
+        slots = [slot for slot in slots if slot.provider == "brightdata"]
+    if slot_route and not slots:
+        raise RuntimeError(
+            "SEARCH_PROVIDER_SLOTS_UNAVAILABLE: configure credenciais e limites positivos "
+            "para o provedor selecionado no .env"
+        )
+    if slot_route and slots:
         slot_summary = [
             f"{s.account}:{s.provider}:limit={s.limit}:group={s.group}" for s in slots
         ]
@@ -3504,7 +3512,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         display = label.replace("Tavily", "Search")
         print(f"{display:.<54} {plan.summary.get(label, 0)}")
     print("-" * 86)
-    print(f"Provider........................................ {'AUTO ROUTER' if auto_route else provider.upper()}")
+    print(f"Provider........................................ {'AUTO ROUTER' if auto_route else (provider.upper() + ' (SLOTS)' if slot_route else provider.upper())}")
     print("HARD LIMIT...................................... 1 PRODUTO = MAX. 1 REQUEST")
     print("Automatic retry................................. DESABILITADO")
     print("Secondary/Fallback/Rescue search................ DESABILITADO")
@@ -3530,8 +3538,8 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
 
     pcfg = _provider_cfg(cfg, provider)
     limiter = RateLimiter(float(pcfg.get("requests_per_minute", 30) or 30))
-    limiters = {p: RateLimiter(float(_provider_cfg(cfg,p).get("requests_per_minute",30) or 30)) for p in ("tavily","brightdata","serper")} if auto_route else {}
-    router = DurableRouter(db_path, slots) if auto_route else None
+    limiters = {p: RateLimiter(float(_provider_cfg(cfg,p).get("requests_per_minute",30) or 30)) for p in ("tavily","brightdata","serper")} if slot_route else {}
+    router = DurableRouter(db_path, slots) if slot_route else None
     db = ClassificationDB(db_path)
     run_id = db.start_run("collect", rules.hash, f"SEARCH_{COLLECTION_LABEL}:{provider}")
     writer = TavilyWritableStore(cache_path)  # nome legado; payload agora registra provider explicitamente
@@ -12428,9 +12436,9 @@ def main() -> int:
             )
 
         provider = _resolve_search_provider(args, cfg)
-        if not args.auto_providers:
+        if not args.auto_providers and provider != "brightdata":
             _provider_credentials(provider, cfg)
-        else:
+        elif args.auto_providers:
             LOG.info(
                 "FULL AUTO PROVIDERS | enabled=SIM | retry_same_sku=NAO | "
                 "next_sku_rotation=SIM | central_cache=SIM | central_sqlite=SIM"
