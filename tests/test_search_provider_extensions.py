@@ -274,6 +274,51 @@ class ProviderExtensionTests(unittest.TestCase):
             self.assertEqual(len(plan.candidates), 1)
             self.assertEqual(plan.candidates[0].model_original, "SKU100")
 
+    def test_serper_quota_recovery_preserves_unknown_and_audit(self):
+        import sqlite3
+        from types import SimpleNamespace
+        from pipeline_produtos import (
+            recover_confirmed_serper_quota_reservations, PreCollectionPlan,
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / "central_test.sqlite"
+            with sqlite3.connect(db) as con:
+                con.executescript("""
+                    CREATE TABLE collection_attempt_reservations (
+                        business_key TEXT PRIMARY KEY, account TEXT, provider TEXT);
+                    CREATE TABLE collection_disabled_accounts (
+                        account TEXT PRIMARY KEY, reason TEXT,
+                        updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+                    CREATE TABLE events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT, business_key TEXT, created_at TEXT,
+                        event_type TEXT, detail TEXT);
+                """)
+                for key, provider in (("quota","serper"), ("timeout","serper"),
+                                      ("other","tavily"), ("valid","serper")):
+                    con.execute("INSERT INTO collection_attempt_reservations VALUES(?,?,?)",
+                                (key,provider+":1",provider))
+                for key, typ in (("quota","SERPER_LIMIT"),
+                                 ("timeout","SEARCH_R9.6p7.2.3_ERROR_NO_RETRY"),
+                                 ("other","SERPER_LIMIT"), ("valid","SERPER_LIMIT")):
+                    con.execute("INSERT INTO events(run_id,business_key,created_at,event_type,detail) VALUES(?,?,?,?,?)",
+                                ("run",key,"2026-11-17",typ,"test"))
+            plan = PreCollectionPlan(
+                input_path=Path("unused"), report_path=Path("unused"),
+                rows=[], representatives=[
+                    SimpleNamespace(key=key,raw_state=state,
+                                    action="TENTATIVA_ANTERIOR_PRESERVADA")
+                    for key,state in (("quota","RAW_MISSING"),("timeout","RAW_MISSING"),
+                                      ("other","RAW_MISSING"),("valid","RAW_OK"))
+                ], candidates=[], summary={}
+            )
+            self.assertEqual(recover_confirmed_serper_quota_reservations(db, plan),1)
+            self.assertEqual(recover_confirmed_serper_quota_reservations(db, plan),0)
+            with sqlite3.connect(db) as con:
+                self.assertEqual(con.execute("SELECT COUNT(*) FROM collection_attempt_reservations").fetchone()[0],3)
+                self.assertEqual(con.execute("SELECT COUNT(*) FROM events WHERE event_type='SERPER_LIMIT'").fetchone()[0],3)
+                self.assertEqual(con.execute("SELECT reason FROM collection_disabled_accounts WHERE account='serper:1'").fetchone()[0],"SERPER_LIMIT_HISTORICAL")
+
     def test_no_parallel_openserp_runner(self):
         self.assertFalse((ROOT / "run_openserp_full_pilot.py").exists())
 
