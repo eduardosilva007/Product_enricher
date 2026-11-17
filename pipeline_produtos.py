@@ -11073,20 +11073,22 @@ def _menu_limit(prompt: str) -> int:
 
 def _menu_search_provider() -> str:
     """Seleção numérica explícita; nunca iniciar coleta com provider inválido."""
-    options = {"1": "tavily", "2": "serper", "3": "brightdata"}
+    options = {"1": "tavily", "2": "serper", "3": "brightdata", "4": "scraperapi"}
     while True:
         print("\nAPI DE COLETA / SEARCH")
         print("1 - TAVILY")
         print("2 - SERPER")
         print("3 - BRIGHT DATA")
-        raw = input("Selecione [1/2/3] (ENTER = 1 / TAVILY): ").strip()
+        print("4 - SCRAPERAPI (MANUAL / EXPERIMENTAL)")
+        print("OPEN SERP: importação offline separada - não habilitada para Search ao vivo")
+        raw = input("Selecione [1/2/3/4] (ENTER = 1 / TAVILY): ").strip()
         if not raw:
             raw = "1"
         if raw in options:
             choice = options[raw]
             print(f"API selecionada: {choice.upper()}")
             return choice
-        print("Opção inválida. Escolha 1, 2 ou 3.")
+        print("Opção inválida. Escolha 1, 2, 3 ou 4.")
 
 
 def _menu_llm_provider() -> str:
