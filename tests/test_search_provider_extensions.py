@@ -64,7 +64,6 @@ class ProviderExtensionTests(unittest.TestCase):
 
     def test_staging_script_compiles(self):
         ast.parse((ROOT / "import_openserp_staging.py").read_text(encoding="utf-8"))
-        ast.parse((ROOT / "run_openserp_full_pilot.py").read_text(encoding="utf-8"))
 
 
     def test_openserp_staging_exact_source_and_query(self):
@@ -146,6 +145,47 @@ class ProviderExtensionTests(unittest.TestCase):
             self.assertEqual(raw.state, "RAW_OK")
             self.assertEqual(raw.payload["_collection"]["provider"], "openserp")
             self.assertEqual(raw.payload["results"][0]["url"], "https://example.com/stihl-fs250")
+
+    def test_experimental_providers_require_canonical_paths_and_hard_caps(self):
+        from pipeline_produtos import (
+            _enforce_central_search_paths, build_parser, read_json,
+        )
+        cfg = read_json(ROOT / "pipeline_config.json")
+        with tempfile.TemporaryDirectory() as folder:
+            marker = Path(folder) / "staging.json"
+            marker.write_text("{}", encoding="utf-8")
+            cfg["_openserp_artifact_path"] = str(marker)
+            for provider in ("openserp", "scraperapi"):
+                args = build_parser().parse_args([
+                    "--mode", "full", "--search-provider", provider,
+                    "--max-search-new", "3", "--max-items", "3",
+                    "--max-api-calls", "15", "--max-tokens", "30000"
+                ])
+                _enforce_central_search_paths(args, cfg, provider)
+                args.cache = str(Path(folder) / "pilot_cache.sqlite")
+                with self.assertRaisesRegex(ValueError, "CENTRAL_PATH_REQUIRED"):
+                    _enforce_central_search_paths(args, cfg, provider)
+                args.cache = ""
+                args.db = str(Path(folder) / "pilot_classification.sqlite")
+                with self.assertRaisesRegex(ValueError, "CENTRAL_PATH_REQUIRED"):
+                    _enforce_central_search_paths(args, cfg, provider)
+                args.db = ""
+                args.auto_providers = True
+                with self.assertRaisesRegex(ValueError, "MANUAL_ONLY"):
+                    _enforce_central_search_paths(args, cfg, provider)
+
+    def test_experimental_provider_blocks_unbounded_batches(self):
+        from pipeline_produtos import _enforce_central_search_paths, build_parser, read_json
+        cfg = read_json(ROOT / "pipeline_config.json")
+        args = build_parser().parse_args(["--mode", "collect", "--search-provider", "scraperapi"])
+        with self.assertRaisesRegex(ValueError, "PILOT_CAP_REQUIRED"):
+            _enforce_central_search_paths(args, cfg, "scraperapi")
+        args.max_tavily_new = 11
+        with self.assertRaisesRegex(ValueError, "PILOT_CAP_REQUIRED"):
+            _enforce_central_search_paths(args, cfg, "scraperapi")
+
+    def test_no_parallel_openserp_runner(self):
+        self.assertFalse((ROOT / "run_openserp_full_pilot.py").exists())
 
     def test_openserp_reuses_without_network_or_provider_secret(self):
         source = (ROOT / "pipeline_produtos.py").read_text(encoding="utf-8-sig")
