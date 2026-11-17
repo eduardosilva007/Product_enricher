@@ -12361,7 +12361,9 @@ def main() -> int:
         return 0
     if args.mode == "collect":
         provider = _resolve_search_provider(args, cfg)
-        if not args.auto_providers:
+        # Manual Bright Data uses configured per-account slots in collect_products,
+        # not the legacy unsuffixed BRIGHTDATA_API_KEY credential preflight.
+        if not args.auto_providers and provider != "brightdata":
             _provider_credentials(provider, cfg)
         completed = collect_products(args, cfg, rules)
         if completed and not args.auto_providers:
