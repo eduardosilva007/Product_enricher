@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -44,7 +43,7 @@ def prepare_pilot(root: Path, staging: Path, max_api_calls: int, max_tokens: int
     if not 1 <= max_api_calls <= 100 or not 1 <= max_tokens <= 200000:
         raise ValueError("PILOT_BUDGET_INVALID")
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    from pipeline_produtos import derive_query_model, derive_search_model
+    from pipeline_produtos import derive_query_model
     records = []
     for cohort in cohorts:
         brand, model = (str(cohort.get(k) or "").strip() for k in ("brand", "model"))
@@ -165,8 +164,9 @@ def main():
         report["pipeline_exit_code"] = result_code
         report["status"] = "FAILED" if result_code else "PIPELINE_FINISHED_NEEDS_REVIEW"
         try:
-            from pipeline_produtos import TavilyReadOnlyStore, safe
-            with TavilyReadOnlyStore(run / "pilot_cache.sqlite") as store:
+            from contextlib import closing
+            from pipeline_produtos import TavilyReadOnlyStore
+            with closing(TavilyReadOnlyStore(run / "pilot_cache.sqlite")) as store:
                 report["raw_states"] = [
                     {"brand": x["Marca"], "model": x["Modelo"],
                      "raw_state": store.get(x["Marca"], x["Modelo"]).state}
