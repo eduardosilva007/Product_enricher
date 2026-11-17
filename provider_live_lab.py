@@ -58,6 +58,11 @@ def run(argv=None) -> int:
     ap.add_argument("--execute-live", action="store_true")
     ap.add_argument("--ack-distinct-new-sku", action="store_true")
     args = ap.parse_args(argv)
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+    except ImportError:
+        pass
     if args.provider == "octoparse":
         if args.execute_live:
             raise ValueError("OCTOPARSE_LIVE_NOT_IMPLEMENTED: use task export JSON")
@@ -65,6 +70,8 @@ def run(argv=None) -> int:
             print("OCTOPARSE: exporte JSON de uma tarefa; use --octoparse-json CAMINHO")
             return 0
         payload = json.loads(args.octoparse_json.read_text(encoding="utf-8-sig"))
+        if isinstance(payload, list):
+            payload = {"data": payload}
         report = inspect("octoparse", payload)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
@@ -80,10 +87,8 @@ def run(argv=None) -> int:
     if args.provider == "scraperapi":
         # Structured Google SERP may cost 25+ API credits. No optional render/premium.
         print("SCRAPERAPI: 1 structured Google SERP request, budget up to documented base 25 credits.")
-    # requests.Session trust_env=False prevents requests honoring ambient proxies
-    # with unexpected interceptors. Zero redirects; zero retries.
+    # Zero redirects; no application-layer retries.
     with requests.Session() as session:
-        session.trust_env = False
         response = session.request(method, url, headers=headers, timeout=75,
                                    allow_redirects=False, **kwargs)
     # Do not log full request URL: ScraperAPI key is a query parameter.
