@@ -3420,6 +3420,8 @@ def _enforce_central_search_paths(args: argparse.Namespace, cfg: Dict[str, Any],
         return
     if bool(getattr(args, "auto_providers", False)):
         raise ValueError("EXPERIMENTAL_PROVIDER_MANUAL_ONLY: auto-router not validated")
+    if bool(getattr(args, "recollect_empty", False)) or bool(getattr(args, "recollect_low_evidence", False)) or bool(getattr(args, "reprocess", False)):
+        raise ValueError("EXPERIMENTAL_NO_RECOLLECT_OR_REPROCESS: pilot only on new eligible SKUs")
     if getattr(args, "mode", "") not in {"collect", "full"}:
         return
     production = {
