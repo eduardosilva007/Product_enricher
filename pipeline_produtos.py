@@ -2881,7 +2881,9 @@ def _provider_request_once(
         headers = {"Authorization": f"Bearer {creds['api_key']}", "Content-Type": "application/json"}
         # Official REST SERP API example: standard Google query URL,
         # format=json; no undocumented data_format or brd_json parameters.
-        google_url = "https://www.google.com/search?" + urlencode({"q": query})
+        # Explicit Full JSON SERP parsing. format=json alone only wraps the HTTP response.
+        # One Google SERP request per SKU; no extra fetch, retry or fallback.
+        google_url = "https://www.google.com/search?" + urlencode({"q": query, "brd_json": 1})
         body = {
             "zone": creds["zone"],
             "url": google_url,
