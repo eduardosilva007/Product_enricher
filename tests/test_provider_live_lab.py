@@ -47,16 +47,16 @@ class ProviderLiveLabTests(unittest.TestCase):
                                            "--octoparse-json", str(original)]), 0)
 
     def test_dry_run_never_calls_http(self):
-        with patch.object(lab.requests.Session, "request", side_effect=AssertionError("No live HTTP")), \\
-             patch.dict("os.environ", {"SERPER_API_KEY": "dummy"}):
-            with patch("sys.stdout"):
-                self.assertEqual(lab.run(["--provider", "serper", "--query", "TEST NEW"]), 0)
+        with patch.object(lab.requests.Session, "request", side_effect=AssertionError("No live HTTP")):
+            with patch.dict("os.environ", {"SERPER_API_KEY": "dummy"}):
+                with patch("sys.stdout"):
+                    self.assertEqual(lab.run(["--provider", "serper", "--query", "TEST NEW"]), 0)
 
     def test_live_requires_distinct_sku_ack_before_http(self):
-        with patch.object(lab.requests.Session, "request", side_effect=AssertionError("No live HTTP")), \\
-             patch.dict("os.environ", {"SERPER_API_KEY": "dummy"}):
-            with self.assertRaisesRegex(ValueError, "ACK_DISTINCT_NEW_SKU"):
-                lab.run(["--provider", "serper", "--query", "TEST NEW", "--execute-live"])
+        with patch.object(lab.requests.Session, "request", side_effect=AssertionError("No live HTTP")):
+            with patch.dict("os.environ", {"SERPER_API_KEY": "dummy"}):
+                with self.assertRaisesRegex(ValueError, "ACK_DISTINCT_NEW_SKU"):
+                    lab.run(["--provider", "serper", "--query", "TEST NEW", "--execute-live"])
 
 
 if __name__ == "__main__":
