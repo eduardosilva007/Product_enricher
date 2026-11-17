@@ -3495,7 +3495,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     # RAW_EMPTY é um estado sem evidência, NÃO comprovação de Search concluída.
     # Não transformar 1.030 RAW_EMPTY em consultas pagas sem consentimento explícito.
     raw_empty_count = int(plan.summary.get("RAW_EMPTY", 0) or 0)
-    if raw_empty_count and not bool(args.recollect_empty):
+    if raw_empty_count and not bool(args.recollect_empty) and provider != "openserp":
         limit = int(args.max_tavily_new or 0)
         print()
         print(f"ALERTA RAW_EMPTY: {raw_empty_count} SKU(s) sem resultados Search no cache.")
@@ -12134,8 +12134,11 @@ def main() -> int:
         if provider in {"openserp", "scraperapi"}:
             targets = cfg.pop("_experimental_collected_targets", [])
             if not targets:
-                LOG.info("EXPERIMENTAL FULL: nenhum SKU com evidência curada nesta coleta; classificação não iniciada")
-                return 0
+                LOG.warning("EXPERIMENTAL FULL: nenhum SKU com evidência curada nesta coleta; classificação não iniciada")
+                return 2
+            if len(targets) > int(args.max_items):
+                LOG.warning("EXPERIMENTAL FULL: truncando targets classificados %d para limite=%d", len(targets), args.max_items)
+                targets = targets[:int(args.max_items)]
             LOG.info("EXPERIMENTAL FULL: classificação restrita aos %d SKUs da coleta atual", len(targets))
             run_pipeline(args, cfg, rules, explicit_targets=targets)
         else:
