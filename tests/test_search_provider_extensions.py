@@ -295,24 +295,27 @@ class ProviderExtensionTests(unittest.TestCase):
                         event_type TEXT, detail TEXT);
                 """)
                 for key, provider in (("quota","serper"), ("timeout","serper"),
-                                      ("other","tavily"), ("valid","serper")):
+                                      ("other","tavily"), ("valid","serper"), ("legacy","serper")):
                     con.execute("INSERT INTO collection_attempt_reservations VALUES(?,?,?)",
                                 (key,provider+":1",provider))
                 for key, typ in (("quota","SERPER_LIMIT"),
                                  ("timeout","SEARCH_R9.6p7.2.3_ERROR_NO_RETRY"),
-                                 ("other","SERPER_LIMIT"), ("valid","SERPER_LIMIT")):
+                                 ("other","SERPER_LIMIT"), ("valid","SERPER_LIMIT"),
+                                 ("legacy","SEARCH_R9.6p7.2.3_ERROR_NO_RETRY")):
                     con.execute("INSERT INTO events(run_id,business_key,created_at,event_type,detail) VALUES(?,?,?,?,?)",
-                                ("run",key,"2026-11-17",typ,"test"))
+                                ("run",key,"2026-11-17",typ,
+                                 "SERPER HTTP 400: not enough credits" if key=="legacy" else "test"))
             plan = PreCollectionPlan(
                 input_path=Path("unused"), report_path=Path("unused"),
                 rows=[], representatives=[
                     SimpleNamespace(key=key,raw_state=state,
                                     action="TENTATIVA_ANTERIOR_PRESERVADA")
                     for key,state in (("quota","RAW_MISSING"),("timeout","RAW_MISSING"),
-                                      ("other","RAW_MISSING"),("valid","RAW_OK"))
+                                      ("other","RAW_MISSING"),("valid","RAW_OK"),
+                                      ("legacy","RAW_MISSING"))
                 ], candidates=[], summary={}
             )
-            self.assertEqual(recover_confirmed_serper_quota_reservations(db, plan),1)
+            self.assertEqual(recover_confirmed_serper_quota_reservations(db, plan),2)
             self.assertEqual(recover_confirmed_serper_quota_reservations(db, plan),0)
             with sqlite3.connect(db) as con:
                 self.assertEqual(con.execute("SELECT COUNT(*) FROM collection_attempt_reservations").fetchone()[0],3)
