@@ -313,6 +313,49 @@ class CollectionAutoProviderTests(unittest.TestCase):
                 self.assertEqual(prompts.call_count,2)
                 search.assert_not_called()
 
+    def test_manual_brightdata_empty_queue_never_requires_slots(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = argparse.Namespace(
+                search_provider="brightdata", auto_providers=False,
+                input="input.xlsx", cache=str(Path(d)/"cache.sqlite"),
+                db=str(Path(d)/"db.sqlite"), master="", final="",
+                precollection_output="", recollect_empty=False,
+                recollect_low_evidence=False, max_tavily_new=10, yes=True)
+            cfg = {"files": {"input": "input.xlsx", "cache": args.cache,
+                   "classification_db": args.db,
+                   "collection_report": str(Path(d)/"report.xlsx")}}
+            plan = SimpleNamespace(candidates=[], summary={})
+            with patch.object(p, "validate_collection_cost_policy", return_value=[]), \
+                 patch.object(p, "load_baseline_inventory", return_value={"processed": set()}), \
+                 patch.object(p, "build_precollection_plan", return_value=plan), \
+                 patch.object(p, "configured_slots", side_effect=AssertionError("No slots needed")), \
+                 patch.object(p, "_provider_credentials", side_effect=AssertionError("No keys needed")), \
+                 patch.object(p, "search_product_once", side_effect=AssertionError("No HTTP")):
+                self.assertTrue(p.collect_products(args, cfg, SimpleNamespace(hash="test")))
+
+    def test_manual_brightdata_live_queue_requires_brightdata_slot(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = argparse.Namespace(
+                search_provider="brightdata", auto_providers=False,
+                input="input.xlsx", cache=str(Path(d)/"cache.sqlite"),
+                db=str(Path(d)/"db.sqlite"), master="", final="",
+                precollection_output="", recollect_empty=False,
+                recollect_low_evidence=False, max_tavily_new=10, yes=True)
+            cfg = {"files": {"input": "input.xlsx", "cache": args.cache,
+                   "classification_db": args.db,
+                   "collection_report": str(Path(d)/"report.xlsx")}}
+            plan = SimpleNamespace(candidates=[
+                SimpleNamespace(brand_original="ABC", model_original="123",
+                                raw_state="RAW_MISSING")], summary={})
+            with patch.object(p, "validate_collection_cost_policy", return_value=[]), \
+                 patch.object(p, "load_baseline_inventory", return_value={"processed": set()}), \
+                 patch.object(p, "build_precollection_plan", return_value=plan), \
+                 patch.object(p, "configured_slots", return_value=[
+                    Slot("tavily", "tavily:1", "TAVILY_API_KEY", "", 10, "t")]), \
+                 patch.object(p, "search_product_once", side_effect=AssertionError("No HTTP")):
+                with self.assertRaisesRegex(RuntimeError, "BRIGHTDATA_SLOTS_UNAVAILABLE"):
+                    p.collect_products(args, cfg, SimpleNamespace(hash="test"))
+
     def test_no_explicit_budget_does_not_start_collection(self):
         with tempfile.TemporaryDirectory() as d:
             args = argparse.Namespace(
