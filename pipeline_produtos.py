@@ -3572,6 +3572,15 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     if policy_errors:
         raise CollectionCostPolicyError(" | ".join(policy_errors))
     auto_route = bool(getattr(args, "auto_providers", False))
+    if auto_route:
+        if not 1 <= int(args.max_tavily_new or 0) <= 10:
+            raise ValueError("AUTO_ROUTE_PILOT_SEARCH_CAP_REQUIRED: --max-search-new 1..10")
+        if args.mode == "full" and (
+            not 1 <= int(args.max_items or 0) <= 10
+            or not 1 <= int(args.max_api_calls or 0) <= 100
+            or not 1 <= int(args.max_tokens or 0) <= 200000
+        ):
+            raise ValueError("AUTO_ROUTE_PILOT_CLASSIFICATION_CAP_REQUIRED")
     if not auto_route:
         _provider_credentials(provider, cfg)  # preflight antes da primeira request
 
@@ -3813,7 +3822,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                             else f"COLLECT_{provider.upper()}_{COLLECTION_LABEL}"
                         ),
                     )
-                if provider in {"openserp", "scraperapi"} and curated:
+                if (auto_route or provider in {"openserp", "scraperapi"}) and curated:
                     experimental_targets.append((brand, model, key))
                 reported_credits = usage.get("reported_credits")
                 product_rows.append({
@@ -3905,7 +3914,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             f"COLLECTION {COLLECTION_LABEL} FINAL | provider=%s | produtos=%d | requests=%d | hard_cap=%d/produto | relatório=%s",
             provider, len(product_rows), total_requests, MAX_COLLECTION_REQUESTS_PER_PRODUCT, report_path,
         )
-        if provider in {"openserp", "scraperapi"}:
+        if auto_route or provider in {"openserp", "scraperapi"}:
             cfg["_experimental_collected_targets"] = list(experimental_targets)
             LOG.info("EXPERIMENTAL CLASSIFICATION SCOPE | ready_targets=%d", len(experimental_targets))
         return completed
@@ -12312,7 +12321,7 @@ def main() -> int:
         if not completed:
             LOG.warning("PROCESSO COMPLETO interrompido após a coleta. Classificação não iniciada.")
             return 3
-        if provider in {"openserp", "scraperapi"}:
+        if args.auto_providers or provider in {"openserp", "scraperapi"}:
             targets = cfg.pop("_experimental_collected_targets", [])
             if not targets:
                 LOG.warning("EXPERIMENTAL FULL: nenhum SKU com evidência curada nesta coleta; classificação não iniciada")
