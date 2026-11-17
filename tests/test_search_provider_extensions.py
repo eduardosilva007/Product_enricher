@@ -176,6 +176,14 @@ class ProviderExtensionTests(unittest.TestCase):
                 args.auto_providers = True
                 with self.assertRaisesRegex(ValueError, "MANUAL_ONLY"):
                     _enforce_central_search_paths(args, cfg, provider)
+                args.auto_providers = False
+                args.recollect_low_evidence = True
+                with self.assertRaisesRegex(ValueError, "NO_RECOLLECT_OR_REPROCESS"):
+                    _enforce_central_search_paths(args, cfg, provider)
+                args.recollect_low_evidence = False
+                args.reprocess = True
+                with self.assertRaisesRegex(ValueError, "NO_RECOLLECT_OR_REPROCESS"):
+                    _enforce_central_search_paths(args, cfg, provider)
 
     def test_experimental_provider_blocks_unbounded_batches(self):
         from pipeline_produtos import _enforce_central_search_paths, build_parser, read_json
