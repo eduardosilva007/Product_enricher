@@ -11446,7 +11446,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     if op == "5":
         raise SystemExit(0)
     if op == "4":
-        print("\\nMANUTENCAO, AUDITORIA E FERRAMENTAS")
+        print("\nMANUTENCAO, AUDITORIA E FERRAMENTAS")
         print("1 - Recuperar pendencias do cache (sem busca)")
         print("2 - Auditoria e reparo da base (sem Clef)")
         print("3 - Curar cache legado (sem busca)")
