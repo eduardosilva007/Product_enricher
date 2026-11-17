@@ -402,6 +402,8 @@ def load_env_file(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return info
 
+    # Repeated account variables can silently pair the wrong API key and zone.
+    seen_provider_keys: set[str] = set()
     for line in path.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -421,6 +423,10 @@ def load_env_file(path: Path) -> Dict[str, Any]:
 
         if not key:
             continue
+        if key.startswith(("BRIGHTDATA_", "SERPER_", "TAVILY_")):
+            if key in seen_provider_keys:
+                raise ValueError(f"DUPLICATE_PROVIDER_ENV_KEY: {key}; use _1/_2 for independent accounts")
+            seen_provider_keys.add(key)
 
         if key in os.environ:
             info["skipped_existing"].append(key)
@@ -1916,12 +1922,13 @@ def validate_collection_cost_policy(cfg: Dict[str, Any]) -> List[str]:
 
     bright = _provider_cfg(cfg, "brightdata")
     if bright:
-        response_format = safe(bright.get("format", "raw")).casefold() or "raw"
-        if response_format not in {"raw", "json"}:
-            errors.append(f"BRIGHTDATA_CONFIG: format deve ser raw ou json; recebido={response_format}")
-        fmt = safe(bright.get("data_format", "parsed_light")).casefold() or "parsed_light"
-        if fmt != "parsed_light":
-            errors.append(f"BRIGHTDATA_CONFIG: somente parsed_light permitido; recebido={fmt}")
+        response_format = safe(bright.get("format", "json")).casefold() or "json"
+        if response_format != "json":
+            errors.append(f"BRIGHTDATA_CONFIG: format deve ser json; recebido={response_format}")
+        # REST SERP JSON is selected by format=json. The REST reference
+        # documents data_format only for other transformations, not parsed_light.
+        if safe(bright.get("data_format")):
+            errors.append("BRIGHTDATA_CONFIG: remova data_format; SERP JSON usa format=json")
     return errors
 
 
@@ -1985,6 +1992,20 @@ def _provider_post_once(
         ) from exc
 
     status = int(response.status_code)
+
+    # Bright Data pode responder HTTP 2xx e ainda sinalizar falha operacional
+    # nos headers (ex.: captcha / redirect rejeitado). Isso NÃO é evidência válida
+    # e não deve contaminar o cache. A tentativa do SKU permanece registrada e
+    # não há retry automático do mesmo SKU.
+    if provider == "brightdata":
+        brd_error_code = safe(response.headers.get("x-brd-error-code"))
+        brd_error = safe(response.headers.get("x-brd-error"))
+        if brd_error_code or brd_error:
+            raise RuntimeError(
+                "BRIGHTDATA RESPONSE ERROR: "
+                f"code={brd_error_code or 'UNKNOWN'}; detail={brd_error or 'sem detalhe'}"
+            )
+
     if 200 <= status < 300:
         try:
             payload = response.json()
@@ -1999,6 +2020,13 @@ def _provider_post_once(
     # Never retry this SKU; disable only the affected account for subsequent SKUs.
     if provider == "serper" and status == 400 and "not enough credits" in msg.casefold():
         raise OperationalPause("SERPER_LIMIT", "SERPER HTTP 400: insufficient credits")
+
+    # Bright Data: erro de zone é configuração/escopo da credencial, não saldo.
+    # Desabilita o slot imediatamente para os PRÓXIMOS SKUs; o SKU atual não é
+    # repetido em outro provider por causa da regra 1 SKU = máximo 1 Search.
+    if provider == "brightdata" and status == 400 and "zone" in msg.casefold() and "not found" in msg.casefold():
+        raise OperationalPause("BRIGHTDATA_CONFIG", f"BRIGHTDATA HTTP 400: {msg}")
+
     if status in {401, 403}:
         raise OperationalPause(f"{provider.upper()}_AUTH", f"{provider.upper()} HTTP {status}: autenticação/permissão")
     if status in {429, 432, 433}:
@@ -2073,7 +2101,16 @@ def _normalize_brightdata_results(payload: Dict[str, Any]) -> List[Dict[str, Any
             raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: body JSON invalid") from exc
     if not isinstance(body, dict):
         raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: body not an object")
+    # A valid parsed SERP may have zero organic links for an uncommon SKU.
+    # Only accept this as an empty result when recognizable SERP metadata is
+    # present; do NOT treat arbitrary 200/error JSON as successful evidence.
     rows = body.get("organic")
+    if rows is None and (
+        isinstance(body.get("general"), dict)
+        or isinstance(body.get("related"), list)
+        or isinstance(body.get("people_also_ask"), list)
+    ) and not any(body.get(k) for k in ("error", "errors", "message")):
+        rows = []
     if not isinstance(rows, list):
         raise RuntimeError("BRIGHTDATA_LIGHT_JSON_SCHEMA_INVALID: organic[] absent in parsed response")
     out: List[Dict[str, Any]] = []
@@ -2842,22 +2879,72 @@ def _provider_request_once(
         max_results = min(10, max_results)
         url = safe(pcfg.get("base_url")) or "https://api.brightdata.com/request"
         headers = {"Authorization": f"Bearer {creds['api_key']}", "Content-Type": "application/json"}
-        google_url = "https://www.google.com/search?" + urlencode({"q": query, "num": max_results})
+        # Official REST SERP API example: standard Google query URL,
+        # format=json; no undocumented data_format or brd_json parameters.
+        # Explicit Full JSON SERP parsing. format=json alone only wraps the HTTP response.
+        # One Google SERP request per SKU; no extra fetch, retry or fallback.
+        google_url = "https://www.google.com/search?" + urlencode({"q": query, "brd_json": 1})
         body = {
             "zone": creds["zone"],
             "url": google_url,
-            # Bright Data SERP API contract for parsed Light JSON.
-            # Hardcoded fail-closed: no Raw HTML / Full JSON / Bing / Markdown fallback.
-            # Docs: raw + parsed_light delivers the structured JSON body directly.
-            # Old config "json" wrapper remains readable by the strict adapter.
-            "format": "raw",
-            "data_format": "parsed_light",
+            # Official REST SERP API: response is structured JSON.
+            # Strict adapter accepts either direct organic[] or a JSON envelope.
+            "format": "json",
         }
         payload = _provider_post_once(provider, url, headers, body, timeout, limiter, budget)
+        # Explicitly opt-in to a separate diagnostic snapshot of the ORIGINAL
+        # response. No API call, no change to canonical cache/Excel or retry.
+        raw_capture_dir = os.getenv("PROVIDER_RAW_CAPTURE_DIR", "").strip()
+        if raw_capture_dir:
+            try:
+                from provider_lab import capture_payload
+                snapshot = capture_payload(
+                    "brightdata", payload, query, Path(raw_capture_dir)
+                )
+                LOG.info("BRIGHTDATA RAW SNAPSHOT | file=%s", snapshot)
+            except Exception as exc:
+                # Diagnostics must never make a successful paid request fail.
+                LOG.warning("BRIGHTDATA RAW SNAPSHOT SKIPPED | %s", type(exc).__name__)
+        # format=json wraps the *upstream* HTTP status in the response body.
+        # Outer HTTP 200 does NOT prove Google responded successfully.
+        if "body" in payload:
+            upstream_status = payload.get("status_code")
+            if upstream_status is not None:
+                try:
+                    upstream_status = int(upstream_status)
+                except (TypeError, ValueError):
+                    raise OperationalPause("BRIGHTDATA_UPSTREAM", "Bright Data upstream status invalid") from None
+                if upstream_status in (401, 403):
+                    raise OperationalPause("BRIGHTDATA_UPSTREAM", f"Bright Data upstream HTTP {upstream_status}")
+                if upstream_status in (429, 432, 433):
+                    raise OperationalPause("BRIGHTDATA_UPSTREAM", f"Bright Data upstream HTTP {upstream_status}")
+                if 500 <= upstream_status <= 599:
+                    # An upstream 5xx is a transient per-request target failure,
+                    # not a Bright Data key/zone authentication or quota failure.
+                    raise OperationalPause("BRIGHTDATA_UPSTREAM_5XX", f"Bright Data upstream HTTP {upstream_status}")
+                if not 200 <= upstream_status < 300:
+                    raise OperationalPause("BRIGHTDATA_UPSTREAM", f"Bright Data upstream HTTP {upstream_status}")
         try:
             results = _normalize_brightdata_results(payload)
         except RuntimeError as exc:
-            raise OperationalPause("BRIGHTDATA_SCHEMA", safe(exc)) from exc
+            # Preserve safe structural diagnostics only: never log the SERP
+            # response body, credentials, submitted query or result content.
+            wrapper = payload.get("body", payload)
+            if isinstance(wrapper, str):
+                try:
+                    wrapper = json.loads(wrapper)
+                except (ValueError, TypeError):
+                    wrapper = None
+            top_keys = sorted(str(k) for k in payload.keys())[:20]
+            body_keys = sorted(str(k) for k in wrapper.keys())[:20] if isinstance(wrapper, dict) else []
+            raw_body = payload.get("body")
+            body_format = "html" if isinstance(raw_body, str) and raw_body.lstrip().startswith(("<", "<!DOCTYPE")) else "non_json"
+            raise OperationalPause(
+                "BRIGHTDATA_SCHEMA",
+                f"{safe(exc)}; upstream_status={payload.get('status_code', 'NA')}; "
+                f"body_format={body_format}; payload_keys={top_keys}; "
+                f"body_type={type(wrapper).__name__}; body_keys={body_keys}",
+            ) from exc
         return results, {
             "requests": budget.used,
             "provider_units": 1,
@@ -3334,7 +3421,10 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     if policy_errors:
         raise CollectionCostPolicyError(" | ".join(policy_errors))
     auto_route = bool(getattr(args, "auto_providers", False))
-    if not auto_route:
+    # A fixed Bright Data selection still requires the same durable account
+    # router as AUTO: slot-specific keys, zones, limits and attempt reservations.
+    slot_route = auto_route or provider == "brightdata"
+    if not slot_route:
         _provider_credentials(provider, cfg)  # preflight antes da primeira request
 
     input_path = Path(args.input or cfg.get("files", {}).get("input", "Base de Produtos.xlsx"))
@@ -3380,11 +3470,17 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         print("Não serão pesquisados automaticamente. Uma recoleta pode consumir novos créditos.")
         print(f"Limite por execução: {limit if limit > 0 else 'SEM LIMITE (NÃO RECOMENDADO)'} request(s).")
         print("Opções: [S] autorizar uma recoleta limitada | [N] manter cache e não consultar.")
-        while True:
-            decision = input("Autorizar recoleta de RAW_EMPTY nesta execução? (S/N): ").strip().upper()
-            if decision in {"S", "N"}:
-                break
-            print("Informe S ou N.")
+        if args.yes:
+            # Headless FULL mode must NEVER turn old RAW_EMPTY into paid Search.
+            # Explicit --recollect-empty must be provided to authorize retry.
+            decision = "N"
+            LOG.info("RAW_EMPTY SKIPPED UNATTENDED | count=%d | --recollect-empty=NO | new_paid_requests=0", raw_empty_count)
+        else:
+            while True:
+                decision = input("Autorizar recoleta de RAW_EMPTY nesta execução? (S/N): ").strip().upper()
+                if decision in {"S", "N"}:
+                    break
+                print("Informe S ou N.")
         if decision == "S":
             if limit <= 0:
                 raise RuntimeError(
@@ -3403,9 +3499,26 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         else:
             print("RECOLETA RAW_EMPTY RECUSADA. Nenhuma request por estes registros.")
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
-    slots = configured_slots() if auto_route and candidates else []
-    if auto_route and candidates and not slots:
-        raise RuntimeError("AUTO_PROVIDERS: configure ao menos um *_LIMIT_1 positivo e credencial no .env")
+    # No planned Search means no slot, credential or billing validation is needed.
+    # A live queue must still fail closed when its selected provider has no budget.
+    slots = configured_slots() if slot_route and candidates else []
+    if not auto_route and provider == "brightdata":
+        slots = [slot for slot in slots if slot.provider == "brightdata"]
+    if slot_route and candidates and not slots:
+        if auto_route:
+            raise RuntimeError(
+                "AUTO_PROVIDERS: configure ao menos um *_LIMIT_N positivo "
+                "e a credencial correspondente no .env"
+            )
+        raise RuntimeError(
+            "BRIGHTDATA_SLOTS_UNAVAILABLE: configure BRIGHTDATA_API_KEY_N, "
+            "BRIGHTDATA_ZONE_N e BRIGHTDATA_LIMIT_N positivos"
+        )
+    if slot_route and slots:
+        slot_summary = [
+            f"{s.account}:{s.provider}:limit={s.limit}:group={s.group}" for s in slots
+        ]
+        LOG.info("AUTO PROVIDER ROUTER OK | slots=%d | %s", len(slots), " | ".join(slot_summary))
 
     print()
     print("=" * 86)
@@ -3419,7 +3532,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         display = label.replace("Tavily", "Search")
         print(f"{display:.<54} {plan.summary.get(label, 0)}")
     print("-" * 86)
-    print(f"Provider........................................ {provider.upper()}")
+    print(f"Provider........................................ {'AUTO ROUTER' if auto_route else (provider.upper() + ' (SLOTS)' if slot_route else provider.upper())}")
     print("HARD LIMIT...................................... 1 PRODUTO = MAX. 1 REQUEST")
     print("Automatic retry................................. DESABILITADO")
     print("Secondary/Fallback/Rescue search................ DESABILITADO")
@@ -3445,8 +3558,8 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
 
     pcfg = _provider_cfg(cfg, provider)
     limiter = RateLimiter(float(pcfg.get("requests_per_minute", 30) or 30))
-    limiters = {p: RateLimiter(float(_provider_cfg(cfg,p).get("requests_per_minute",30) or 30)) for p in ("tavily","brightdata","serper")} if auto_route else {}
-    router = DurableRouter(db_path, slots) if auto_route else None
+    limiters = {p: RateLimiter(float(_provider_cfg(cfg,p).get("requests_per_minute",30) or 30)) for p in ("tavily","brightdata","serper")} if slot_route else {}
+    router = DurableRouter(db_path, slots) if slot_route else None
     db = ClassificationDB(db_path)
     run_id = db.start_run("collect", rules.hash, f"SEARCH_{COLLECTION_LABEL}:{provider}")
     writer = TavilyWritableStore(cache_path)  # nome legado; payload agora registra provider explicitamente
@@ -3455,6 +3568,11 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     query_rows: List[Dict[str, Any]] = []
     completed = True
     total_requests = 0
+    consecutive_schema_failures = 0
+    # FULL mode usa esta lista para fechar exatamente o mesmo lote que consumiu Search.
+    # Nada de selecionar outro cohort histórico depois da coleta.
+    executed_targets: List[Tuple[str, str, str]] = []
+    setattr(args, "_last_collection_targets", [])
     try:
         for idx, (brand, model, prior_state) in enumerate(candidates, 1):
             key = business_key(brand, model)
@@ -3490,8 +3608,12 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 }
                 limiter = limiters[provider]
                 LOG.info("ROUTER | produto=%d/%d provider=%s conta=%s", idx, len(candidates), provider, active_slot.account)
+            # A reserva já identifica que este SKU pertence ao lote efetivamente tentado.
+            # Em FULL, ele precisa receber um desfecho terminal mesmo se a Search falhar.
+            executed_targets.append((brand, model, key))
             try:
                 payload = search_product_once(brand, model, cfg, limiter, provider)
+                consecutive_schema_failures = 0
                 coll = payload.get("_collection", {}) or {}
                 usage = coll.get("usage", {}) or {}
                 req_count = int(usage.get("requests", 0) or 0)
@@ -3576,9 +3698,39 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                     "Estado Anterior": prior_state, "Collection State": exc.code,
                     "Provider Requests": 1, "Data": now_iso(),
                 })
-                if router and active_slot and (exc.code.endswith("_LIMIT") or exc.code.endswith("_AUTH") or exc.code.endswith("_SCHEMA")):
+                if exc.code in {"BRIGHTDATA_SCHEMA", "BRIGHTDATA_UPSTREAM_5XX"} and router and active_slot:
+                    # Both are per-SKU response failures, not evidence of a
+                    # broken account. Never retry the same SKU. Allow one next
+                    # SKU, then stop after two consecutive malformed/5xx outcomes.
+                    consecutive_schema_failures += 1
+                    LOG.warning(
+                        "ROUTER | falha transitória de resposta; conta=%s; tipo=%s; "
+                        "sequencia_falhas=%d/2; sem retry | %s",
+                        active_slot.account, exc.code, consecutive_schema_failures, safe(exc),
+                    )
+                    if consecutive_schema_failures >= 2:
+                        completed = False
+                        LOG.error("ROUTER | pausa preventiva após 2 falhas de resposta consecutivas")
+                        break
+                    continue
+                if router and active_slot and (
+                    exc.code.endswith("_LIMIT")
+                    or exc.code.endswith("_AUTH")
+                    or exc.code.endswith("_SCHEMA")
+                    or exc.code.endswith("_CONFIG")
+                ):
                     router.disable(active_slot.account, exc.code)
-                    LOG.warning("ROUTER | conta desabilitada=%s; segue no próximo SKU", active_slot.account)
+                    # A schema mismatch is not proof that the account is
+                    # exhausted. Stop after one SKU rather than disabling
+                    # every provider slot and losing the remaining cohort.
+                    if exc.code.endswith(("_CONFIG", "_AUTH", "_SCHEMA")):
+                        LOG.error(
+                            "ROUTER | conta=%s bloqueada por %s; campanha pausada; detalhe=%s",
+                            active_slot.account, exc.code, safe(exc),
+                        )
+                        completed = False
+                        break
+                    LOG.warning("ROUTER | conta desabilitada=%s | reason=%s", active_slot.account, exc.code)
                     continue
                 LOG.error("%s. Coleta pausada; tudo salvo até aqui permanece persistido.", exc)
                 completed = False
@@ -3605,9 +3757,15 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             "COMPLETED" if completed else "PAUSED",
             f"executados={len(product_rows)} planejados={len(candidates)} requests={total_requests} provider={provider}",
         )
+        setattr(args, "_last_collection_targets", list(executed_targets))
         LOG.info(
             f"COLLECTION {COLLECTION_LABEL} FINAL | provider=%s | produtos=%d | requests=%d | hard_cap=%d/produto | relatório=%s",
             provider, len(product_rows), total_requests, MAX_COLLECTION_REQUESTS_PER_PRODUCT, report_path,
+        )
+        LOG.info(
+            "FULL COHORT HANDOFF | attempted=%d | unique=%d | ready_for_terminal_closure=%s",
+            len(executed_targets), len({x[2] for x in executed_targets}),
+            "SIM" if completed else "NÃO",
         )
         return completed
     except KeyboardInterrupt:
@@ -7047,6 +7205,19 @@ def _baseline_row_accepted(row: Any, df: Any) -> bool:
     if review in _REVIEW_REJECT_STATES:
         return False
 
+    # The public Final carries only 11 business columns: its technical
+    # Resolution State / Review Required flags are stripped on export.
+    # PROVAVEL + DOUBLE_CHECK is a proposed JEV classification, not automatic
+    # acceptance. Without this gate, the postrun cohort audit counts proposals
+    # as accepted even though _record_is_accepted correctly rejects them.
+    action_col = find_col(df, ["Próxima Ação", "Proxima Acao"], required=False)
+    action = safe(row.get(action_col)).upper() if action_col else ""
+    if review in {"PROVÁVEL", "PROVAVEL"} and action in {
+        "DOUBLE_CHECK", "AGUARDAR_REVISAO_PRODUTO_CANONICO",
+        "REVISAR_CONFLITO_EQUIVALENCIA",
+    }:
+        return False
+
     technical_gate_present = any([
         bool(review_required_col and safe(row.get(review_required_col))),
         bool(resolution_col and safe(row.get(resolution_col))),
@@ -7071,10 +7242,10 @@ def _baseline_row_accepted(row: Any, df: Any) -> bool:
         return False
     return True
 
-def _accepted_keys_from_baseline_file(
-    path: Optional[Path],
+def _accepted_keys_from_baseline_file_uncached(
+    path: Optional[Path], *, strict: bool = False,
 ) -> Tuple[set, set, set]:
-    """Retorna (aceitos, manuais, bi_ok_locked) de um baseline."""
+    """Leitura autoritativa da planilha; nunca usa cache."""
     accepted: set = set()
     manual: set = set()
     bi_locked: set = set()
@@ -7086,6 +7257,8 @@ def _accepted_keys_from_baseline_file(
         df, _ = _read_business_sheet(path)
     except Exception as exc:
         LOG.warning("Baseline %s não pôde ser lida: %s", path, exc)
+        if strict:
+            raise RuntimeError(f"BASELINE_INVENTORY_READ_FAILED: {path.name}") from exc
         return accepted, manual, bi_locked
 
     b = find_col(df, ["Marca", "Fabricante", "Brand", "Manufacturer"])
@@ -7111,6 +7284,32 @@ def _accepted_keys_from_baseline_file(
             accepted.add(key)
 
     return accepted, manual, bi_locked
+
+def _accepted_keys_from_baseline_file(
+    path: Optional[Path],
+) -> Tuple[set, set, set]:
+    """Content-addressed optimization, preserving original loader semantics."""
+    if not path or not path.is_file():
+        return _accepted_keys_from_baseline_file_uncached(path)
+    from baseline_inventory_cache import cached_baseline_keys
+    # Any changes to the baseline-acceptance logic or its source file invalidate
+    # all persisted derived inventories automatically. No business taxonomy is
+    # ever read from this cache.
+    from pathlib import Path as _Path
+    import hashlib as _hashlib
+    logic_hasher = _hashlib.sha256()
+    with _Path(__file__).open("rb") as logic_source:
+        while True:
+            block = logic_source.read(1024 * 1024)
+            if not block:
+                break
+            logic_hasher.update(block)
+    return cached_baseline_keys(
+        path,
+        lambda p: _accepted_keys_from_baseline_file_uncached(p, strict=True),
+        logic_digest=logic_hasher.hexdigest(),
+    )
+
 
 def load_baseline_inventory(
     master_path: Optional[Path],
@@ -7914,9 +8113,20 @@ def _manual_review_bundle(raw: RawEvidence) -> Dict[str, str]:
     audits = {_url_key(r.get("url", "")): r for r in (coll.get("source_audit") or [])
               if isinstance(r, dict) and _url_key(r.get("url", ""))}
     evidence = [r for r in (coll.get("evidence_cache") or []) if isinstance(r, dict)]
+    curated = [r for r in (coll.get("curated_results") or []) if isinstance(r, dict)]
     evidence_by_url = {_url_key(r.get("url", "")): r for r in evidence if _url_key(r.get("url", ""))}
     rows = []
-    source = results[:10] if results else evidence[:10]
+    # The prior results[:10] branch ignored usable curated/evidence titles
+    # whenever at least one RAW result existed. Preserve the raw title
+    # inventory and include curated/evidence titles as fallbacks.
+    source = []
+    seen_sources = set()
+    for item in results[:10] + curated[:10] + evidence[:10]:
+        fingerprint = (_url_key(item.get("url", "")), safe(item.get("title")))
+        if fingerprint in seen_sources:
+            continue
+        seen_sources.add(fingerprint)
+        source.append(item)
     for n, item in enumerate(source, 1):
         url = safe(item.get("url"))
         ev = evidence_by_url.get(_url_key(url), item if not results else {})
@@ -8966,12 +9176,13 @@ def _export_base_final(
                                   "Título Referência Identity"):
                         if not safe(rec.get(field)) and bundle.get(field):
                             out.at[idx, field] = bundle[field]
-                    # Título Real só recebe referência com identidade comprovada.
-                    # Outros títulos permanecem visíveis em Título Referência/Fontes.
-                    identity = safe(bundle.get("Título Referência Identity")).upper()
-                    decision = safe(bundle.get("Qualidade Referência")).upper()
-                    if (not safe(rec.get("Título Real")) and identity == "STRONG"
-                            and not decision.startswith("REJECT")
+                    # Operational visibility: the public Final must retain
+                    # a found Search title even on REVIEW_CACHE_EVIDENCE.
+                    # Weak/rejected titles remain a *reference*, not proof of
+                    # the physical SKU: classification/status are unchanged and
+                    # identity/decision stay in Master/SQLite for audit.
+                    # Never overwrite a previously recorded actual title.
+                    if (not safe(rec.get("Título Real"))
                             and safe(bundle.get("Título Referência"))):
                         out.at[idx, "Título Real"] = bundle["Título Referência"]
                         if not safe(rec.get("Fonte URL")):
@@ -9024,7 +9235,9 @@ def _export_base_final(
                 if raw.state not in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
                     continue
                 for record in records:
-                    if _is_bi_ok_value(record.get("Revisão B.I")) or safe(record.get("Status")).upper() == "MANUAL":
+                    if (_is_bi_ok_value(record.get("Revisão B.I"))
+                            or safe(record.get("Status")).upper() == "MANUAL"
+                            or _baseline_row_accepted(record, out)):
                         expected["skipped_human"] += 1
                         continue
                     collection_status = safe(record.get("Status Coleta")).upper()
@@ -9244,15 +9457,43 @@ def _hydrate_input_collection_from_cache(
                     master_df.at[idx, "Título Referência Identity"] = identity
             if title:
                 stats["cache_reference_titles"] += 1
-                if (identity == "STRONG" and not decision.startswith("REJECT")
-                        and not safe(old.get("Título Real"))):
-                    master_df.at[idx, "Título Real"] = title
-                    if not safe(old.get("Fonte URL")):
-                        master_df.at[idx, "Fonte URL"] = safe(
-                            master_df.at[idx, "Fonte Referência URL"])
+                # RAW Search titles are untrusted review artifacts, even when
+                # the title looks plausible. NEVER copy them to Título Real
+                # or Fonte URL during cache hydration. Those fields are
+                # owned exclusively by audited classification/human review.
     finally:
         store.close()
     return stats
+
+
+def _refresh_sqlite_sku_registry(master_path: Path, final_path: Path,
+                                 cfg: Optional[Dict[str, Any]],
+                                 cohort_keys: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+    """Keep existing SQLite SKU lookup aligned after canonical Excel exports.
+
+    This is a synchronized registry/projection until SQLite-authoritative
+    Excel exports are separately implemented and tested. Zero paid APIs.
+    """
+    files = (cfg or {}).get("files") or {}
+    db_name = safe(files.get("classification_db"))
+    if not db_name:
+        return {"status": "SKIPPED_NO_DATABASE_CONFIG"}
+    db_path = (ROOT / db_name).resolve()
+    if not db_path.is_file():
+        raise RuntimeError(f"SQLITE_REGISTRY_DB_MISSING:{db_path}")
+    from sku_registry_sqlite import audit_sqlite_merge
+    result = audit_sqlite_merge(
+        final_path, master_path, db_path, set(cohort_keys or ()), commit=True)
+    if result["status"] != "SQLITE_MERGED":
+        raise RuntimeError(
+            "SQLITE_REGISTRY_NOT_SYNCHRONIZED:"
+            + json.dumps(result, ensure_ascii=False, default=str))
+    LOG.info("SQLITE REGISTRY SYNC OK | keys=%d | safe=%d | "
+             "ambiguous=%d | campaign=%d/%d | api_calls=0",
+             result["unique_final_keys"], result["lookup_safe_keys"],
+             result["global_ambiguous"], result["campaign_found_in_final"],
+             result["campaign_expected"])
+    return result
 
 
 def persist_baseline_excels(
@@ -9267,6 +9508,7 @@ def persist_baseline_excels(
     cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, int]:
     """Grava Consolidado -> Base Final sem jamais alterar linhas Revisão B.I=OK."""
+    started_baseline_export = time.perf_counter()
     import pandas as pd
 
     if not master_path and not final_path:
@@ -9402,6 +9644,17 @@ def persist_baseline_excels(
             input_path=input_path,
             cache_path=cache_path,
         )
+        if rows:
+            from final_cohort_coverage import audit_final_cohort
+            physical = audit_final_cohort(final_path, rows)
+            stats["final_cohort_exact_present"] = physical["present"]
+            stats["final_cohort_exact_missing"] = physical["missing"]
+            LOG.info(
+                "FULL FINAL ROW COVERAGE | attempted=%d | unique_exact=%d | "
+                "present=%d | missing=%d | status=%s",
+                physical["attempted"], physical["unique_exact"],
+                physical["present"], physical["missing"], physical["status"],
+            )
 
     inv_after = load_baseline_inventory(master_path, final_path)
     stats["master_accepted_total"] = len(inv_after["master_accepted"])
@@ -9409,6 +9662,42 @@ def persist_baseline_excels(
     stats["baseline_union_total"] = len(inv_after["processed"])
     stats["bi_ok_hard_lock_total"] = len(inv_after["bi_locked"])
     stats["baseline_missing_in_final"] = len(inv_after["processed"] - inv_after["final_accepted"])
+    if master_path and final_path:
+        registry = _refresh_sqlite_sku_registry(master_path, final_path, cfg)
+        stats["sqlite_registry_status"] = registry["status"]
+        if registry["status"] == "SQLITE_MERGED":
+            stats["sqlite_registry_keys"] = registry["unique_final_keys"]
+
+    # A previously successful, fully verified export is the ONLY event that
+    # authorizes later starts to skip rebuilding identical Excel baselines.
+    # This cannot bypass the classifier, rules or central integrity gates.
+    # Tests and maintenance tools can pass a minimal Rules-like object.
+    # A missing source path must disable the optional optimization, never
+    # break the authoritative baseline export or weaken the integrity checks.
+    rules_source = getattr(rules, "path", None)
+    config_source = cfg.get("_source_config_path") if cfg else None
+    if (cfg and not cfg.get("_nightly_output_only")
+            and stats.get("baseline_missing_in_final") == 0
+            and stats.get("sqlite_registry_status") == "SQLITE_MERGED"
+            and all(
+                p is not None and Path(p).is_file()
+                for p in (input_path, master_path, final_path, cache_path,
+                          rules_source, config_source)
+            )):
+        from input_sync_manifest import record_success
+        try:
+            sync_files = {
+                "input": input_path, "master": master_path,
+                "final": final_path, "cache": cache_path,
+                "rules": rules_source, "config": config_source,
+            }
+            record_success(sync_files)
+            LOG.info("INPUT BASELINE SYNC SNAPSHOT SAVED | source_hashes=6 | api_calls=0")
+        except Exception as exc:
+            # Cache publication is optional, baseline persistence is not.
+            LOG.warning("INPUT BASELINE SYNC SNAPSHOT SKIPPED | %s", type(exc).__name__)
+    LOG.info("BASELINE PERSIST DURATION | elapsed=%.1fs | rows=%d",
+             time.perf_counter() - started_baseline_export, len(rows))
     return stats
 
 def reconcile_baseline_before_run(
@@ -10086,6 +10375,47 @@ def run_cache_recovery(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rul
                 ledger.write(key + "\n")
 
 
+def _current_proposal_keys_for_queue(master_path: Optional[Path], rules: Rules) -> set:
+    """Exclude complete, current JEV proposals from repetitive ordinary runs.
+
+    CLASSIFIED_CLEF remains NOT accepted. It stays visible in Final as
+    PROVAVEL/DOUBLE_CHECK and can be reprocessed only with explicit --reprocess
+    or when rules/pipeline version changes. Uses Master (technical authority),
+    never the stripped eleven-column Final.
+    """
+    if not master_path or not master_path.exists():
+        return set()
+    frame, _ = _read_business_sheet(master_path)
+    bcol = find_col(frame, ["Marca", "Fabricante", "Brand", "Manufacturer"])
+    mcol = find_col(frame, ["Modelo", "Model", "SKU", "Part Number"])
+    needed = ("Resolution State", "Review Required", "Rules Hash", "Pipeline Version")
+    if any(col not in frame.columns for col in needed):
+        return set()
+    result = set()
+    for _, row in frame.iterrows():
+        if safe(row.get("Resolution State")).upper() != "CLASSIFIED_CLEF":
+            continue
+        if safe(row.get("Review Required")).upper() != "SIM":
+            continue
+        if safe(row.get("Revisão")).upper() not in {"PROVÁVEL", "PROVAVEL"}:
+            continue
+        if safe(row.get("Rules Hash")) != rules.hash or safe(row.get("Pipeline Version")) != PIPELINE_VERSION:
+            continue
+        if not all(safe(row.get(col)) for col in ("O que é (Tipo)", "Category General", "FAMILY", "Título Real")):
+            continue
+        if safe(row.get("O que é (Tipo)")).upper() in {"REVISAR", "UNKNOWN", "N/A"}:
+            continue
+        b, m = safe(row.get(bcol)), safe(row.get(mcol))
+        if b and m:
+            result.add(business_key(b, m))
+    return result
+
+
+def _use_input_scoped_evidence_cohort(mode: str) -> bool:
+    """Classify and full both limit eligible input SKUs, not historical cache rows."""
+    return mode in {"classify", "full"}
+
+
 def run_pipeline(
     args: argparse.Namespace,
     cfg: Dict[str, Any],
@@ -10198,6 +10528,10 @@ def run_pipeline(
         else set()
     )
     processed = baseline_inventory["processed"]
+    if explicit_targets is None and args.mode in {"full", "classify"} and not args.reprocess:
+        current_proposals = _current_proposal_keys_for_queue(master_path, rules)
+        processed = processed | current_proposals
+        LOG.info("CLASSIFICATION CURRENT PROPOSALS SKIPPED | count=%d | reprocess=N | human_approval=UNCHANGED", len(current_proposals))
     manual = baseline_inventory["manual"]
     bi_locked = baseline_inventory["bi_locked"]
     hard_lock = baseline_inventory["hard_lock"]
@@ -10247,7 +10581,7 @@ def run_pipeline(
         stats = defaultdict(int)
 
         if explicit_targets is None:
-            if args.mode == "classify":
+            if _use_input_scoped_evidence_cohort(args.mode):
                 flow_cfg = cfg.get("classification_flow", {}) or {}
                 restrict_to_input = bool(flow_cfg.get("restrict_classify_to_input", True))
                 allowed_keys: Optional[set] = None
@@ -10332,7 +10666,7 @@ def run_pipeline(
             cohort_stats.get("cohort_bi_ok_lock", 0),
             cohort_hash,
         )
-        if args.mode == "classify" and explicit_targets is None:
+        if _use_input_scoped_evidence_cohort(args.mode) and explicit_targets is None:
             LOG.info(
                 "CLASSIFICATION QUEUE | targets=%d | ready=%d | partial=%d | legacy_curated=%d | "
                 "safe_aux_rescue=%d | fora_input=%d | no_evidence_fora_da_fila=%d | raw_indisponivel=%d | "
@@ -10499,6 +10833,37 @@ def run_pipeline(
                         clef.total_tokens if clef is not None else 0, sem_avg, rerank_avg,
                     )
 
+            # Contrato de fechamento: cada SKU do cohort precisa estar contabilizado.
+            # HARD LOCK já existente conta como preservado; os demais precisam gerar row.
+            terminal_rows = len(rows)
+            preserved_locks = int(cohort_stats.get("cohort_manual_lock", 0) or 0) + int(
+                cohort_stats.get("cohort_bi_ok_lock", 0) or 0
+            )
+            terminal_accounted = terminal_rows + preserved_locks
+            terminal_missing = max(0, len(cohort) - terminal_accounted)
+            review_cache_evidence = sum(
+                1 for row in rows
+                if safe(row.get("Resolution State")).upper() == "REVIEW_CACHE_EVIDENCE"
+            )
+            stats["terminal_rows_persisted"] = terminal_rows
+            stats["terminal_preserved_locks"] = preserved_locks
+            stats["terminal_accounted"] = terminal_accounted
+            stats["terminal_missing"] = terminal_missing
+            stats["terminal_review_cache_evidence"] = review_cache_evidence
+
+            if args.mode == "full" and explicit_targets is not None:
+                LOG.info(
+                    "FULL RUN ACCOUNTING | coletados=%d | rows=%d | preserved_locks=%d | "
+                    "review_cache_evidence=%d | accounted=%d | missing=%d",
+                    len(cohort), terminal_rows, preserved_locks, review_cache_evidence,
+                    terminal_accounted, terminal_missing,
+                )
+                if not paused_reason and terminal_missing:
+                    raise RuntimeError(
+                        "FULL_1TO1_ACCOUNTING_FAILED: "
+                        f"coletados={len(cohort)} accounted={terminal_accounted} missing={terminal_missing}"
+                    )
+
             baseline_stats: Dict[str, int] = {}
             baseline_warning = ""
             if output_only:
@@ -10572,6 +10937,12 @@ def run_pipeline(
                         "BASELINE EXCEL NÃO ATUALIZADA: %s",
                         baseline_warning,
                     )
+                    if args.mode == "full" and explicit_targets is not None:
+                        # A FULL campaign must not report success if physical
+                        # Final row coverage or the Excel export failed.
+                        raise RuntimeError(
+                            f"FULL_FINAL_PERSISTENCE_FAILED: {baseline_warning}"
+                        ) from exc
 
             summary = {
                 "Pipeline Version": PIPELINE_VERSION,
@@ -10948,7 +11319,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "final-lookup-index", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "final-lookup-index", "sqlite-sku-merge", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -11019,23 +11390,31 @@ def _menu_limit(prompt: str) -> int:
         print("Informe inteiro positivo ou pressione ENTER para todos.")
 
 
-def _menu_search_provider() -> str:
-    """Seleção numérica explícita; nunca iniciar coleta com provider inválido."""
-    options = {"1": "tavily", "2": "serper", "3": "brightdata"}
+def _menu_search_provider(allow_auto: bool = False) -> str:
+    """Seleção única do provider, exibindo integrações atuais e experimentais.
+
+    Somente o que já é suportado por _resolve_search_provider pode ser selecionado.
+    """
+    from provider_registry import display_menu, manual_choices, validate_registry
+
+    options = {str(i): provider.key for i, provider in enumerate(manual_choices(), 1)}
+    validate_registry(ALLOWED_SEARCH_PROVIDERS)
+    auto_key = str(len(options) + 1)
+    if allow_auto:
+        options[auto_key] = "auto"
     while True:
-        print("\nAPI DE COLETA / SEARCH")
-        print("1 - TAVILY")
-        print("2 - SERPER")
-        print("3 - BRIGHT DATA")
-        raw = input("Selecione [1/2/3] (ENTER = 1 / TAVILY): ").strip()
-        if not raw:
-            raw = "1"
+        display_menu(allow_auto=allow_auto)
+        valid_keys = "/".join(options)
+        default = auto_key if allow_auto else "1"
+        raw = input(f"Selecione [{valid_keys}] (ENTER = {default}): ").strip() or default
         if raw in options:
             choice = options[raw]
-            print(f"API selecionada: {choice.upper()}")
+            if choice == "auto":
+                print("API selecionada: ROTEAMENTO AUTOMÁTICO ENTRE PROVIDERS/CONTAS")
+            else:
+                print(f"API selecionada: {choice.upper()}")
             return choice
-        print("Opção inválida. Escolha 1, 2 ou 3.")
-
+        print("Opção inválida. Escolha " + ", ".join(options) + ".")
 
 def _menu_llm_provider() -> str:
     options = {"1": "jev", "2": "clef", "3": "local"}
@@ -11058,21 +11437,42 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print(" COLLECTION HARD RULE: 1 produto = no máximo 1 request | sem retry/fallback/extract/advanced")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 86)
-    print(f"1 - COLETA / EXTRAÇÃO {COLLECTION_LABEL} (1 REQUEST/PRODUTO)")
-    print("2 - CLASSIFICAÇÃO")
-    print("3 - PROCESSO COMPLETO")
-    print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
-    print("5 - AUDITORIA / REPARO BASE (SEM CLEF)")
-    print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
-    print("7 - EXPORTAR EVIDENCE BUNDLE (SEM BUSCA / 0 CRÉDITOS)")
-    print("8 - SAIR")
-    print("9 - CENTRALIZAR CACHE DOS PILOTOS E GRAVAR BASE FINAL (0 APIS)")
-    print("10 - LIMPAR BASE FINAL: 11 COLUNAS (SEM BUSCA / SEM CLASSIFICACAO)")
-    print("11 - AUDITAR / RECUPERAR CLASSIFICACOES JA COLETADAS (0 APIS)")
-    print("12 - VALIDAR CHAVES / PROCV NA BASE FINAL (0 APIS)")
-    op = input("Opção: ").strip()
+    print("1 - COLETAR PRODUTOS (escolher provedor ou automatico)")
+    print("2 - CLASSIFICAR PRODUTOS")
+    print("3 - PROCESSO COMPLETO (coleta + classificacao)")
+    print("4 - MANUTENCAO, AUDITORIA E FERRAMENTAS")
+    print("5 - SAIR")
+    op = input("Opcao: ").strip()
+    if op == "5":
+        raise SystemExit(0)
+    if op == "4":
+        print("\nMANUTENCAO, AUDITORIA E FERRAMENTAS")
+        print("1 - Recuperar pendencias do cache (sem busca)")
+        print("2 - Auditoria e reparo da base (sem Clef)")
+        print("3 - Curar cache legado (sem busca)")
+        print("4 - Exportar evidence bundle (sem busca)")
+        print("5 - Centralizar cache dos pilotos e gravar Base Final")
+        print("6 - Limpar Base Final (11 colunas; modo interativo)")
+        print("7 - Auditar/recuperar classificacoes ja coletadas")
+        print("8 - Validar chaves e PROCV da Base Final")
+        print("9 - Unificar identidades e classificacoes no SQLite")
+        print("0 - Voltar / sair sem executar")
+        maintenance = input("Ferramenta: ").strip()
+        if maintenance == "0":
+            raise SystemExit(0)
+        maintenance_routes = {
+            "1": "4", "2": "5", "3": "6", "4": "7",
+            "5": "9", "6": "10", "7": "11", "8": "12", "9": "13",
+        }
+        if maintenance not in maintenance_routes:
+            print("Opcao invalida. Nenhuma operacao executada.")
+            raise SystemExit(2)
+        op = maintenance_routes[maintenance]
+    elif op not in {"1", "2", "3"}:
+        print("Opcao invalida. Nenhuma operacao executada.")
+        raise SystemExit(2)
     if op == "1":
-        provider = _menu_search_provider()
+        provider = _menu_search_provider(allow_auto=True)
         # Diferente do piloto de classificacao (ENTER=100), coleta em branco
         # significa SEM LIMITE. A lista exata de requests e confirmada antes
         # de qualquer chamada; RAW ja consultado nunca entra automaticamente.
@@ -11080,7 +11480,11 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         if raw_limit and raw_limit != "TODOS" and (not raw_limit.isdecimal() or int(raw_limit) <= 0):
             raise ValueError("Limite de coleta deve ser inteiro positivo ou TODOS/ENTER")
         limite = int(raw_limit) if raw_limit and raw_limit != "TODOS" else 0
-        argv = ["--mode", "collect", "--search-provider", provider]
+        argv = ["--mode", "collect"]
+        if provider == "auto":
+            argv += ["--auto-providers"]
+        else:
+            argv += ["--search-provider", provider]
         if limite:
             argv += ["--max-search-new", str(limite)]
         return parser.parse_args(argv)
@@ -11092,11 +11496,15 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
     if op == "3":
-        provider = _menu_search_provider()
+        provider = _menu_search_provider(allow_auto=True)
         limite_search = _menu_limit("Limite de produtos na coleta (ENTER = todos): ")
         limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
         llm = _menu_llm_provider()
-        argv = ["--mode", "full", "--search-provider", provider, "--llm-provider", llm]
+        argv = ["--mode", "full", "--llm-provider", llm]
+        if provider == "auto":
+            argv += ["--auto-providers"]
+        else:
+            argv += ["--search-provider", provider]
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
             argv += ["--recollect-low-evidence"]
@@ -11138,6 +11546,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(["--mode", "audit-central-cache"])
     if op == "12":
         return parser.parse_args(["--mode", "final-lookup-index"])
+    if op == "13":
+        return parser.parse_args(["--mode", "sqlite-sku-merge"])
     raise SystemExit(0)
 
 
@@ -11698,6 +12108,7 @@ def main() -> int:
     rules_path = (base / args.rules).resolve() if not Path(args.rules).is_absolute() else Path(args.rules)
     env_info = load_env_file(base / ".env")
     cfg = read_json(cfg_path)
+    cfg["_source_config_path"] = str(cfg_path)
     collection_policy_name = args.collection_policy or safe((cfg.get("files", {}) or {}).get("collection_policy")) or "collection_quality_policy.json"
     collection_policy_path = (base / collection_policy_name).resolve() if not Path(collection_policy_name).is_absolute() else Path(collection_policy_name)
     collection_policy = read_json(collection_policy_path)
@@ -11726,14 +12137,28 @@ def main() -> int:
         return 2
 
     if env_info["exists"]:
+        # Diagnóstico por slot, sem exibir tokens ou depender de variáveis
+        # legadas sem sufixo. Não ativa slots nem consome créditos.
+        bright_slots_status = []
+        for n in range(1, 5):
+            suffix = f"_{n}"
+            api_key = os.getenv(f"BRIGHTDATA_API_KEY{suffix}", "").strip()
+            zone = os.getenv(f"BRIGHTDATA_ZONE{suffix}", "").strip()
+            limit = os.getenv(f"BRIGHTDATA_LIMIT{suffix}", "").strip()
+            if api_key or zone or limit:
+                state = "OK" if api_key and zone and limit.isdigit() and int(limit) > 0 else "INCOMPLETO"
+                bright_slots_status.append(f"{n}:{state}")
+        if not bright_slots_status:
+            legacy_key = os.getenv("BRIGHTDATA_API_KEY", "").strip()
+            legacy_zone = os.getenv("BRIGHTDATA_ZONE", "").strip()
+            bright_slots_status = ["LEGACY:CONFIGURADA" if legacy_key and legacy_zone else "AUSENTE"]
         LOG.info(
-            ".env carregado: %s | CLEF=%s | TAVILY=%s | SERPER=%s | BRIGHTDATA=%s | BRIGHTDATA_ZONE=%s",
+            ".env carregado: %s | CLEF=%s | TAVILY=%s | SERPER=%s | BRIGHTDATA_SLOTS=%s",
             env_info["path"],
             "CONFIGURADA" if bool(os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()) and bool((os.getenv("CLOUDFLARE_API_TOKEN", "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip())) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("TAVILY_API_KEY", "").strip()) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("SERPER_API_KEY", "").strip()) else "AUSENTE",
-            "CONFIGURADA" if bool(os.getenv("BRIGHTDATA_API_KEY", "").strip()) else "AUSENTE",
-            "CONFIGURADA" if bool(os.getenv("BRIGHTDATA_ZONE", "").strip()) else "AUSENTE",
+            ",".join(bright_slots_status),
         )
     else:
         LOG.warning(".env não encontrado em: %s", env_info["path"])
@@ -11744,6 +12169,39 @@ def main() -> int:
         for e in errors[:50]:
             LOG.error(e)
         return 2
+    if args.mode == "sqlite-sku-merge":
+        from sku_registry_sqlite import audit_sqlite_merge
+        with exclusive_campaign_lock():
+            campaigns = []
+            for manifest in sorted((OUT / "campaigns").glob("*/campaign.json")):
+                state = read_json(manifest)
+                if (state.get("status") == "COMPLETE"
+                        and state.get("night_output_only")
+                        and (state.get("promotion") or {}).get("status") == "COMMITTED"
+                        and state.get("audited_products") == 50):
+                    campaigns.append((manifest, state))
+            if not campaigns:
+                raise RuntimeError("SQLITE_MERGE_COMMITTED_50_CAMPAIGN_NOT_FOUND")
+            manifest, campaign = campaigns[-1]
+            keys = [key for batch in campaign["batches"] for key in batch["cohort_keys"]]
+            if len(keys) != 50 or len(set(keys)) != 50:
+                raise RuntimeError("SQLITE_MERGE_INVALID_50_COHORT")
+            file_cfg = cfg["files"]
+            final = (ROOT / str(file_cfg["final"])).resolve()
+            master = (ROOT / str(file_cfg["master"])).resolve()
+            db = (ROOT / str(file_cfg["classification_db"])).resolve()
+            preview = audit_sqlite_merge(final, master, db, keys, commit=False)
+            preview["campaign"] = manifest.parent.name
+            print(json.dumps(preview, indent=2, ensure_ascii=False))
+            if preview["status"] != "DRY_RUN_PASS":
+                return 2
+            if input("Confirmar MERGE na base pipeline_v3.sqlite (0 APIs)? Digite GRAVAR: ").strip() != "GRAVAR":
+                print("SQLITE_MERGE_NOT_COMMITTED: dry-run apenas.")
+                return 0
+            report = audit_sqlite_merge(final, master, db, keys, commit=True)
+            report["campaign"] = manifest.parent.name
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+            return 0 if report["status"] == "SQLITE_MERGED" else 2
     if args.mode == "final-lookup-index":
         with exclusive_campaign_lock():
             preview = reconcile_final_sku_index(cfg, commit=False)
@@ -11891,29 +12349,63 @@ def main() -> int:
                 "Execute opcao 9 antes de novas chamadas Search/JEV.",
                 len(pending_cache))
             return 2
+    # Fail early for manually selected Bright Data: verify the slot-backed
+    # credentials BEFORE expensive baseline synchronization. Never use the
+    # legacy unsuffixed key, never reserve quotas or make paid calls here.
+    if args.mode in {"collect", "full"} and not args.auto_providers:
+        selected_provider = _resolve_search_provider(args, cfg)
+        if selected_provider == "brightdata":
+            bright_slots = [slot for slot in configured_slots() if slot.provider == "brightdata"]
+            if not bright_slots:
+                raise RuntimeError(
+                    "BRIGHTDATA_SLOTS_UNAVAILABLE: configure BRIGHTDATA_API_KEY_N, "
+                    "BRIGHTDATA_ZONE_N e BRIGHTDATA_LIMIT_N positivos"
+                )
+            for slot in bright_slots:
+                slot_cfg = {**cfg, "_active_search_slot": {
+                    "provider": "brightdata", "key_env": slot.key_env,
+                    "zone_env": slot.zone_env,
+                }}
+                _provider_credentials("brightdata", slot_cfg)
+            LOG.info("BRIGHTDATA MANUAL PREFLIGHT OK | slots=%d | search_requests=0",
+                     len(bright_slots))
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
     if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and args.auto_providers):
+        from input_sync_manifest import is_current
         files_cfg = cfg.get("files", {}) or {}
         input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
-        master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
-        final_sync = Path(files_cfg.get("final", "Base Final Produtos Enriquecida.xlsx"))
+        master_sync = Path(args.master or files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
+        final_sync = Path(args.final or files_cfg.get("final", "Base Final Produtos Enriquecida.xlsx"))
+        cache_sync = Path(args.cache or files_cfg.get("cache", "cache_tavily.sqlite"))
         if not input_sync.exists():
             LOG.error("Sincronização não iniciada: Base de entrada ausente: %s", input_sync)
             return 2
+        sync_sources = {
+            "input": input_sync, "master": master_sync, "final": final_sync,
+            "cache": cache_sync, "rules": rules_path, "config": cfg_path,
+        }
         try:
-            _backup_baseline_files(
-                master_sync, final_sync,
-                Path(files_cfg.get("baseline_backup_dir", "Backups_Baseline")),
-            )
-            sync_stats = persist_baseline_excels(
-                rows=[], master_path=master_sync, final_path=final_sync,
-                input_path=input_sync, rules=rules,
-                cache_path=Path(args.cache or files_cfg.get("cache", "cache_tavily.sqlite")),
-                cfg=cfg,
-            )
-            LOG.info("INPUT BASELINE SYNC OK | inserted=%s | final_rows=%s",
-                     sync_stats.get("input_registered", 0), sync_stats.get("final_rows", 0))
+            baseline_sync_started = time.perf_counter()
+            # Only an exact byte-for-byte match to a previously successful
+            # FULL export may skip repeated expensive baseline synchronization.
+            # Any change or unreadable marker runs the authoritative workflow.
+            if args.mode != "sync-input" and is_current(sync_sources):
+                LOG.info("INPUT BASELINE SYNC CACHE_HIT | files=6 | skipped_excel_rebuild=SIM")
+            else:
+                LOG.info("INPUT BASELINE SYNC CACHE_MISS | full_authoritative_sync=SIM")
+                _backup_baseline_files(
+                    master_sync, final_sync,
+                    Path(files_cfg.get("baseline_backup_dir", "Backups_Baseline")),
+                )
+                sync_stats = persist_baseline_excels(
+                    rows=[], master_path=master_sync, final_path=final_sync,
+                    input_path=input_sync, rules=rules, cache_path=cache_sync, cfg=cfg,
+                )
+                LOG.info("INPUT BASELINE SYNC OK | inserted=%s | final_rows=%s",
+                         sync_stats.get("input_registered", 0), sync_stats.get("final_rows", 0))
+            LOG.info("INPUT BASELINE SYNC DURATION | elapsed=%.1fs",
+                     time.perf_counter()-baseline_sync_started)
         except Exception as exc:
             LOG.error("INPUT BASELINE SYNC FAILED; interrompendo para preservar os dados: %s", exc)
             return 2
@@ -11925,7 +12417,9 @@ def main() -> int:
         return 0
     if args.mode == "collect":
         provider = _resolve_search_provider(args, cfg)
-        if not args.auto_providers:
+        # Manual Bright Data uses configured per-account slots in collect_products,
+        # not the legacy unsuffixed BRIGHTDATA_API_KEY credential preflight.
+        if not args.auto_providers and provider != "brightdata":
             _provider_credentials(provider, cfg)
         completed = collect_products(args, cfg, rules)
         if completed and not args.auto_providers:
@@ -11950,14 +12444,104 @@ def main() -> int:
         run_cache_recovery(args, cfg, rules)
         return 0
     if args.mode == "full":
+        # Contrato 1:1: FULL nunca pode consumir Search para um lote maior do que
+        # o teto que a etapa de classificação está autorizada a fechar.
+        collect_limit = int(getattr(args, "max_tavily_new", 0) or 0)
+        classify_limit = int(getattr(args, "max_items", 0) or 0)
+        if collect_limit == 0 and classify_limit > 0:
+            raise RuntimeError(
+                "FULL_1TO1_LIMIT_MISMATCH: coleta=TODOS e classificacao="
+                f"{classify_limit}. Use ambos TODOS ou defina coleta <= classificacao."
+            )
+        if collect_limit > 0 and classify_limit > 0 and collect_limit > classify_limit:
+            raise RuntimeError(
+                "FULL_1TO1_LIMIT_MISMATCH: "
+                f"coleta={collect_limit} > classificacao={classify_limit}. "
+                "O PROCESSO COMPLETO exige capacidade de fechamento para todo SKU coletado."
+            )
+
+        # Validate the actual JEV/Clef + local semantic funnel BEFORE
+        # spending any Search credits. The later cohort preflight remains
+        # in place as a second gate before LLM calls.
+        llm_provider = safe(getattr(args, "llm_provider", "")).lower() or safe(
+            cfg.get("classification_v42", {}).get("default_provider")
+        ).lower() or "clef"
+        if llm_provider not in {"jev", "clef", "local"}:
+            raise RuntimeError(f"CLASSIFICATION_PROVIDER_INVALID: {llm_provider}")
+        if llm_provider != "local" and not bool(getattr(args, "no_clef", False)):
+            llm_model = (
+                safe(cfg.get("jev", {}).get("model")) or "jev-latest"
+                if llm_provider == "jev"
+                else safe(getattr(args, "clef_model", "")) or
+                os.getenv("CLOUDFLARE_CLEF_MODEL", "").strip() or
+                safe(cfg.get("clef", {}).get("model")) or DEFAULT_CLEF_MODEL
+            )
+            try:
+                preflight_classifier = ClefFunnelClassifier(
+                    rules=rules, cfg=cfg, db=None,
+                    provider=llm_provider, model=llm_model,
+                )
+                preflight_classifier.preflight()
+            except OperationalPause as exc:
+                raise RuntimeError(
+                    f"FULL_PRECOLLECTION_{exc.code}: {exc}. "
+                    "Coleta NÃO iniciada; créditos Search preservados."
+                ) from exc
+            LOG.info(
+                "FULL PRE-COLLECTION CLASSIFIER PREFLIGHT OK | provider=%s | "
+                "local_funnel=READY | search_requests=0",
+                llm_provider,
+            )
+
         provider = _resolve_search_provider(args, cfg)
-        if not args.auto_providers:
+        if not args.auto_providers and provider != "brightdata":
             _provider_credentials(provider, cfg)
+        elif args.auto_providers:
+            LOG.info(
+                "FULL AUTO PROVIDERS | enabled=SIM | retry_same_sku=NAO | "
+                "next_sku_rotation=SIM | central_cache=SIM | central_sqlite=SIM"
+            )
         completed = collect_products(args, cfg, rules)
+        full_targets = list(getattr(args, "_last_collection_targets", []) or [])
+
+        # Mesmo se a coleta parar por esgotamento/indisponibilidade dos slots,
+        # TODO SKU já tentado precisa receber fechamento terminal. Não abandonar
+        # milhares de tentativas só porque não há provider disponível para o próximo SKU.
         if not completed:
-            LOG.warning("PROCESSO COMPLETO interrompido após a coleta. Classificação não iniciada.")
+            if full_targets:
+                LOG.warning(
+                    "PROCESSO COMPLETO | coleta parcial=%d SKU(s); providers indisponiveis/esgotados. "
+                    "Iniciando fechamento 1:1 do cohort ja tentado antes de encerrar.",
+                    len(full_targets),
+                )
+            else:
+                LOG.warning(
+                    "PROCESSO COMPLETO interrompido antes de qualquer nova tentativa de coleta. "
+                    "Nenhum cohort novo para fechar."
+                )
+                return 3
+
+        if full_targets:
+            # Não chama build_classification_cohort: os mesmos SKUs tentados na coleta
+            # seguem para fechamento. NO_TARGET_EVIDENCE/RAW_MISSING/erro operacional
+            # recebem desfecho terminal sem forçar JEV nem inventar taxonomia.
+            LOG.info(
+                "FULL 1:1 HANDOFF | coletados_tentados=%d | classificacao_mesmo_cohort=SIM | coleta_completa=%s",
+                len(full_targets), "SIM" if completed else "NAO",
+            )
+            run_pipeline(args, cfg, rules, explicit_targets=full_targets)
+        else:
+            # Sem nova Search nesta execução: mantém o comportamento histórico para
+            # permitir classificar pendências já existentes no cache central.
+            LOG.info("FULL 1:1 HANDOFF | nova_coleta=0 | usando fila pendente do cache central")
+            run_pipeline(args, cfg, rules)
+
+        if not completed:
+            LOG.warning(
+                "PROCESSO COMPLETO finalizado com COLETA PARCIAL, mas cohort tentado foi fechado 1:1. "
+                "Os SKUs ainda não tentados permanecem para próxima execução."
+            )
             return 3
-        run_pipeline(args, cfg, rules)
         return 0
     return 0
 
@@ -11994,11 +12578,26 @@ def configured_slots() -> list[Slot]:
                 continue
             zone_env = f"{prefix}_ZONE{suffix}"
             if provider == "brightdata" and not os.getenv(zone_env):
-                zone_env = "BRIGHTDATA_ZONE"
-            if provider == "brightdata" and not os.getenv(zone_env):
-                continue
+                # Legacy single-account compatibility only. With multiple
+                # configured API keys, a shared zone silently mixes accounts.
+                configured_bright_keys = [
+                    i for i in range(1, 5)
+                    if os.getenv(f"BRIGHTDATA_API_KEY_{i}")
+                ]
+                if n == 1 and len(configured_bright_keys) <= 1 and os.getenv("BRIGHTDATA_ZONE"):
+                    zone_env = "BRIGHTDATA_ZONE"
+                else:
+                    raise ValueError(f"BRIGHTDATA_ZONE_{n} is required for account {n}")
             group = os.getenv(f"{prefix}_BILLING_GROUP{suffix}", f"{provider}:{n}")
             slots.append(Slot(provider, f"{provider}:{n}", key_env,zone_env,limit,group))
+    bright_slots = [slot for slot in slots if slot.provider == "brightdata"]
+    # Never double-spend the same provider credential under different slots.
+    fingerprints: set[str] = set()
+    for slot in bright_slots:
+        fingerprint = hashlib.sha256(os.environ[slot.key_env].encode("utf-8")).hexdigest()
+        if fingerprint in fingerprints:
+            raise ValueError("BRIGHTDATA_DUPLICATE_CREDENTIAL: distinct slots require distinct keys")
+        fingerprints.add(fingerprint)
     return slots
 
 class DurableRouter:
@@ -12024,8 +12623,29 @@ class DurableRouter:
         self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
             account TEXT PRIMARY KEY, reason TEXT NOT NULL,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        # Bright Data LIMIT_N is the remaining NEW-request authorization at
+        # activation, not a lifetime counter. Persist the historical watermark
+        # once; it is never recalculated on restart or env edits.
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_budget_epochs (
+            account TEXT PRIMARY KEY, baseline_attempts INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
         self.conn.commit()
         self.slots=slots
+        if any(slot.provider == "brightdata" for slot in slots):
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                for slot in slots:
+                    if slot.provider != "brightdata":
+                        continue
+                    self.conn.execute(
+                        """INSERT OR IGNORE INTO collection_budget_epochs(account, baseline_attempts)
+                           SELECT ?, COUNT(*) FROM collection_attempt_reservations WHERE account=?""",
+                        (slot.account, slot.account),
+                    )
+                self.conn.commit()
+            except BaseException:
+                self.conn.rollback()
+                raise
 
     def choose(self, key: str) -> Optional[Slot]:
         if self.conn.execute("SELECT 1 FROM collection_attempt_reservations WHERE business_key=?", (key,)).fetchone():
@@ -12034,15 +12654,35 @@ class DurableRouter:
             if self.conn.execute("SELECT 1 FROM collection_disabled_accounts WHERE account=?", (slot.account,)).fetchone():
                 continue
             used = self.conn.execute("SELECT COUNT(*) FROM collection_attempt_reservations WHERE account=?", (slot.account,)).fetchone()[0]
+            if slot.provider == "brightdata":
+                baseline = self.conn.execute(
+                    "SELECT baseline_attempts FROM collection_budget_epochs WHERE account=?",
+                    (slot.account,),
+                ).fetchone()
+                if baseline is None:
+                    raise RuntimeError("BRIGHTDATA_BUDGET_BASELINE_MISSING")
+                used -= baseline[0]
+                if used < 0:
+                    raise RuntimeError("BRIGHTDATA_BUDGET_LEDGER_INCONSISTENT")
             if used >= slot.limit:
                 continue
-            # A shared billing group requires *the same total cap* configured on each key.
+            # Shared billing-group limits also subtract historical Bright Data
+            # reservations, but never erase them from the attempt ledger.
             group_slots = [s for s in self.slots if s.group == slot.group]
             group_limit = group_slots[0].limit
             group_used = self.conn.execute(
                 "SELECT COUNT(*) FROM collection_attempt_reservations WHERE account IN (" +
                 ",".join("?" for _ in group_slots) + ")",
                 [s.account for s in group_slots]).fetchone()[0]
+            if slot.provider == "brightdata":
+                group_baseline = sum(
+                    self.conn.execute(
+                        "SELECT baseline_attempts FROM collection_budget_epochs WHERE account=?",
+                        (other.account,),
+                    ).fetchone()[0]
+                    for other in group_slots
+                )
+                group_used -= group_baseline
             if group_used >= group_limit:
                 continue
             return slot
@@ -12333,6 +12973,25 @@ def gate(cfg,args):
     jev=cfg.get("jev",{})
     key=jev.get("api_key_env") or "TYPESAFE_API_KEY"
     if not os.getenv(key):raise ValueError(f"JEV credential not configured: {key}")
+    # Cheap but mandatory before cloning large workbooks or paying Search.
+    # The worker's full classifier preflight still validates all model paths.
+    missing=[]
+    for name in ("requests", "torch", "sentence_transformers", "transformers"):
+        try:
+            __import__(name)
+        except ImportError:
+            missing.append(name)
+    if missing:
+        raise RuntimeError(
+            "OVERNIGHT_CLASSIFIER_DEPENDENCY_MISSING: " + ", ".join(missing)
+        )
+    models=cfg.get("semantic_funnel",{}) or {}
+    if models.get("local_files_only"):
+        for name in ("embedding_model", "reranker_model"):
+            path=safe(models.get(name))
+            if not path or not Path(path).expanduser().exists():
+                raise RuntimeError("OVERNIGHT_LOCAL_MODEL_MISSING: " + name)
+    LOG.info("OVERNIGHT PREFLIGHT OK | dependencies=4 | local_models=CHECKED | search_requests=0")
 
 def import_prior_reservations(destination: Path, history_root: Path = OUT) -> dict:
     """Seed the NEW isolated SQLite with earlier real reservation attempts.
@@ -12398,6 +13057,11 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
             actual[key] = (account, provider)
     # Existing production snapshot rows are also attempts; avoid silent
     # account rewrites and count all reservations across previous pilots.
+    # The historical single-provider CLI recorded account="single:tavily",
+    # whereas the controlled router records "tavily:N". An audited matching
+    # historical account can refine that LEGACY placeholder in the ISOLATED
+    # copy only. Do not permit provider changes or rewrites of concrete slots.
+    legacy_account_reconciled = 0
     with closing(sqlite3.connect(destination)) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
             business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
@@ -12408,8 +13072,26 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
                 (key,),
             ).fetchone()
             if prior and prior != (account, provider):
-                raise RuntimeError(f"Conflicting production/historical reservation: {key}")
-            if not prior:
+                # A legacy single:tavily entry is not a separate request:
+                # its attempt was already reserved under the same business_key.
+                # Reconcile to the historical concrete slot so per-account
+                # quota accounting remains conservative after importing.
+                # Never rewrite a concrete slot or a different provider.
+                if (prior == ("single:tavily", "tavily")
+                        and provider == "tavily"
+                        and re.fullmatch(r"tavily:[1-9][0-9]*", account)):
+                    conn.execute(
+                        "UPDATE collection_attempt_reservations SET account=?, provider=? "
+                        "WHERE business_key=? AND account=? AND provider=?",
+                        (account, provider, key, prior[0], prior[1]),
+                    )
+                    legacy_account_reconciled += 1
+                else:
+                    raise RuntimeError(
+                        f"Conflicting production/historical reservation: {key}; "
+                        f"canonical={prior!r}; historical={(account, provider)!r}"
+                    )
+            elif not prior:
                 conn.execute(
                     "INSERT INTO collection_attempt_reservations(business_key, account, provider) VALUES (?, ?, ?)",
                     (key, account, provider),
@@ -12425,15 +13107,17 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
         conn.commit()
     LOG.info(
         "OVERNIGHT HISTORY OK | reports=%d audited_runs=%d unique_keys=%d "
-        "duplicate_keys=%d reservations=%d disabled_accounts=%d",
+        "duplicate_keys=%d reservations=%d disabled_accounts=%d "
+        "legacy_tavily_accounts_reconciled=%d",
         len(reports), scanned_runs, len(expected), len(overlap_keys),
-        len(actual), len(disabled_accounts),
+        len(actual), len(disabled_accounts), legacy_account_reconciled,
     )
     return {"historical_cohort_keys": len(expected),
             "historical_reservation_keys": len(actual),
             "historical_overlapping_keys": len(overlap_keys),
             "historical_runs_scanned": scanned_runs,
-            "historical_disabled_accounts": len(disabled_accounts)}
+            "historical_disabled_accounts": len(disabled_accounts),
+            "legacy_tavily_accounts_reconciled": legacy_account_reconciled}
 
 
 def create_run(cfg,args):
@@ -12634,6 +13318,10 @@ def outcome_audit(run,state,isolated):
             if (len(set(result_keys)) != len(result_keys)
                     or not set(result_keys).issubset(cohort_keys)):
                 result_errors.append("RESULT_COHORT_MISMATCH")
+            # A new output-only overnight run must account for ALL attempted
+            # SKUs, even those without evidence or accepted classification.
+            if output_only and set(result_keys) != cohort_keys:
+                result_errors.append("NIGHT_RESULT_EXACT_COHORT_COVERAGE_FAILED")
             for _, row in results.iterrows():
                 resolved = safe(row.get("Resolution State")) == "RESOLVED"
                 eligible = safe(row.get("Auto Eligible")).upper() == "SIM"
@@ -13552,10 +14240,18 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             stats = _night_stage_output_only_canonical(
                 originals, staged, cohort_pairs, raw_items, records, rules)
         else:
+            # NEVER allow an isolated staging run to update canonical SQLite
+            # while source integrity hashes are still being checked.
+            staging_cfg = {
+                **cfg, "files": {
+                    **cfg["files"],
+                    "classification_db": str(staged["classification_db"]),
+                },
+            }
             stats = persist_baseline_excels(
                 rows=records, master_path=staged["master"],
                 final_path=staged["final"], input_path=promotion_input,
-                rules=rules, cache_path=staged["cache"], cfg=cfg,
+                rules=rules, cache_path=staged["cache"], cfg=staging_cfg,
             )
             stats["master_scoped_overlay"] = _overnight_scoped_excel_overlay(
                 canonical["master"], staged["master"], cohort_pairs)
@@ -13596,6 +14292,15 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         # For promotion, compare EVERY original BI_OK row by its exact pair;
         # never relax the eight protected human fields.
         _overnight_assert_exact_human_locks(original_final, final)
+
+        # Refresh the registry on the STAGED database so either all four
+        # official files are promoted consistently or none are changed.
+        stage_registry = _refresh_sqlite_sku_registry(
+            staged["master"], staged["final"],
+            {"files": {"classification_db": str(staged["classification_db"])}},
+            keys)
+        stats["sqlite_registry_status"] = stage_registry["status"]
+        stats["sqlite_registry_campaign_keys"] = stage_registry["campaign_found_in_final"]
 
         # The physical-row gate above protects ALL original BI_OK/Manual
         # rows including historic exact duplicates. The old grouped forensic

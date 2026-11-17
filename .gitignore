@@ -149,3 +149,6 @@ Desktop.ini
 
 # Local ML experiment caches
 .cache/
+
+# Generated derived baseline inventory snapshots (content-verified, disposable)
+.runtime_cache/

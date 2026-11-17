@@ -58,7 +58,7 @@ class ProviderResponseContractTests(unittest.TestCase):
             self.assertEqual(error.exception.code,"SERPER_LIMIT")
             self.assertEqual(post.call_count,1)
 
-    def test_bright_request_contract_uses_parsed_light_raw(self):
+    def test_bright_request_contract_uses_official_serp_json(self):
         cfg = {"collection":{"providers":{"brightdata":{"base_url":"https://api.brightdata.com/request",
              "max_results":10}}}}
         limiter = SimpleNamespace(wait=lambda:None)
@@ -69,8 +69,67 @@ class ProviderResponseContractTests(unittest.TestCase):
              patch.object(p,"_provider_post_once",return_value=response) as request:
             p._provider_request_once("brightdata","CNH 123",cfg,limiter,budget)
             body = request.call_args.args[3]
-            self.assertEqual(body["format"],"raw")
-            self.assertEqual(body["data_format"],"parsed_light")
+            self.assertEqual(body["format"],"json")
+            self.assertNotIn("data_format",body)
+            self.assertIn("brd_json=1",body["url"])
+
+class BrightDataManualEntrypointContractTests(unittest.TestCase):
+    def test_collect_and_full_skip_legacy_brightdata_preflight(self):
+        # Both menu entrypoints must defer Bright Data credentials to the
+        # durable per-account router; the unsuffixed key is not configured.
+        import ast
+        import inspect
+        import textwrap
+        main_tree = ast.parse(textwrap.dedent(inspect.getsource(p.main)))
+        expected_modes = {"collect", "full"}
+        found = set()
+        for node in ast.walk(main_tree):
+            if not isinstance(node, ast.If):
+                continue
+            test = node.test
+            if not (isinstance(test, ast.Compare)
+                    and isinstance(test.left, ast.Attribute)
+                    and test.left.attr == "mode"
+                    and test.ops and isinstance(test.ops[0], ast.Eq)
+                    and test.comparators and isinstance(test.comparators[0], ast.Constant)):
+                continue
+            mode = test.comparators[0].value
+            if mode not in expected_modes:
+                continue
+            calls = [
+                n for n in ast.walk(node)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "_provider_credentials"
+            ]
+            self.assertTrue(calls, mode)
+            for call in calls:
+                parent_guard = [
+                    branch for branch in ast.walk(node)
+                    if isinstance(branch, ast.If) and call in list(ast.walk(branch))
+                    and isinstance(branch.test, ast.BoolOp)
+                    and any(isinstance(n, ast.Compare)
+                            and isinstance(n.left, ast.Name) and n.left.id == "provider"
+                            and any(isinstance(op, ast.NotEq) for op in n.ops)
+                            and any(isinstance(v, ast.Constant) and v.value == "brightdata"
+                                    for v in n.comparators)
+                            for n in ast.walk(branch.test))
+                ]
+                self.assertTrue(parent_guard, f"{mode}: legacy Bright Data preflight reachable")
+            found.add(mode)
+        self.assertEqual(found, expected_modes)
+
+
+class BrightDataPreflightOrderTests(unittest.TestCase):
+    def test_manual_slot_preflight_precedes_baseline_sync(self):
+        import inspect
+        source = inspect.getsource(p.main)
+        marker = 'BRIGHTDATA MANUAL PREFLIGHT OK'
+        sync = 'INPUT BASELINE SYNC CACHE_HIT'
+        self.assertEqual(source.count(marker), 1)
+        self.assertLess(source.index(marker), source.index(sync))
+        self.assertIn('_provider_credentials("brightdata", slot_cfg)', source)
+        self.assertIn('for slot in bright_slots:', source)
 
 class RuntimeModuleContractTests(unittest.TestCase):
     def test_runtime_module_contract(self):
@@ -133,6 +192,51 @@ class CollectionAutoProviderTests(unittest.TestCase):
                 self.assertTrue(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
             self.assertNotIn("_active_search_slot",cfg)
 
+    def test_manual_brightdata_uses_only_durable_brightdata_slots(self):
+        # Real collection orchestration, mocked Search: no legacy unsuffixed
+        # credential lookup; no Tavily/Serper fallback; slot quota enforced.
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d) / "test.sqlite"
+            slots = [
+                Slot("tavily", "tavily:1", "TAVILY_API_KEY", "", 9, "t"),
+                Slot("brightdata", "brightdata:1", "BRIGHTDATA_API_KEY_1", "BRIGHTDATA_ZONE_1", 1, "b1"),
+                Slot("brightdata", "brightdata:2", "BRIGHTDATA_API_KEY_2", "BRIGHTDATA_ZONE_2", 1, "b2"),
+            ]
+            plan = SimpleNamespace(
+                candidates=[
+                    SimpleNamespace(brand_original="ABC", model_original=str(n), raw_state="RAW_MISSING")
+                    for n in (111, 222, 333)
+                ], summary={})
+            args = argparse.Namespace(
+                search_provider="brightdata", auto_providers=False,
+                input="input.xlsx", cache=str(Path(d)/"cache.sqlite"),
+                db=str(db), master="", final="", precollection_output="",
+                recollect_empty=False, recollect_low_evidence=False,
+                max_tavily_new=3, yes=True,
+            )
+            cfg = {"files":{"input":"input.xlsx", "cache":args.cache,
+                   "classification_db":args.db, "collection_report":str(Path(d)/"report.xlsx")}}
+            calls = []
+            def mock_search(brand, model, cfg, limiter, provider):
+                calls.append((model, provider, cfg["_active_search_slot"]["key_env"]))
+                return {"results":[{"title":"test"}], "_collection":{
+                    "state":"NO_TARGET_EVIDENCE", "curated_results":[], "source_audit":[],
+                    "query_audit":[], "usage":{"requests":1}}}
+            with patch.object(p,"validate_collection_cost_policy",return_value=[]), \
+                 patch.object(p,"load_baseline_inventory",return_value={"processed":set()}), \
+                 patch.object(p,"build_precollection_plan",return_value=plan), \
+                 patch.object(p,"configured_slots",return_value=slots), \
+                 patch.object(p,"_provider_credentials",side_effect=AssertionError("Unexpected legacy credential check")), \
+                 patch.object(p,"search_product_once",side_effect=mock_search), \
+                 patch.object(p,"TavilyWritableStore"), \
+                 patch.object(p,"_export_collection_quality_report"):
+                self.assertFalse(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
+            self.assertEqual(calls, [
+                ("111","brightdata","BRIGHTDATA_API_KEY_1"),
+                ("222","brightdata","BRIGHTDATA_API_KEY_2"),
+            ])
+            self.assertNotIn("_active_search_slot",cfg)
+
     def test_raw_empty_no_keeps_queue_zero(self):
         with tempfile.TemporaryDirectory() as d:
             args = argparse.Namespace(
@@ -155,7 +259,7 @@ class CollectionAutoProviderTests(unittest.TestCase):
                 search_provider="tavily", auto_providers=True, input="test.xlsx",
                 cache=str(Path(d)/"cache.sqlite"),db=str(Path(d)/"db.sqlite"),
                 master="",final="",precollection_output=str(Path(d)/"pre.xlsx"),
-                recollect_empty=False,recollect_low_evidence=False,max_tavily_new=20,yes=True)
+                recollect_empty=False,recollect_low_evidence=False,max_tavily_new=20,yes=False)
             plan_empty = SimpleNamespace(candidates=[],summary={"RAW_EMPTY":1030})
             plan_selected = SimpleNamespace(
                 candidates=[SimpleNamespace(brand_original="CNH",model_original="47408215",raw_state="RAW_EMPTY")],
@@ -172,12 +276,85 @@ class CollectionAutoProviderTests(unittest.TestCase):
                  patch.object(p,"search_product_once",return_value=payload) as search, \
                  patch.object(p,"TavilyWritableStore"), \
                  patch.object(p,"_export_collection_quality_report"), \
-                 patch("builtins.input",return_value="S"):
+                 patch("builtins.input",side_effect=["S", "CONFIRMAR"]) as confirm:
                 self.assertTrue(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
                 self.assertEqual(build.call_count,2)
                 self.assertTrue(build.call_args.kwargs["recollect_empty"])
                 self.assertEqual(build.call_args.kwargs["max_tavily_new"],20)
                 self.assertEqual(search.call_count,1)
+                self.assertEqual(confirm.call_count,2)
+                self.assertIn("CONFIRMAR", confirm.call_args_list[1].args[0])
+
+    def test_raw_empty_authorized_but_payment_not_confirmed_makes_zero_requests(self):
+        # "S" merely unlocks replanning; a second explicit CONFIRMAR
+        # is mandatory before any paid Search request/reservation.
+        with tempfile.TemporaryDirectory() as d:
+            args = argparse.Namespace(
+                search_provider="tavily", auto_providers=True, input="test.xlsx",
+                cache=str(Path(d)/"cache.sqlite"), db=str(Path(d)/"db.sqlite"),
+                master="", final="", precollection_output=str(Path(d)/"pre.xlsx"),
+                recollect_empty=False, recollect_low_evidence=False,
+                max_tavily_new=20, yes=False)
+            empty = SimpleNamespace(candidates=[],summary={"RAW_EMPTY":1})
+            selected = SimpleNamespace(
+                candidates=[SimpleNamespace(
+                    brand_original="CNH", model_original="47408215",
+                    raw_state="RAW_EMPTY")],
+                summary={"RAW_EMPTY":1})
+            cfg = {"files":{"cache":args.cache,"classification_db":args.db}}
+            slot = Slot("tavily","tavily:1","TAVILY_API_KEY","",20,"t")
+            with patch.object(p,"validate_collection_cost_policy",return_value=[]), \
+                 patch.object(p,"load_baseline_inventory",return_value={"processed":set()}), \
+                 patch.object(p,"build_precollection_plan",side_effect=[empty,selected]), \
+                 patch.object(p,"configured_slots",return_value=[slot]), \
+                 patch.object(p,"search_product_once") as search, \
+                 patch("builtins.input",side_effect=["S","N"]) as prompts:
+                self.assertFalse(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
+                self.assertEqual(prompts.call_count,2)
+                search.assert_not_called()
+
+    def test_manual_brightdata_empty_queue_never_requires_slots(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = argparse.Namespace(
+                search_provider="brightdata", auto_providers=False,
+                input="input.xlsx", cache=str(Path(d)/"cache.sqlite"),
+                db=str(Path(d)/"db.sqlite"), master="", final="",
+                precollection_output="", recollect_empty=False,
+                recollect_low_evidence=False, max_tavily_new=10, yes=True)
+            cfg = {"files": {"input": "input.xlsx", "cache": args.cache,
+                   "classification_db": args.db,
+                   "collection_report": str(Path(d)/"report.xlsx")}}
+            plan = SimpleNamespace(candidates=[], summary={})
+            with patch.object(p, "validate_collection_cost_policy", return_value=[]), \
+                 patch.object(p, "load_baseline_inventory", return_value={"processed": set()}), \
+                 patch.object(p, "build_precollection_plan", return_value=plan), \
+                 patch.object(p, "configured_slots", side_effect=AssertionError("No slots needed")), \
+                 patch.object(p, "_provider_credentials", side_effect=AssertionError("No keys needed")), \
+                 patch.object(p, "search_product_once", side_effect=AssertionError("No HTTP")):
+                self.assertTrue(p.collect_products(args, cfg, SimpleNamespace(hash="test")))
+
+    def test_manual_brightdata_live_queue_requires_brightdata_slot(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = argparse.Namespace(
+                search_provider="brightdata", auto_providers=False,
+                input="input.xlsx", cache=str(Path(d)/"cache.sqlite"),
+                db=str(Path(d)/"db.sqlite"), master="", final="",
+                precollection_output="", recollect_empty=False,
+                recollect_low_evidence=False, max_tavily_new=10, yes=True)
+            cfg = {"files": {"input": "input.xlsx", "cache": args.cache,
+                   "classification_db": args.db,
+                   "collection_report": str(Path(d)/"report.xlsx")}}
+            plan = SimpleNamespace(candidates=[
+                SimpleNamespace(brand_original="ABC", model_original="123",
+                                raw_state="RAW_MISSING")], summary={})
+            with patch.object(p, "validate_collection_cost_policy", return_value=[]), \
+                 patch.object(p, "load_baseline_inventory", return_value={"processed": set()}), \
+                 patch.object(p, "build_precollection_plan", return_value=plan), \
+                 patch.object(p, "configured_slots", return_value=[
+                    Slot("tavily", "tavily:1", "TAVILY_API_KEY", "", 10, "t")]), \
+                 patch.object(p, "search_product_once", side_effect=AssertionError("No HTTP")):
+                with self.assertRaisesRegex(RuntimeError, "BRIGHTDATA_SLOTS_UNAVAILABLE"):
+                    p.collect_products(args, cfg, SimpleNamespace(hash="test"))
 
     def test_no_explicit_budget_does_not_start_collection(self):
         with tempfile.TemporaryDirectory() as d:
