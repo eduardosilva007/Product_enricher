@@ -11391,25 +11391,22 @@ def _menu_limit(prompt: str) -> int:
 
 
 def _menu_search_provider(allow_auto: bool = False) -> str:
-    """Seleção explícita do Search provider ou do roteador automático.
+    """Seleção única do provider, exibindo integrações atuais e experimentais.
 
-    AUTO nunca repete o mesmo SKU em outro endpoint. O DurableRouter reserva o
-    SKU antes do HTTP e troca de conta/provider somente para o próximo SKU.
+    Somente o que já é suportado por _resolve_search_provider pode ser selecionado.
     """
-    options = {"1": "tavily", "2": "serper", "3": "brightdata"}
+    from provider_registry import display_menu, manual_choices, validate_registry
+
+    options = {str(i): provider.key for i, provider in enumerate(manual_choices(), 1)}
+    validate_registry(ALLOWED_SEARCH_PROVIDERS)
+    auto_key = str(len(options) + 1)
     if allow_auto:
-        options["4"] = "auto"
+        options[auto_key] = "auto"
     while True:
-        print("\nAPI DE COLETA / SEARCH")
-        print("1 - TAVILY")
-        print("2 - SERPER")
-        print("3 - BRIGHT DATA")
-        if allow_auto:
-            print("4 - AUTOMÁTICO (TAVILY -> BRIGHT DATA -> SERPER conforme slots/limites)")
-        prompt = "Selecione [1/2/3/4] (ENTER = 4 / AUTOMÁTICO): " if allow_auto else "Selecione [1/2/3] (ENTER = 1 / TAVILY): "
-        raw = input(prompt).strip()
-        if not raw:
-            raw = "4" if allow_auto else "1"
+        display_menu(allow_auto=allow_auto)
+        valid_keys = "/".join(options)
+        default = auto_key if allow_auto else "1"
+        raw = input(f"Selecione [{valid_keys}] (ENTER = {default}): ").strip() or default
         if raw in options:
             choice = options[raw]
             if choice == "auto":
@@ -11417,8 +11414,7 @@ def _menu_search_provider(allow_auto: bool = False) -> str:
             else:
                 print(f"API selecionada: {choice.upper()}")
             return choice
-        print("Opção inválida. Escolha " + ("1, 2, 3 ou 4." if allow_auto else "1, 2 ou 3."))
-
+        print("Opção inválida. Escolha " + ", ".join(options) + ".")
 
 def _menu_llm_provider() -> str:
     options = {"1": "jev", "2": "clef", "3": "local"}
