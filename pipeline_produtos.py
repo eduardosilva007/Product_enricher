@@ -1274,6 +1274,23 @@ def build_precollection_plan(
             rep.action = "TENTATIVA_ANTERIOR_PRESERVADA"
             rep.reason = "Tentativa Search registrada em SQLite; não repetir automaticamente"
 
+    # RAW_MISSING remains a collection need even if a previous reservation
+    # blocks an automatic repeat of a potentially completed Search request.
+    # Make the blocking reason measurable instead of silently subtracting SKUs.
+    missing_total = sum(r.raw_state == "RAW_MISSING" for r in representatives)
+    missing_reserved = sum(
+        r.raw_state == "RAW_MISSING" and r.action == "TENTATIVA_ANTERIOR_PRESERVADA"
+        for r in representatives
+    )
+    missing_ready = sum(
+        r.raw_state == "RAW_MISSING" and r.action == "NOVA_COLETA"
+        for r in representatives
+    )
+    if missing_total != missing_reserved + missing_ready:
+        raise RuntimeError(
+            "RAW_MISSING_COHORT_ACCOUNTING_FAILED: "
+            f"total={missing_total} ready={missing_ready} reserved={missing_reserved}"
+        )
     candidates_all = [r for r in representatives if r.action in {"NOVA_COLETA", "RECOLETAR", "RECOLETAR_LOW_EVIDENCE"}]
     candidates = candidates_all[:max_tavily_new] if max_tavily_new else list(candidates_all)
 
@@ -1297,6 +1314,8 @@ def build_precollection_plan(
         "RAW_EMPTY": raw_counts["RAW_EMPTY"],
         "RAW_CORRUPT": raw_counts["RAW_CORRUPT"],
         "RAW_MISSING": raw_counts["RAW_MISSING"],
+        "RAW_MISSING aptos à coleta": missing_ready,
+        "RAW_MISSING bloqueados por reserva anterior": missing_reserved,
         "Já no cache": action_counts["JA_NO_CACHE"],
         "Classificados preservados na recoleta": action_counts["CLASSIFICADO_PRESERVADO"],
         "Recoleta LOW_TARGET_EVIDENCE": action_counts["RECOLETAR_LOW_EVIDENCE"],
@@ -3563,6 +3582,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     for label in [
         "Linhas recebidas", "Linhas válidas", "Linhas inválidas", "Produtos únicos por business_key",
         "Duplicidades internas removidas", "Já no cache", "RAW_EMPTY", "RAW_CORRUPT", "RAW_MISSING",
+        "RAW_MISSING aptos à coleta", "RAW_MISSING bloqueados por reserva anterior",
         "Fila real Tavily antes do limite", "Fila Tavily desta execução",
     ]:
         display = label.replace("Tavily", "Search")
