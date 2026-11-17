@@ -12313,6 +12313,26 @@ def main() -> int:
                 "Execute opcao 9 antes de novas chamadas Search/JEV.",
                 len(pending_cache))
             return 2
+    # Fail early for manually selected Bright Data: verify the slot-backed
+    # credentials BEFORE expensive baseline synchronization. Never use the
+    # legacy unsuffixed key, never reserve quotas or make paid calls here.
+    if args.mode in {"collect", "full"} and not args.auto_providers:
+        selected_provider = _resolve_search_provider(args, cfg)
+        if selected_provider == "brightdata":
+            bright_slots = [slot for slot in configured_slots() if slot.provider == "brightdata"]
+            if not bright_slots:
+                raise RuntimeError(
+                    "BRIGHTDATA_SLOTS_UNAVAILABLE: configure BRIGHTDATA_API_KEY_N, "
+                    "BRIGHTDATA_ZONE_N e BRIGHTDATA_LIMIT_N positivos"
+                )
+            for slot in bright_slots:
+                slot_cfg = {**cfg, "_active_search_slot": {
+                    "provider": "brightdata", "key_env": slot.key_env,
+                    "zone_env": slot.zone_env,
+                }}
+                _provider_credentials("brightdata", slot_cfg)
+            LOG.info("BRIGHTDATA MANUAL PREFLIGHT OK | slots=%d | search_requests=0",
+                     len(bright_slots))
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
     if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and args.auto_providers):
