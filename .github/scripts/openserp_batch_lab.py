@@ -18,9 +18,9 @@ MAX_SKUS = 10
 BASE = "http://127.0.0.1:7000"
 BLOCKED = re.compile(r"(?i)(substitua|marca.real|modelo.real|modelo.novo|brand.model|^teste$)")
 ACCESSORY = re.compile(
-    r"(?i)\\b(parts?|spares?|replacement|carburetor|piston|cover|case|"
+    r"(?i)\b(parts?|spares?|replacement|carburetor|piston|cover|case|"
     r"accessor(?:y|ies)|peças?|reposição|capa|cobertura|kit|"
-    r"diagram(?:s)?|manual holder)\\b"
+    r"diagram(?:s)?|manual holder)\b"
 )
 
 
