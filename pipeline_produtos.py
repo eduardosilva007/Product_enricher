@@ -3471,6 +3471,89 @@ def _enforce_central_search_paths(args: argparse.Namespace, cfg: Dict[str, Any],
     if provider == "openserp":
         _provider_credentials("openserp", cfg)
 
+
+def recover_confirmed_serper_quota_reservations(
+    db_path: Path, plan: PreCollectionPlan, max_releases: int = 0,
+) -> int:
+    """Recover only RAW_MISSING keys with a *recorded* SERPER_LIMIT response.
+
+    Audit is retained in events. Unknown outcomes, HTTP timeouts, success,
+    non-Serper accounts and valid RAW are never released. This is not a
+    blanket reset of the historical attempt ledger.
+    """
+    candidates = [
+        r.key for r in plan.representatives
+        if r.raw_state == "RAW_MISSING"
+        and r.action == "TENTATIVA_ANTERIOR_PRESERVADA"
+    ]
+    if not candidates:
+        return 0
+    recovered = 0
+    with sqlite3.connect(db_path, timeout=30) as conn:
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for key in candidates:
+                reservation = conn.execute(
+                    "SELECT account,provider FROM collection_attempt_reservations WHERE business_key=?",
+                    (key,),
+                ).fetchone()
+                if not reservation or reservation[1] != "serper":
+                    continue
+                event = conn.execute(
+                    """SELECT id,event_type,detail FROM events
+                       WHERE business_key=?
+                         AND event_type IN (
+                             'SERPER_LIMIT',
+                             'SEARCH_R9.6p7.2.3_SAVED',
+                             'SEARCH_R9.6p7.2.3_ERROR_NO_RETRY',
+                             'SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA'
+                         )
+                       ORDER BY id DESC LIMIT 1""",
+                    (key,),
+                ).fetchone()
+                if not event or event[1] != "SERPER_LIMIT":
+                    # Historical error or unknown outcome stays blocked.
+                    continue
+                # One recovery per matching quota event: prevent repeated retries
+                # when later attempts have a different outcome.
+                already_recovered = conn.execute(
+                    """SELECT 1 FROM events WHERE business_key=?
+                       AND event_type='SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA'
+                       AND id>? LIMIT 1""",
+                    (key,event[0]),
+                ).fetchone()
+                if already_recovered:
+                    continue
+                conn.execute(
+                    """INSERT INTO events(run_id,business_key,created_at,event_type,detail)
+                       VALUES(?,?,?,?,?)""",
+                    ("QUOTA_RECOVERY", key, now_iso(),
+                     "SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA",
+                     f"prior_account={reservation[0]}; quota_event_id={event[0]}"),
+                )
+                conn.execute(
+                    "DELETE FROM collection_attempt_reservations WHERE business_key=? AND provider='serper'",
+                    (key,),
+                )
+                # The disabled account remains disabled in the durable router.
+                if safe(reservation[0]).startswith("serper:"):
+                    conn.execute(
+                        """INSERT INTO collection_disabled_accounts(account,reason)
+                           VALUES(?,?) ON CONFLICT(account) DO UPDATE SET
+                           reason=excluded.reason,updated_at=CURRENT_TIMESTAMP""",
+                        (reservation[0],"SERPER_LIMIT_HISTORICAL"),
+                    )
+                recovered += 1
+                if max_releases and recovered >= max_releases:
+                    break
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    return recovered
+
+
 def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> bool:
     provider = _resolve_search_provider(args, cfg)
     _enforce_central_search_paths(args, cfg, provider)
@@ -3513,6 +3596,23 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         cfg=cfg, max_tavily_new=0 if provider == "openserp" else int(args.max_tavily_new or 0),
         preserve_keys=protected_keys, exclude_attempted_keys=attempted_keys,
     )
+    # Historical Serper quota failures are not product evidence. Unlock only
+    # explicitly confirmed no-credit responses, preserving all audit events.
+    recovered_quota = recover_confirmed_serper_quota_reservations(
+        db_path, plan, max_releases=int(args.max_tavily_new or 0)
+    )
+    if recovered_quota:
+        LOG.info("SERPER QUOTA RECOVERY | released=%d | evidence=RAW_MISSING + SERPER_LIMIT | remaining reservations preserved", recovered_quota)
+        with closing(sqlite3.connect(db_path, timeout=30)) as attempt_db:
+            attempted_keys = {row[0] for row in attempt_db.execute(
+                "SELECT business_key FROM collection_attempt_reservations"
+            )}
+        plan = build_precollection_plan(
+            input_path=input_path, cache_path=cache_path, report_path=pre_report,
+            recollect_empty=False, recollect_low_evidence=False,
+            cfg=cfg, max_tavily_new=0 if provider == "openserp" else int(args.max_tavily_new or 0),
+            preserve_keys=protected_keys, exclude_attempted_keys=attempted_keys,
+        )
     # RAW_EMPTY é um estado sem evidência, NÃO comprovação de Search concluída.
     # Não transformar 1.030 RAW_EMPTY em consultas pagas sem consentimento explícito.
     raw_empty_count = int(plan.summary.get("RAW_EMPTY", 0) or 0)
