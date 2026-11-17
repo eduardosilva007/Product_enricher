@@ -19,15 +19,20 @@ import requests
 from provider_lab import capture_payload, inspect
 
 
-def prepare(provider: str, query: str, environ: dict) -> tuple[str, str, dict, dict]:
+def prepare(provider: str, query: str, environ: dict, brightdata_slot: int = 1) -> tuple[str, str, dict, dict]:
     if not query.strip():
         raise ValueError("NONEMPTY_QUERY_REQUIRED")
     if provider == "brightdata":
-        # Single account explicitly selected for this independent lab.
-        key = environ.get("BRIGHTDATA_API_KEY_2", "").strip()
-        zone = environ.get("BRIGHTDATA_ZONE_2", "").strip()
+        if brightdata_slot not in (1, 2, 3, 4):
+            raise ValueError("BRIGHTDATA_SLOT_MUST_BE_1_TO_4")
+        key = (environ.get(f"BRIGHTDATA_API_KEY_{brightdata_slot}") or (
+            environ.get("BRIGHTDATA_API_KEY") if brightdata_slot == 1 else ""
+        ) or "").strip()
+        zone = (environ.get(f"BRIGHTDATA_ZONE_{brightdata_slot}") or (
+            environ.get("BRIGHTDATA_ZONE") if brightdata_slot == 1 else ""
+        ) or "").strip()
         if not key or not zone:
-            raise ValueError("BRIGHTDATA_ACCOUNT_2_KEY_AND_ZONE_REQUIRED")
+            raise ValueError(f"BRIGHTDATA_SLOT_{brightdata_slot}_KEY_AND_ZONE_REQUIRED")
         target = "https://www.google.com/search?" + urlencode({"q": query, "brd_json": 1})
         return ("POST", "https://api.brightdata.com/request",
                 {"Authorization": "Bearer " + key, "Content-Type": "application/json"},
@@ -52,17 +57,27 @@ def run(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--provider", choices=["brightdata", "serper", "scraperapi", "octoparse"], required=True)
     ap.add_argument("--query", default="")
+    ap.add_argument("--brightdata-slot", type=int, choices=[1, 2, 3, 4], default=1)
+    ap.add_argument("--env-file", type=Path, help="Explicit local .env path; never printed")
     ap.add_argument("--octoparse-json", type=Path)
     ap.add_argument("--output-dir", type=Path,
                     default=Path.home() / "ProductEnricher_ProviderLab")
     ap.add_argument("--execute-live", action="store_true")
     ap.add_argument("--ack-distinct-new-sku", action="store_true")
     args = ap.parse_args(argv)
+    if args.env_file:
+        if not args.env_file.is_file():
+            raise ValueError("ENV_FILE_NOT_FOUND")
+        env_path = args.env_file
+    else:
+        env_path = Path(__file__).resolve().parent / ".env"
     try:
         from dotenv import load_dotenv
-        load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
-    except ImportError:
-        pass
+        if env_path.is_file():
+            load_dotenv(env_path, override=False)
+    except ImportError as exc:
+        if args.execute_live:
+            raise ValueError("PYTHON_DOTENV_REQUIRED_FOR_LIVE_LAB") from exc
     if args.provider == "octoparse":
         if args.execute_live:
             raise ValueError("OCTOPARSE_LIVE_NOT_IMPLEMENTED: use task export JSON")
@@ -76,14 +91,26 @@ def run(argv=None) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
 
-    method, url, headers, kwargs = prepare(args.provider, args.query, os.environ)
+    # Offline mode must not depend on API keys or available credits.
     if not args.execute_live:
-        print(json.dumps({"provider": args.provider, "mode": "DRY_RUN",
-                          "requests": 0, "target_host": url.split("/")[2],
-                          "output_dir": str(args.output_dir)}, ensure_ascii=False))
+        if not args.query.strip():
+            raise ValueError("NONEMPTY_QUERY_REQUIRED")
+        endpoints = {
+            "brightdata": "api.brightdata.com",
+            "serper": "google.serper.dev",
+            "scraperapi": "api.scraperapi.com",
+        }
+        print(json.dumps({
+            "provider": args.provider, "mode": "DRY_RUN", "requests": 0,
+            "target_host": endpoints[args.provider],
+            "brightdata_slot": args.brightdata_slot if args.provider == "brightdata" else None,
+            "env_file_exists": env_path.is_file(),
+            "output_dir": str(args.output_dir)
+        }, ensure_ascii=False))
         return 0
     if not args.ack_distinct_new_sku:
         raise ValueError("REQUIRE_ACK_DISTINCT_NEW_SKU: do not reuse a Tavily SKU or historical attempt")
+    method, url, headers, kwargs = prepare(args.provider, args.query, os.environ, args.brightdata_slot)
     if args.provider == "scraperapi":
         # A single Google SERP can cost 25 credits. This is a per-request
         # authorization gate, NOT a persisted remaining-balance counter.
