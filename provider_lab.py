@@ -74,6 +74,8 @@ def evidence_from_payload(provider: str, payload: dict) -> list[dict]:
         rows, key = body.get("results", []), "results"
     elif provider == "serper":
         rows, key = body.get("organic", []), "organic"
+    elif provider == "scraperapi":
+        rows, key = body.get("organic_results", body.get("organic", [])), "organic_results"
     elif provider == "octoparse":
         # Task-specific exports must have a configured mapping in production.
         rows = body.get("data", body.get("records", []))
@@ -133,7 +135,7 @@ def capture_payload(provider: str, payload: dict, query: str, target_dir: Path) 
     import hashlib
     import os
     import uuid
-    if provider not in {"brightdata", "tavily", "serper"}:
+    if provider not in {"brightdata", "tavily", "serper", "scraperapi"}:
         raise ValueError("CAPTURE_UNSUPPORTED_PROVIDER")
     target_dir = Path(target_dir).expanduser().resolve()
     repo_root = Path(__file__).resolve().parent
@@ -159,7 +161,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["inspect"])
     ap.add_argument("path", type=Path)
-    ap.add_argument("--provider", choices=["brightdata", "tavily", "serper", "octoparse"], required=True)
+    ap.add_argument("--provider", choices=["brightdata", "tavily", "serper", "scraperapi", "octoparse"], required=True)
     ap.add_argument("--output", type=Path)
     args = ap.parse_args(argv)
     payload = json.loads(args.path.read_text(encoding="utf-8-sig"))
