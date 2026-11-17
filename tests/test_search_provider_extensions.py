@@ -103,6 +103,50 @@ class ProviderExtensionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "RAW_UNSAFE_URL"):
                 load_openserp_staging(str(file), "STIHL", "FS250", "STIHL FS250")
 
+    def test_openserp_to_sqlite_roundtrip_offline(self):
+        """Exercita request adapter -> Source Sieve -> RAW -> SQLite -> releitura."""
+        from contextlib import closing
+        from pipeline_produtos import (
+            RateLimiter, TavilyWritableStore, TavilyReadOnlyStore,
+            read_json, search_product_once,
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            artifact = base / "staging.json"
+            artifact.write_text(json.dumps({
+                "schema": "openserp-staging-v1", "promotion_allowed": False,
+                "cohorts": [{
+                    "provider": "openserp", "status": "STAGED_REVIEW_REQUIRED",
+                    "query": "STIHL FS250", "brand": "STIHL", "model": "FS250",
+                    "normalized_results": [{
+                        "title": "STIHL FS250 Brushcutter",
+                        "url": "https://example.com/stihl-fs250",
+                        "content": "STIHL FS250 petrol brushcutter",
+                        "_provider_position": 1
+                    }],
+                }],
+            }), encoding="utf-8")
+            cfg = read_json(ROOT / "pipeline_config.json")
+            cfg["_collection_policy"] = read_json(ROOT / "collection_quality_policy.json")
+            cfg["_openserp_artifact_path"] = str(artifact)
+            cfg["_openserp_target"] = ("STIHL", "FS250")
+            cfg["collection"]["local_enrichment"]["enabled"] = False
+            payload = search_product_once(
+                "STIHL", "FS250", cfg, RateLimiter(10000), "openserp"
+            )
+            self.assertEqual(payload["_collection"]["provider"], "openserp")
+            self.assertEqual(payload["_collection"]["usage"]["requests"], 1)
+            self.assertEqual(payload["_collection"]["usage"]["network_requests"], 0)
+            self.assertEqual(len(payload["results"]), 1)
+            sqlite_path = base / "cache.sqlite"
+            with closing(TavilyWritableStore(sqlite_path)) as writer:
+                writer.put("STIHL", "FS250", payload)
+            with closing(TavilyReadOnlyStore(sqlite_path)) as reader:
+                raw = reader.get("STIHL", "FS250")
+            self.assertEqual(raw.state, "RAW_OK")
+            self.assertEqual(raw.payload["_collection"]["provider"], "openserp")
+            self.assertEqual(raw.payload["results"][0]["url"], "https://example.com/stihl-fs250")
+
     def test_openserp_reuses_without_network_or_provider_secret(self):
         source = (ROOT / "pipeline_produtos.py").read_text(encoding="utf-8-sig")
         self.assertIn('load_openserp_staging(', source)
