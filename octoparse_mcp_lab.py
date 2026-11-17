@@ -102,6 +102,7 @@ def main():
     parser = argparse.ArgumentParser(description="Octoparse MCP read-only discovery")
     parser.add_argument("--env-file", type=Path, required=True)
     parser.add_argument("--search", default="product")
+    parser.add_argument("--app-details", default=None, help="Inspect a Data App without starting a run")
     parser.add_argument("--output-dir", type=Path, default=Path.home() / "ProductEnricher_ProviderLab")
     args = parser.parse_args()
     key_name, key = get_key(read_env(args.env_file))
@@ -119,6 +120,25 @@ def main():
     tools = listing.get("tools", [])
     print(json.dumps({"phase": "TOOLS", "count": len(tools),
                       "names": [tool.get("name") for tool in tools], "extractions": 0}), flush=True)
+    if args.app_details:
+        if not any(t.get("name") == "get_data_app_details" for t in tools):
+            raise RuntimeError("GET_DATA_APP_DETAILS_NOT_EXPOSED")
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        details = mcp.send("tools/call", {"name": "get_data_app_details",
+                                            "arguments": {"app": args.app_details}})
+        target = args.output_dir / ("octoparse_app_details_" +
+                                     re.sub(r"[^a-zA-Z0-9_-]", "_", args.app_details) + ".json")
+        target.write_text(json.dumps(details, ensure_ascii=False, indent=2), encoding="utf-8")
+        structured = details.get("structuredContent")
+        if not structured and details.get("content"):
+            try:
+                structured = json.loads(details["content"][0].get("text", "{}"))
+            except (ValueError, TypeError, IndexError):
+                structured = {}
+        print(json.dumps({"phase": "APP_DETAILS", "app": args.app_details,
+                          "raw_json_path": str(target), "details": structured or {},
+                          "extractions": 0}, ensure_ascii=False), flush=True)
+        return 0
     search = next((tool for tool in tools if tool.get("name") == "search_data_apps"), None)
     if not search:
         print("SEARCH_DATA_APPS_NOT_EXPOSED; no extraction attempted")
