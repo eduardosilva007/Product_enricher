@@ -73,6 +73,53 @@ class ProviderResponseContractTests(unittest.TestCase):
             self.assertNotIn("data_format",body)
             self.assertIn("brd_json=1",body["url"])
 
+class BrightDataManualEntrypointContractTests(unittest.TestCase):
+    def test_collect_and_full_skip_legacy_brightdata_preflight(self):
+        # Both menu entrypoints must defer Bright Data credentials to the
+        # durable per-account router; the unsuffixed key is not configured.
+        import ast
+        import inspect
+        import textwrap
+        main_tree = ast.parse(textwrap.dedent(inspect.getsource(p.main)))
+        expected_modes = {"collect", "full"}
+        found = set()
+        for node in ast.walk(main_tree):
+            if not isinstance(node, ast.If):
+                continue
+            test = node.test
+            if not (isinstance(test, ast.Compare)
+                    and isinstance(test.left, ast.Attribute)
+                    and test.left.attr == "mode"
+                    and test.ops and isinstance(test.ops[0], ast.Eq)
+                    and test.comparators and isinstance(test.comparators[0], ast.Constant)):
+                continue
+            mode = test.comparators[0].value
+            if mode not in expected_modes:
+                continue
+            calls = [
+                n for n in ast.walk(node)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "_provider_credentials"
+            ]
+            self.assertTrue(calls, mode)
+            for call in calls:
+                parent_guard = [
+                    branch for branch in ast.walk(node)
+                    if isinstance(branch, ast.If) and call in list(ast.walk(branch))
+                    and isinstance(branch.test, ast.BoolOp)
+                    and any(isinstance(n, ast.Compare)
+                            and isinstance(n.left, ast.Name) and n.left.id == "provider"
+                            and any(isinstance(op, ast.NotEq) for op in n.ops)
+                            and any(isinstance(v, ast.Constant) and v.value == "brightdata"
+                                    for v in n.comparators)
+                            for n in ast.walk(branch.test))
+                ]
+                self.assertTrue(parent_guard, f"{mode}: legacy Bright Data preflight reachable")
+            found.add(mode)
+        self.assertEqual(found, expected_modes)
+
+
 class RuntimeModuleContractTests(unittest.TestCase):
     def test_runtime_module_contract(self):
         self.assertTrue(callable(getattr(DurableRouter, "already_reserved", None)),
