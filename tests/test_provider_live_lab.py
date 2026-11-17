@@ -13,11 +13,11 @@ class ProviderLiveLabTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / ".env"
             path.write_text(
-                '# comment\\n'
-                'BRIGHTDATA_API_KEY_1="slot-one"\\n'
-                'BRIGHTDATA_ZONE_1=zone # comment\\n'
-                'SCRAPERAPI_LIMIT_1=5000\\n'
-                'OTHER_SECRET=ignored\\n',
+                '# comment\n'
+                'BRIGHTDATA_API_KEY_1="slot-one"\n'
+                'BRIGHTDATA_ZONE_1=zone # comment\n'
+                'SCRAPERAPI_LIMIT_1=5000\n'
+                'OTHER_SECRET=ignored\n',
                 encoding="utf-8"
             )
             result = lab.read_lab_env(path)
