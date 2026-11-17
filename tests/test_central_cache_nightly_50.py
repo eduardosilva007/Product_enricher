@@ -163,7 +163,9 @@ class CentralCacheProjectionTests(unittest.TestCase):
         import inspect
         menu_source = inspect.getsource(core.interactive_menu)
         main_source = inspect.getsource(core.main)
-        self.assertIn("10 - LIMPAR BASE FINAL", menu_source)
+        self.assertIn("6 - Limpar Base Final", menu_source)
+        self.assertIn('"6": "10"', menu_source)
+        self.assertIn('if op == "10":', menu_source)
         self.assertIn("--final-schema-interactive", menu_source)
         self.assertIn('input("Remover SOMENTE colunas tecnicas', main_source)
         self.assertIn("commit=False", main_source)
