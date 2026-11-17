@@ -11,11 +11,33 @@ from provider_lab import inspect, capture_payload
 class ProviderLiveLabTests(unittest.TestCase):
     def test_brightdata_builds_full_json_with_slot_two_only(self):
         method, url, headers, kw = lab.prepare(
-            "brightdata", "BRAND NEW", {"BRIGHTDATA_API_KEY_2": "abc", "BRIGHTDATA_ZONE_2": "z2"})
+            "brightdata", "BRAND NEW", {"BRIGHTDATA_API_KEY_2": "abc", "BRIGHTDATA_ZONE_2": "z2"}, brightdata_slot=2)
         self.assertEqual(method, "POST")
         self.assertIn("brd_json=1", kw["json"]["url"])
         self.assertEqual(kw["json"]["format"], "json")
         self.assertEqual(kw["json"]["zone"], "z2")
+
+    def test_brightdata_default_slot_one(self):
+        _, _, _, kw = lab.prepare(
+            "brightdata", "NEW SKU", {
+                "BRIGHTDATA_API_KEY_1": "abc", "BRIGHTDATA_ZONE_1": "z1"
+            })
+        self.assertEqual(kw["json"]["zone"], "z1")
+
+    def test_dry_run_without_any_credentials(self):
+        with patch.object(lab.requests.Session, "request", side_effect=AssertionError("HTTP forbidden")):
+            with patch.dict("os.environ", {
+                "BRIGHTDATA_API_KEY_1": "", "BRIGHTDATA_ZONE_1": "",
+                "SCRAPERAPI_API_KEY": "", "SERPER_API_KEY": ""
+            }):
+                for provider in ("brightdata", "scraperapi", "serper"):
+                    with patch("sys.stdout"):
+                        self.assertEqual(lab.run(["--provider", provider, "--query", "NEW SKU"]), 0)
+
+    def test_explicit_missing_env_file_rejected(self):
+        with self.assertRaisesRegex(ValueError, "ENV_FILE_NOT_FOUND"):
+            lab.run(["--provider", "scraperapi", "--query", "NEW SKU",
+                     "--env-file", "nonexistent_provider_lab.env"])
 
     def test_scraperapi_and_serper_are_independent(self):
         m, url, _, kw = lab.prepare("scraperapi", "NEW SKU", {"SCRAPERAPI_API_KEY": "key"})
