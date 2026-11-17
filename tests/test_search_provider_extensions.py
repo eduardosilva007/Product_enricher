@@ -60,7 +60,10 @@ class ProviderExtensionTests(unittest.TestCase):
         self.assertIn('"4": "scraperapi"', source)
         self.assertIn('"5": "openserp"', source)
         self.assertIn('if provider == "openserp":', source)
-        self.assertNotIn('"openserp", "scraperapi"', source)
+        self.assertIn('for provider, prefix in (("tavily","TAVILY"),("brightdata","BRIGHTDATA"),("serper","SERPER")):', source)
+        self.assertIn('EXPERIMENTAL_PROVIDER_MANUAL_ONLY', source)
+        self.assertIn('_experimental_collected_targets', source)
+        self.assertIn('run_pipeline(args, cfg, rules, explicit_targets=targets)', source)
 
     def test_staging_script_compiles(self):
         ast.parse((ROOT / "import_openserp_staging.py").read_text(encoding="utf-8"))
