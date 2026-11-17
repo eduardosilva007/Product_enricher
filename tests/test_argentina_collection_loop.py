@@ -71,7 +71,7 @@ class ProviderResponseContractTests(unittest.TestCase):
             body = request.call_args.args[3]
             self.assertEqual(body["format"],"json")
             self.assertNotIn("data_format",body)
-            self.assertNotIn("brd_json",body["url"])
+            self.assertIn("brd_json=1",body["url"])
 
 class RuntimeModuleContractTests(unittest.TestCase):
     def test_runtime_module_contract(self):
