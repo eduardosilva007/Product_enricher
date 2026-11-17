@@ -134,6 +134,51 @@ class CollectionAutoProviderTests(unittest.TestCase):
                 self.assertTrue(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
             self.assertNotIn("_active_search_slot",cfg)
 
+    def test_manual_brightdata_uses_only_durable_brightdata_slots(self):
+        # Real collection orchestration, mocked Search: no legacy unsuffixed
+        # credential lookup; no Tavily/Serper fallback; slot quota enforced.
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d) / "test.sqlite"
+            slots = [
+                Slot("tavily", "tavily:1", "TAVILY_API_KEY", "", 9, "t"),
+                Slot("brightdata", "brightdata:1", "BRIGHTDATA_API_KEY_1", "BRIGHTDATA_ZONE_1", 1, "b1"),
+                Slot("brightdata", "brightdata:2", "BRIGHTDATA_API_KEY_2", "BRIGHTDATA_ZONE_2", 1, "b2"),
+            ]
+            plan = SimpleNamespace(
+                candidates=[
+                    SimpleNamespace(brand_original="ABC", model_original=str(n), raw_state="RAW_MISSING")
+                    for n in (111, 222, 333)
+                ], summary={})
+            args = argparse.Namespace(
+                search_provider="brightdata", auto_providers=False,
+                input="input.xlsx", cache=str(Path(d)/"cache.sqlite"),
+                db=str(db), master="", final="", precollection_output="",
+                recollect_empty=False, recollect_low_evidence=False,
+                max_tavily_new=3, yes=True,
+            )
+            cfg = {"files":{"input":"input.xlsx", "cache":args.cache,
+                   "classification_db":args.db, "collection_report":str(Path(d)/"report.xlsx")}}
+            calls = []
+            def mock_search(brand, model, cfg, limiter, provider):
+                calls.append((model, provider, cfg["_active_search_slot"]["key_env"]))
+                return {"results":[{"title":"test"}], "_collection":{
+                    "state":"NO_TARGET_EVIDENCE", "curated_results":[], "source_audit":[],
+                    "query_audit":[], "usage":{"requests":1}}}
+            with patch.object(p,"validate_collection_cost_policy",return_value=[]), \
+                 patch.object(p,"load_baseline_inventory",return_value={"processed":set()}), \
+                 patch.object(p,"build_precollection_plan",return_value=plan), \
+                 patch.object(p,"configured_slots",return_value=slots), \
+                 patch.object(p,"_provider_credentials",side_effect=AssertionError("Unexpected legacy credential check")), \
+                 patch.object(p,"search_product_once",side_effect=mock_search), \
+                 patch.object(p,"TavilyWritableStore"), \
+                 patch.object(p,"_export_collection_quality_report"):
+                self.assertFalse(p.collect_products(args,cfg,SimpleNamespace(hash="test")))
+            self.assertEqual(calls, [
+                ("111","brightdata","BRIGHTDATA_API_KEY_1"),
+                ("222","brightdata","BRIGHTDATA_API_KEY_2"),
+            ])
+            self.assertNotIn("_active_search_slot",cfg)
+
     def test_raw_empty_no_keeps_queue_zero(self):
         with tempfile.TemporaryDirectory() as d:
             args = argparse.Namespace(
