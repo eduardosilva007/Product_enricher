@@ -31,7 +31,7 @@ def read_env(path):
         if value[:1] in ("'", '"') and value[-1:] == value[:1]:
             value = value[1:-1]
         else:
-            value = re.split(r"\\s+#", value, maxsplit=1)[0].strip()
+            value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
         data[key] = value
     return data
 
@@ -80,11 +80,11 @@ class MCP:
             return None
         if "text/event-stream" in content_type:
             messages = []
-            for event in re.split(r"\\r?\\n\\r?\\n", raw):
+            for event in re.split(r"\r?\n\r?\n", raw):
                 lines = [line[5:].strip() for line in event.splitlines() if line.startswith("data:")]
                 if lines:
                     try:
-                        messages.append(json.loads("\\n".join(lines)))
+                        messages.append(json.loads("\n".join(lines)))
                     except json.JSONDecodeError:
                         pass
             matches = [m for m in messages if m.get("id") == self.request_id]
