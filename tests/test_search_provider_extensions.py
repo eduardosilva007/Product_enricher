@@ -236,6 +236,44 @@ class ProviderExtensionTests(unittest.TestCase):
         self.assertFalse(_cache_contract_human_or_accepted(df.loc[1], df))
         self.assertTrue(_cache_contract_human_or_accepted(df.loc[2], df))
 
+    def test_raw_missing_reserved_is_audited_not_silently_dropped(self):
+        import pandas as pd
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from pipeline_produtos import build_precollection_plan, business_key
+        brand = "TEST"
+        rows = [
+            SimpleNamespace(row_number=i + 2, brand_original=brand, model_original=model,
+                            brand_canonical=brand, model_canonical=model,
+                            key=business_key(brand, model), valid=True, reason="",
+                            duplicate_rank=1, duplicate_count=1, representative=True,
+                            action="", raw_state="")
+            for i, model in enumerate(("SKU100", "SKU200"))
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            from pathlib import Path
+            from pipeline_produtos import _raw_missing_without_cache
+            class MissingStore:
+                def get(self, b, m):
+                    return _raw_missing_without_cache(b, m)
+                def close(self):
+                    pass
+            with patch("pipeline_produtos.read_input_rows", return_value=rows), \\
+                 patch("pipeline_produtos.TavilyReadOnlyStore", return_value=MissingStore()), \\
+                 patch("pipeline_produtos.export_precollection_report"):
+                path = Path(folder) / "fake.sqlite"
+                path.touch()
+                plan = build_precollection_plan(
+                    Path(folder) / "fake.xlsx", path,
+                    Path(folder) / "report.xlsx",
+                    exclude_attempted_keys={business_key(brand, "SKU200")}
+                )
+            self.assertEqual(plan.summary["RAW_MISSING"], 2)
+            self.assertEqual(plan.summary["RAW_MISSING aptos à coleta"], 1)
+            self.assertEqual(plan.summary["RAW_MISSING bloqueados por reserva anterior"], 1)
+            self.assertEqual(len(plan.candidates), 1)
+            self.assertEqual(plan.candidates[0].model_original, "SKU100")
+
     def test_no_parallel_openserp_runner(self):
         self.assertFalse((ROOT / "run_openserp_full_pilot.py").exists())
 
