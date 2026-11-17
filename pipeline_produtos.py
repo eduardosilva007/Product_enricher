@@ -3484,7 +3484,7 @@ def recover_confirmed_serper_quota_reservations(
     """
     allowed = set(allowed_keys) if allowed_keys is not None else None
     candidates = [
-        r.key for r in plan.representatives
+        r.key for r in getattr(plan, "representatives", ())
         if r.raw_state == "RAW_MISSING"
         and r.action == "TENTATIVA_ANTERIOR_PRESERVADA"
         and (allowed is None or r.key in allowed)
