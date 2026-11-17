@@ -274,6 +274,14 @@ class ProviderExtensionTests(unittest.TestCase):
             self.assertEqual(len(plan.candidates), 1)
             self.assertEqual(plan.candidates[0].model_original, "SKU100")
 
+    def test_auto_route_full_cohort_is_input_scoped(self):
+        source = (ROOT / "pipeline_produtos.py").read_text(encoding="utf-8-sig")
+        self.assertIn("AUTO_ROUTE_PILOT_SEARCH_CAP_REQUIRED",source)
+        self.assertIn("AUTO_ROUTE_PILOT_CLASSIFICATION_CAP_REQUIRED",source)
+        self.assertIn('if (auto_route or provider in {"openserp", "scraperapi"}) and curated:', source)
+        self.assertIn('if args.auto_providers or provider in {"openserp", "scraperapi"}:',source)
+        self.assertIn('run_pipeline(args, cfg, rules, explicit_targets=targets)',source)
+
     def test_serper_quota_recovery_preserves_unknown_and_audit(self):
         import sqlite3
         from types import SimpleNamespace
