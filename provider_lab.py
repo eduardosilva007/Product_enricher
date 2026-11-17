@@ -124,6 +124,37 @@ def inspect(provider: str, payload: dict) -> dict:
     return out
 
 
+def capture_payload(provider: str, payload: dict, query: str, target_dir: Path) -> Path:
+    """Opt-in raw snapshot for a pre-authorized request; no new HTTP call.
+
+    Contains upstream content, so never put this directory in Git or share
+    snapshots publicly. Filenames omit search terms and account credentials.
+    """
+    import hashlib
+    import os
+    import uuid
+    if provider not in {"brightdata", "tavily", "serper"}:
+        raise ValueError("CAPTURE_UNSUPPORTED_PROVIDER")
+    target_dir = Path(target_dir).expanduser().resolve()
+    repo_root = Path(__file__).resolve().parent
+    if target_dir == repo_root or repo_root in target_dir.parents:
+        raise ValueError("CAPTURE_DIR_INSIDE_REPOSITORY_FORBIDDEN")
+    if not target_dir.is_absolute():
+        raise ValueError("CAPTURE_DIR_NOT_ABSOLUTE")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    fingerprint = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
+    filename = f"{provider}_{fingerprint}_{uuid.uuid4().hex[:12]}.json"
+    destination = target_dir / filename
+    temporary = target_dir / (filename + ".tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, default=str)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["inspect"])
