@@ -1,0 +1,90 @@
+name: OpenSERP isolated batch lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: "Search engine"
+        required: true
+        default: google
+        type: choice
+        options:
+          - google
+          - bing
+          - duckduckgo
+      sku_lines:
+        description: "One real brand + model per line; max 10; no production data"
+        required: true
+        default: |
+          STIHL MS382
+          STIHL FS250
+          NOVABOT N2000
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openserp-batch-lab
+  cancel-in-progress: false
+
+jobs:
+  batch:
+    name: Read-only batch and normalization
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      OPENSERP_ENGINE: ${{ inputs.engine }}
+      OPENSERP_SKUS: ${{ inputs.sku_lines }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python contract tests (offline, no provider calls)
+        shell: bash
+        run: |
+          python3 -m unittest discover -s .github/scripts -p 'test_openserp_batch_lab.py' -v
+
+      - name: Validate batch before launching OpenSERP
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          spec = importlib.util.spec_from_file_location("lab", ".github/scripts/openserp_batch_lab.py")
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          batch = mod.parse_queries(os.environ["OPENSERP_SKUS"])
+          print(f"Validated {len(batch)} real brand/model search queries")
+          PY
+
+      - name: Start isolated service
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull karust/openserp:latest
+          docker run --detach --init --rm --name openserp-batch-lab --shm-size=2g \
+            -p 127.0.0.1:7000:7000 \
+            karust/openserp:latest serve -a 0.0.0.0 -p 7000
+
+      - name: Collect and normalize
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/openserp_batch_lab.py \
+            --engine "$OPENSERP_ENGINE" \
+            --skus "$OPENSERP_SKUS" \
+            --output-dir openserp-lab-results
+
+      - name: Upload isolated artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openserp-batch-${{ github.run_id }}
+          path: openserp-lab-results/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Stop service
+        if: always()
+        shell: bash
+        run: docker stop openserp-batch-lab || true
