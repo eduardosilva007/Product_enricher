@@ -52,6 +52,25 @@ class ProviderLiveLabTests(unittest.TestCase):
                 with patch("sys.stdout"):
                     self.assertEqual(lab.run(["--provider", "serper", "--query", "TEST NEW"]), 0)
 
+    def test_scraperapi_limit_blocks_paid_request(self):
+        with patch.object(lab.requests.Session, "request", side_effect=AssertionError("HTTP forbidden")):
+            with patch.dict("os.environ", {
+                "SCRAPERAPI_API_KEY": "dummy", "SCRAPERAPI_LIMIT_1": "24"
+            }):
+                with self.assertRaisesRegex(ValueError, "BUDGET_EXCEEDED"):
+                    lab.run(["--provider", "scraperapi", "--query", "NEW UNIQUE SKU",
+                             "--execute-live", "--ack-distinct-new-sku"])
+
+    def test_scraperapi_missing_limit_blocks_paid_request(self):
+        with patch.object(lab.requests.Session, "request", side_effect=AssertionError("HTTP forbidden")):
+            with patch.dict("os.environ", {
+                "SCRAPERAPI_API_KEY": "dummy",
+                "SCRAPERAPI_LIMIT_1": "", "SCRAPERAPI_LIMIT": ""
+            }):
+                with self.assertRaisesRegex(ValueError, "SCRAPERAPI_LIMIT_REQUIRED"):
+                    lab.run(["--provider", "scraperapi", "--query", "NEW UNIQUE SKU",
+                             "--execute-live", "--ack-distinct-new-sku"])
+
     def test_live_requires_distinct_sku_ack_before_http(self):
         with patch.object(lab.requests.Session, "request", side_effect=AssertionError("No live HTTP")):
             with patch.dict("os.environ", {"SERPER_API_KEY": "dummy"}):
