@@ -81,7 +81,7 @@ DEFAULT_STRUCTURAL_EDGE_DECORATOR_REGEXES = (
 STRUCTURAL_CORE_MIN_COMPACT_CHARS = 6
 STRUCTURAL_CORE_MAX_EDGE_DECORATORS = 2
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
-ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
+ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata", "scraperapi"}
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -1942,6 +1942,12 @@ def _provider_credentials(provider: str, cfg: Dict[str, Any]) -> Dict[str, str]:
         if not api_key:
             raise RuntimeError(f"{key_env} não configurada no .env")
         return {"api_key": api_key, "key_env": key_env}
+    if provider == "scraperapi":
+        key_env = safe(pcfg.get("api_key_env")) or "SCRAPERAPI_API_KEY"
+        api_key = os.getenv(key_env, "").strip()
+        if not api_key:
+            raise RuntimeError(f"{key_env} não configurada no .env")
+        return {"api_key": api_key, "key_env": key_env}
     if provider == "brightdata":
         key_env = safe(pcfg.get("api_key_env")) or "BRIGHTDATA_API_KEY"
         zone_env = safe(pcfg.get("zone_env")) or "BRIGHTDATA_ZONE"
@@ -2835,6 +2841,52 @@ def _provider_request_once(
                 "submitted_query": query,
                 "effective_query": safe(((payload.get("searchParameters") or {}) if isinstance(payload.get("searchParameters"), dict) else {}).get("q")) or query,
             },
+        }
+
+    if provider == "scraperapi":
+        # Apenas seleção manual: nenhuma conta ScraperAPI é adicionada ao auto-router.
+        # Uma GET autoparse, sem retries/paginação/redirect ou fallback de provedor.
+        from search_provider_extensions import normalize_scraperapi
+        import requests
+
+        max_results = min(10, max_results)
+        endpoint = safe(pcfg.get("base_url")) or "https://api.scraperapi.com/"
+        if endpoint.rstrip("/") != "https://api.scraperapi.com":
+            raise CollectionCostPolicyError("SCRAPERAPI_ENDPOINT_INVALID: somente endpoint HTTPS oficial")
+        google_url = "https://www.google.com/search?" + urlencode({"q": query, "num": max_results})
+        params = {
+            "api_key": creds["api_key"],
+            "url": google_url,
+            "autoparse": "true",
+        }
+        budget.reserve()
+        limiter.wait()
+        try:
+            response = requests.get(endpoint, params=params, timeout=timeout, allow_redirects=False)
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"SCRAPERAPI REQUEST_OUTCOME_UNKNOWN: {type(exc).__name__}"
+            ) from exc
+        status = int(response.status_code)
+        if status in {401, 403}:
+            raise OperationalPause("SCRAPERAPI_AUTH", f"ScraperAPI HTTP {status}")
+        if status in {429, 432, 433}:
+            raise OperationalPause("SCRAPERAPI_LIMIT", f"ScraperAPI HTTP {status}")
+        if not 200 <= status < 300:
+            raise RuntimeError(f"SCRAPERAPI HTTP {status}, sem retry")
+        try:
+            payload = response.json()
+            results = normalize_scraperapi(payload)
+        except (ValueError, TypeError) as exc:
+            raise OperationalPause("SCRAPERAPI_SCHEMA", str(exc)) from exc
+        return results, {
+            "requests": budget.used,
+            "provider_units": 1,
+            "reported_credits": None,
+            "max_results_requested": max_results,
+            "raw_result_count": len(results),
+            "raw_content_requested": False,
+            "query_meta": {"submitted_query": query},
         }
 
     if provider == "brightdata":
@@ -10972,7 +11024,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-stale-auto", action="store_true", help="Recuperar tambem autoaprovados antigos.")
     p.add_argument("--recovery-ledger", default="", help="Arquivo de chaves ja tentadas pela recuperacao, para execucao sequencial em lotes.")
     p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
-    p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata"], default="")
+    p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata", "scraperapi"], default="")
     p.add_argument("--recollect-empty", action="store_true")
     p.add_argument("--auto-providers", action="store_true", help="Rotação entre contas/provedores apenas para SKUs distintos")
     p.add_argument("--recollect-low-evidence", action="store_true")
