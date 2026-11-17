@@ -56,6 +56,7 @@ class ProviderExtensionTests(unittest.TestCase):
         ast.parse(source)
         self.assertIn('ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata", "scraperapi"}', source)
         self.assertIn('if provider == "scraperapi":', source)
+        self.assertIn('"4": "scraperapi"', source)
         self.assertNotIn('"openserp", "scraperapi"', source)
 
     def test_staging_script_compiles(self):
