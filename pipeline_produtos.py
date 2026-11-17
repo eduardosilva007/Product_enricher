@@ -3486,13 +3486,20 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         else:
             print("RECOLETA RAW_EMPTY RECUSADA. Nenhuma request por estes registros.")
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
-    slots = configured_slots() if slot_route else []
+    # No planned Search means no slot, credential or billing validation is needed.
+    # A live queue must still fail closed when its selected provider has no budget.
+    slots = configured_slots() if slot_route and candidates else []
     if not auto_route and provider == "brightdata":
         slots = [slot for slot in slots if slot.provider == "brightdata"]
-    if slot_route and not slots:
+    if slot_route and candidates and not slots:
+        if auto_route:
+            raise RuntimeError(
+                "AUTO_PROVIDERS: configure ao menos um *_LIMIT_N positivo "
+                "e a credencial correspondente no .env"
+            )
         raise RuntimeError(
-            "SEARCH_PROVIDER_SLOTS_UNAVAILABLE: configure credenciais e limites positivos "
-            "para o provedor selecionado no .env"
+            "BRIGHTDATA_SLOTS_UNAVAILABLE: configure BRIGHTDATA_API_KEY_N, "
+            "BRIGHTDATA_ZONE_N e BRIGHTDATA_LIMIT_N positivos"
         )
     if slot_route and slots:
         slot_summary = [
