@@ -7228,6 +7228,20 @@ def _baseline_row_accepted(row: Any, df: Any) -> bool:
         return False
     return True
 
+
+def _cache_contract_human_or_accepted(row: Any, df: Any) -> bool:
+    """A coleta não modifica classificação aceita, Manual ou Revisão B.I=OK.
+
+    Esse predicado deve ser idêntico no espelhamento SQLite -> Excel e no
+    gate que o valida. O gate continua rigoroso para todos os pendentes.
+    """
+    return (
+        _is_bi_ok_value(row.get("Revisão B.I"))
+        or _is_manual_status(row.get("Status"))
+        or _baseline_row_accepted(row, df)
+    )
+
+
 def _accepted_keys_from_baseline_file(
     path: Optional[Path],
 ) -> Tuple[set, set, set]:
@@ -9087,9 +9101,7 @@ def _export_base_final(
         try:
             for idx, rec in out.iterrows():
                 brand, model = safe(rec.get("Marca")), safe(rec.get("Modelo"))
-                if (_is_bi_ok_value(rec.get("Revisão B.I"))
-                        or safe(rec.get("Status")).upper() == "MANUAL"
-                        or _baseline_row_accepted(rec, out)):
+                if _cache_contract_human_or_accepted(rec, out):
                     continue
                 raw = store.get(brand, model)
                 if raw.state == "RAW_EMPTY":
@@ -9181,7 +9193,7 @@ def _export_base_final(
                 if raw.state not in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
                     continue
                 for record in records:
-                    if _is_bi_ok_value(record.get("Revisão B.I")) or safe(record.get("Status")).upper() == "MANUAL":
+                    if _cache_contract_human_or_accepted(record, out):
                         expected["skipped_human"] += 1
                         continue
                     collection_status = safe(record.get("Status Coleta")).upper()
@@ -11861,6 +11873,31 @@ def clean_final_business_schema(path: Path, *, commit: bool = False) -> Dict[str
             temp.unlink(missing_ok=True)
 
 
+
+def _brightdata_slot_diagnostic() -> Tuple[str, str]:
+    """Respeita contas BRIGHTDATA_API_KEY_1..4 e ZONE_1..4 já suportadas.
+
+    A mensagem de log nunca exige a chave sem sufixo, nem mostra segredos.
+    A validação de limite/cota permanece exclusivamente no roteador existente.
+    """
+    account_indexes = (1, 2, 3, 4)
+    keys = []
+    zones = []
+    for index in account_indexes:
+        suffix = f"_{index}"
+        key = os.getenv(f"BRIGHTDATA_API_KEY{suffix}", "").strip()
+        if index == 1 and not key:
+            key = os.getenv("BRIGHTDATA_API_KEY", "").strip()
+        zone = os.getenv(f"BRIGHTDATA_ZONE{suffix}", "").strip() or os.getenv("BRIGHTDATA_ZONE", "").strip()
+        if key:
+            keys.append(index)
+        if key and zone:
+            zones.append(index)
+    configured = f"CONFIGURADA({len(keys)}_CONTAS)" if keys else "AUSENTE"
+    zone_status = f"CONFIGURADA({len(zones)}_CONTAS)" if zones else "AUSENTE"
+    return configured, zone_status
+
+
 def main() -> int:
     base = Path(__file__).resolve().parent
     args = interactive_menu(base) if len(sys.argv) == 1 else build_parser().parse_args()
@@ -11906,8 +11943,8 @@ def main() -> int:
             "CONFIGURADA" if bool(os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()) and bool((os.getenv("CLOUDFLARE_API_TOKEN", "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip())) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("TAVILY_API_KEY", "").strip()) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("SERPER_API_KEY", "").strip()) else "AUSENTE",
-            "CONFIGURADA" if bool(os.getenv("BRIGHTDATA_API_KEY", "").strip()) else "AUSENTE",
-            "CONFIGURADA" if bool(os.getenv("BRIGHTDATA_ZONE", "").strip()) else "AUSENTE",
+            _brightdata_slot_diagnostic()[0],
+            _brightdata_slot_diagnostic()[1],
         )
     else:
         LOG.warning(".env não encontrado em: %s", env_info["path"])
