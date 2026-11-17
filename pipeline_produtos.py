@@ -2892,6 +2892,19 @@ def _provider_request_once(
             "format": "json",
         }
         payload = _provider_post_once(provider, url, headers, body, timeout, limiter, budget)
+        # Explicitly opt-in to a separate diagnostic snapshot of the ORIGINAL
+        # response. No API call, no change to canonical cache/Excel or retry.
+        raw_capture_dir = os.getenv("PROVIDER_RAW_CAPTURE_DIR", "").strip()
+        if raw_capture_dir:
+            try:
+                from provider_lab import capture_payload
+                snapshot = capture_payload(
+                    "brightdata", payload, query, Path(raw_capture_dir)
+                )
+                LOG.info("BRIGHTDATA RAW SNAPSHOT | file=%s", snapshot)
+            except Exception as exc:
+                # Diagnostics must never make a successful paid request fail.
+                LOG.warning("BRIGHTDATA RAW SNAPSHOT SKIPPED | %s", type(exc).__name__)
         # format=json wraps the *upstream* HTTP status in the response body.
         # Outer HTTP 200 does NOT prove Google responded successfully.
         if "body" in payload:
