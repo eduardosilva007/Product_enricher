@@ -258,8 +258,8 @@ class ProviderExtensionTests(unittest.TestCase):
                     return _raw_missing_without_cache(b, m)
                 def close(self):
                     pass
-            with patch("pipeline_produtos.read_input_rows", return_value=rows), \\
-                 patch("pipeline_produtos.TavilyReadOnlyStore", return_value=MissingStore()), \\
+            with patch("pipeline_produtos.read_input_rows", return_value=rows), \
+                 patch("pipeline_produtos.TavilyReadOnlyStore", return_value=MissingStore()), \
                  patch("pipeline_produtos.export_precollection_report"):
                 path = Path(folder) / "fake.sqlite"
                 path.touch()
