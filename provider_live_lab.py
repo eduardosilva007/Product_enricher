@@ -85,8 +85,24 @@ def run(argv=None) -> int:
     if not args.ack_distinct_new_sku:
         raise ValueError("REQUIRE_ACK_DISTINCT_NEW_SKU: do not reuse a Tavily SKU or historical attempt")
     if args.provider == "scraperapi":
-        # Structured Google SERP may cost 25+ API credits. No optional render/premium.
-        print("SCRAPERAPI: 1 structured Google SERP request, budget up to documented base 25 credits.")
+        # A single Google SERP can cost 25 credits. This is a per-request
+        # authorization gate, NOT a persisted remaining-balance counter.
+        # Never silently interpret the LIMIT as number of free searches.
+        from scraperapi_adapter import ScraperAPIBudget, build_request_plan
+        raw_limit = (os.getenv("SCRAPERAPI_LIMIT_1") or
+                     os.getenv("SCRAPERAPI_LIMIT") or "").strip()
+        if not raw_limit:
+            raise ValueError("SCRAPERAPI_LIMIT_REQUIRED: set credit allowance in .env")
+        try:
+            available_credits = int(raw_limit)
+        except ValueError as exc:
+            raise ValueError("SCRAPERAPI_LIMIT_NOT_INTEGER") from exc
+        build_request_plan(
+            "https://www.google.com/search?q=sku",
+            ScraperAPIBudget(remaining_credits=available_credits),
+        )
+        print("SCRAPERAPI: request authorized by configured credit cap (25 base credits); "
+              "no automatic cumulative balance tracking.")
     # Zero redirects; no application-layer retries.
     with requests.Session() as session:
         response = session.request(method, url, headers=headers, timeout=75,
