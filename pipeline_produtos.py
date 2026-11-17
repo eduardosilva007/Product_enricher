@@ -3500,17 +3500,29 @@ def recover_confirmed_serper_quota_reservations(
             # The latest decisive event wins. A later recovery or unrelated
             # search attempt must never be mistaken for the old quota failure.
             latest = {}
-            for event_id, key, event_type in conn.execute(
-                """SELECT id,business_key,event_type FROM events
-                   WHERE event_type IN (
-                       'SERPER_LIMIT',
-                       'SEARCH_R9.6p7.2.3_SAVED',
-                       'SEARCH_R9.6p7.2.3_ERROR_NO_RETRY',
-                       'SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA'
-                   ) ORDER BY id"""
+            for event_id, key, event_type, detail in conn.execute(
+                """SELECT id,business_key,event_type,detail FROM events
+                   WHERE event_type='SERPER_LIMIT'
+                      OR event_type='SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA'
+                      OR event_type LIKE 'SEARCH_%_SAVED'
+                      OR event_type LIKE 'SEARCH_%_ERROR_NO_RETRY'
+                   ORDER BY id"""
             ):
-                if key in selected:
-                    latest[key] = (event_id, event_type)
+                if key not in selected:
+                    continue
+                quota_confirmed = event_type == "SERPER_LIMIT"
+                # Older code logged HTTP 400 insufficient-credit responses as
+                # generic SEARCH_ERROR_NO_RETRY. The explicit provider response
+                # is sufficient evidence; an arbitrary timeout is not.
+                if event_type.startswith("SEARCH_") and event_type.endswith("_ERROR_NO_RETRY"):
+                    message = safe(detail).casefold()
+                    quota_confirmed = (
+                        "serper" in message and
+                        ("not enough credits" in message
+                         or "insufficient credits" in message
+                         or "insufficient balance" in message)
+                    )
+                latest[key] = (event_id, "SERPER_LIMIT" if quota_confirmed else event_type)
             reservations = {
                 key: (account, provider)
                 for key, account, provider in conn.execute(
