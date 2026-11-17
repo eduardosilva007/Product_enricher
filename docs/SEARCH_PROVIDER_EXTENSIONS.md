@@ -3,7 +3,7 @@
 ## Escopo e segurança
 - Os três provedores antigos (Tavily, Serper e Bright Data) permanecem inalterados.
 - ScraperAPI é selecionável **manualmente**, mas **não** entra no roteador automático.
-- OpenSERP continua fora de `--search-provider`; a importação de artefatos é offline e auditada.
+- OpenSERP agora é selecionável manualmente em `--search-provider openserp`, reutilizando artefato validado sem novas Search requests.
 - Octoparse fora do escopo.
 - Não há promoção automática ao cache principal, classificação ou alteração na taxonomia.
 
@@ -35,8 +35,38 @@ Seis URLs diretas permanecem candidatas, **ainda sujeitas ao Source Sieve**.
 4. Conferir `source_audit` e `approved_candidates` do arquivo gerado.
 
 IMPORTANTE: `openserp_staging.json` não é cache oficial. Não copiá-lo diretamente
-para `cache_tavily.sqlite`. É necessário desenvolver/validar a promoção de registros
-com integridade e histórico, sem sobrescrever classificações ou locks humanos.
+para `cache_tavily.sqlite`. É necessário desenvolver e validar a promoção segura.
+
+## Piloto OpenSERP de ponta a ponta, isolado
+
+`run_openserp_full_pilot.py` executa o mesmo `--mode full`, utilizando 3 SKUs já
+capturados (STIHL MS382, STIHL FS250 e NOVABOT N2000), o mesmo Source Sieve,
+um cache SQLite novo e classificação JEV. Master/Final/DB/Input são criados
+dentro de uma pasta de piloto; o código verifica os hashes dos originais.
+
+Pré-verificação sem APIs:
+```powershell
+& "C:\p\venv\Scripts\python.exe" .\run_openserp_full_pilot.py --prepare-only
+```
+
+Piloto com limite de 15 chamadas JEV e 30.000 tokens:
+```powershell
+& "C:\p\venv\Scripts\python.exe" .\run_openserp_full_pilot.py --llm-provider jev --max-api-calls 15 --max-tokens 30000
+```
+
+Os relatórios aparecem em `piloto_argentina/openserp_full/<data>_<hash>/`,
+incluindo `pilot_manifest.json`, `pipeline_full.log` e XLSX de resultados.
+`network_requests=0` refere-se exclusivamente a **novas chamadas Search**;
+fetch local de URL pós-sieve e JEV continuam possíveis.
+
+### Limitação explícita
+
+O piloto confirma o fluxo completo usando evidência capturada anteriormente.
+**Ainda não captura novos SKUs diretamente via OpenSERP.** Para ampliar nesta noite
+é necessário integrar a geração de artefatos via workflow de GitHub Actions,
+com limites, estado assíncrono e importação atômica. Não liberar a ampliação
+automática antes dessa etapa.
+
 
 ## Gates de QA
 ```powershell
