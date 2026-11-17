@@ -1,0 +1,57 @@
+name: OpenSERP isolated SKU pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: "Search engine (run a small, controlled test)"
+        required: true
+        type: choice
+        default: google
+        options:
+          - google
+          - bing
+          - duckduckgo
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openserp-lab
+  cancel-in-progress: false
+
+jobs:
+  search:
+    name: Three-SKU read-only pilot
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      OPENSERP_ENGINE: ${{ inputs.engine }}
+    steps:
+      - name: Checkout only experiment sources
+        uses: actions/checkout@v4
+      - name: Start isolated OpenSERP service
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull karust/openserp:latest
+          docker run --detach --init --rm --name openserp-lab --shm-size=2g \
+            -p 127.0.0.1:7000:7000 \
+            karust/openserp:latest serve -a 0.0.0.0 -p 7000
+      - name: Search three exact test models
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/openserp_sku_pilot.py
+      - name: Save search outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openserp-sku-json-${{ github.run_id }}
+          path: openserp-lab-results/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Stop isolated server
+        if: always()
+        shell: bash
+        run: docker stop openserp-lab || true
