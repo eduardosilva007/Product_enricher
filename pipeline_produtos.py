@@ -12360,7 +12360,17 @@ def main() -> int:
             return 2
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
-    if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and args.auto_providers):
+    # OpenSERP auto/collect uses the same protected baseline inventory and
+    # central precollection planner. The pre-sync previously rewrote both
+    # 34k-row Excel workbooks BEFORE even downloading the already completed
+    # GitHub artifact; the official post-collect sync still runs once after
+    # the evidence cache is persisted. Full/classification retains pre-sync.
+    openserp_collect_auto = (
+        args.mode == "collect"
+        and _resolve_search_provider(args, cfg) == "openserp"
+        and bool(getattr(args, "openserp_auto", False))
+    )
+    if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and args.auto_providers) and not openserp_collect_auto:
         files_cfg = cfg.get("files", {}) or {}
         input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
         master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
