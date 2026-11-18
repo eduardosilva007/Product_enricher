@@ -192,6 +192,46 @@ def _download_artifact_zip(token, artifact_id):
         return raw
 
 
+def run_failure_diagnostics(token, run_id):
+    """Read-only job summary, safe to persist; no search or workflow retry."""
+    data = request(token, "GET", f"/actions/runs/{run_id}/jobs?per_page=100")
+    return {
+        "run_id": run_id,
+        "jobs": [
+            {"id": job.get("id"), "name": job.get("name"),
+             "status": job.get("status"), "conclusion": job.get("conclusion"),
+             "failed_steps": [
+                 {"name": step.get("name"), "conclusion": step.get("conclusion")}
+                 for step in job.get("steps", [])
+                 if step.get("conclusion") not in ("success", "skipped", None)
+             ]}
+            for job in data.get("jobs", [])
+        ],
+    }
+
+
+def preserve_failed_run(token, batch, folder):
+    """Preserve job diagnostics and a validated full artifact, never redrive."""
+    folder.mkdir(parents=True, exist_ok=True)
+    report = {"run_id": batch["run_id"], "run_url": batch.get("run_url"),
+              "conclusion": batch.get("run_conclusion"), "artifact": "NOT_CHECKED"}
+    try:
+        report["job_diagnostics"] = run_failure_diagnostics(token, batch["run_id"])
+    except Exception as exc:
+        report["job_diagnostics_error"] = type(exc).__name__ + ":" + str(exc)[:180]
+    try:
+        raw = download_artifact(token, batch["run_id"])
+        # This check prevents importing partial or mismatched cohorts.
+        report["artifact_sha256"] = unpack_checked(raw, folder, batch["skus"])
+        report["artifact"] = "COMPLETE_VALIDATED"
+    except Exception as exc:
+        # Never assume zero searches occurred if the artifact is incomplete.
+        report["artifact"] = "INCOMPLETE_OR_UNAVAILABLE"
+        report["artifact_error"] = type(exc).__name__ + ":" + str(exc)[:180]
+    write_state(folder / "failed_run_diagnostics.json", report)
+    return report
+
+
 def download_artifact(token, run_id):
     response = request(token, "GET", f"/actions/runs/{run_id}/artifacts?per_page=100")
     items = [a for a in response.get("artifacts", [])
@@ -355,6 +395,10 @@ def main():
                 # runner failed after issuing some or all search requests.
                 batch["status"] = "RUN_FAILED_NO_RETRY"
                 state["status"] = "PAUSED_REMOTE_FAILURE"
+                write_state(state_path, state)
+                report = preserve_failed_run(token, batch, folder)
+                batch["failure_artifact"] = report["artifact"]
+                batch["failure_diagnostics"] = str(folder / "failed_run_diagnostics.json")
                 write_state(state_path, state)
                 raise RuntimeError(
                     "WORKFLOW_NOT_SUCCESS:" + batch["run_conclusion"]
