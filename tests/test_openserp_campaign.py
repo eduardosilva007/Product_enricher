@@ -175,6 +175,67 @@ class CampaignSafetyTests(unittest.TestCase):
                     str(p), "KSB", "MOVITEC VS F 2/4 B",
                     "KSB MOVITEC VS F 2 5 B")
 
+    def test_ai_overview_is_only_an_unverified_type_hypothesis(self):
+        from search_provider_extensions import _unverified_ai_overview
+        with tempfile.TemporaryDirectory() as folder:
+            doc = {"ai_overview": {
+                "source": "google_ai_overview",
+                "status": "UNVERIFIED_CONTEXT_ONLY",
+                "text": "KSB Movitec VSF 2/4 B is a vertical multistage centrifugal pump.",
+                "may_approve_identity": False,
+                "may_approve_classification": False,
+            }}
+            hint = _unverified_ai_overview(
+                doc, Path(folder) / "openserp_staging.json",
+                "KSB", "MOVITEC VS F 2/4 B", "KSB MOVITEC VS F 2 4 B")
+            self.assertEqual(hint["type_hypothesis"], "CENTRIFUGAL PUMP")
+            self.assertEqual(hint["status"], "UNVERIFIED_CONTEXT_ONLY")
+            self.assertFalse(hint["may_approve_identity"])
+            self.assertFalse(hint["may_approve_classification"])
+
+    def test_old_artifact_ai_overview_is_reused_without_new_search(self):
+        from search_provider_extensions import _unverified_ai_overview
+        import hashlib
+        brand, model = "KSB", "MOVITEC VS F 2/4 B"
+        key = hashlib.sha256((brand.casefold() + "|" + model.casefold()).encode()).hexdigest()[:16]
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder) / ("openserp_google_" + key + ".json")
+            p.write_text(json.dumps({
+                "query": {"text": "KSB MOVITEC VS F 2/4 B"},
+                "serp_features": [{
+                    "type": "ai_summary",
+                    "text": "The product is a multistage centrifugal pump."
+                }]
+            }), encoding="utf-8")
+            overview = _unverified_ai_overview(
+                {}, Path(folder) / "openserp_staging.json",
+                brand, model, "KSB MOVITEC VS F 2 4 B")
+            self.assertEqual(overview["type_hypothesis"], "CENTRIFUGAL PUMP")
+
+    def test_ai_overview_mismatched_raw_sku_not_reused(self):
+        from search_provider_extensions import _unverified_ai_overview
+        import hashlib
+        brand, model = "KSB", "MOVITEC VS F 2/4 B"
+        key = hashlib.sha256((brand.casefold() + "|" + model.casefold()).encode()).hexdigest()[:16]
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder) / ("openserp_google_" + key + ".json")
+            p.write_text(json.dumps({
+                "query": {"text": "KSB MOVITEC VS F 2/5 B"},
+                "serp_features": [{
+                    "type": "ai_summary",
+                    "text": "The product is a centrifugal pump."
+                }]
+            }), encoding="utf-8")
+            self.assertIsNone(_unverified_ai_overview(
+                {}, Path(folder) / "openserp_staging.json",
+                brand, model, "KSB MOVITEC VS F 2 4 B"))
+
+    def test_overview_not_in_curated_or_classification_inputs(self):
+        source = (Path(__file__).resolve().parents[1] / "pipeline_produtos.py").read_text(encoding="utf-8-sig")
+        self.assertIn('"ai_overview_unverified": usage.get(', source)
+        self.assertIn('"curated_results": curated,', source)
+        self.assertIn('"ai_overview_unverified": artifact_meta.get(', source)
+
     def test_wait_failure_fails_closed(self):
         with patch.object(campaign, "find_run", return_value={
             "id": 1234, "status": "completed", "conclusion": "failure"}):
