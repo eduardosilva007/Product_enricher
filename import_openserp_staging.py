@@ -27,6 +27,7 @@ def build_staging(document, manifest, policy_config):
         raise ValueError("COLLECTION_POLICY_INVALID: " + "; ".join(errors))
     output = []
     seen_queries = set()
+    seen_canonical_queries = set()
     seen_skus = set()
     for query, results in iter_openserp_cohorts(document):
         if query not in manifest:
@@ -39,15 +40,25 @@ def build_staging(document, manifest, policy_config):
         if sku in seen_skus:
             raise ValueError(f"DUPLICATE_SKU_IN_IMPORT: {brand} {model}")
         seen_skus.add(sku)
-        expected = (brand + " " + derive_search_model(brand, model, cfg)).strip()
+        search_model = derive_search_model(brand, model, cfg)
+        expected = (brand + " " + search_model).strip()
+        raw_expected = (brand + " " + model).strip()
         from pipeline_produtos import compact
-        if compact(query) != compact(expected):
-            raise ValueError(f"MANIFEST_QUERY_MISMATCH: {query} != {expected}")
-        approved, audits = _source_sieve(brand, derive_search_model(brand, model, cfg), results, cfg)
+        # The isolated workflow may collect the literal SKU; the central pipeline
+        # derives a normalized search anchor. Both must remain attributable to
+        # the exact manifest SKU, without fuzzy matching or silent reassignment.
+        if compact(query) not in {compact(expected), compact(raw_expected)}:
+            raise ValueError(f"MANIFEST_QUERY_MISMATCH: {query} != {expected} or {raw_expected}")
+        canonical_query_key = compact(expected)
+        if canonical_query_key in seen_canonical_queries:
+            raise ValueError(f"DUPLICATE_CANONICAL_QUERY: {expected}")
+        seen_canonical_queries.add(canonical_query_key)
+        approved, audits = _source_sieve(brand, search_model, results, cfg)
         # Revisão humana antes de promover: o importador não executa fetch nem classificação.
         output.append({
             "provider": "openserp",
-            "query": query,
+            "query": expected,
+            "original_provider_query": query,
             "brand": brand,
             "model": model,
             "status": "STAGED_REVIEW_REQUIRED",
