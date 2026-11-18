@@ -328,6 +328,36 @@ class CampaignSafetyTests(unittest.TestCase):
         with patch.object(campaign, "find_run", return_value=success):
             self.assertEqual(campaign.wait_run("dummy", "unique", 20), success)
 
+    def test_failure_diagnostics_preserves_run_and_no_search(self):
+        with tempfile.TemporaryDirectory() as d:
+            batch = {"run_id": 4321, "run_url": "https://github.com/example/runs/4321",
+                     "run_conclusion": "failure",
+                     "skus": [{"brand": "STIHL", "model": "FS250"}]}
+            with patch.object(campaign, "run_failure_diagnostics",
+                              return_value={"jobs": [{"name": "batch", "failed_steps": [
+                                  {"name": "Start isolated service", "conclusion": "failure"}]}]}):
+                with patch.object(campaign, "download_artifact",
+                                  side_effect=RuntimeError("ARTIFACT_MISSING")):
+                    with patch.object(campaign, "request") as search:
+                        report = campaign.preserve_failed_run("dummy", batch, Path(d))
+                        search.assert_not_called()
+            self.assertEqual(report["artifact"], "INCOMPLETE_OR_UNAVAILABLE")
+            self.assertEqual(report["run_id"], 4321)
+            self.assertTrue((Path(d) / "failed_run_diagnostics.json").is_file())
+            self.assertFalse((Path(d) / "remote_artifact_quarantine.zip").exists())
+
+    def test_failure_preserves_raw_zip_when_contract_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            batch = {"run_id": 4322, "run_conclusion": "failure",
+                     "skus": [{"brand": "STIHL", "model": "FS250"}]}
+            raw = b"not-a-complete-cohort"
+            with patch.object(campaign, "run_failure_diagnostics",
+                              return_value={"jobs": []}), patch.object(
+                                  campaign, "download_artifact", return_value=raw):
+                report = campaign.preserve_failed_run("dummy", batch, Path(d))
+            self.assertEqual(report["artifact"], "INCOMPLETE_OR_UNAVAILABLE")
+            self.assertEqual((Path(d) / "remote_artifact_quarantine.zip").read_bytes(), raw)
+
     def test_find_run_exact_nonce(self):
         with patch.object(campaign, "request", return_value={
             "workflow_runs": [
