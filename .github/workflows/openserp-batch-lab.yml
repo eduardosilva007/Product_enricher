@@ -43,7 +43,27 @@ jobs:
       OPENSERP_ENGINE: ${{ inputs.engine }}
       OPENSERP_SKUS: ${{ inputs.sku_lines }}
     steps:
+      - name: Verify exact workflow branch and SHA
+        shell: bash
+        env:
+          EXPECTED_REF: refs/heads/feature/openserp-orchestrator-safe-20261117
+        run: |
+          set -euo pipefail
+          echo "Executing ref: $GITHUB_REF"
+          echo "Executing sha: $GITHUB_SHA"
+          test "$GITHUB_REF" = "$EXPECTED_REF" || { echo "WRONG_BRANCH_ABORT"; exit 1; }
+
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Confirm updated OpenSERP collector and tests are paired
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'EXPECTED_EXPLICIT_BRAND_PIPE_MODEL' .github/scripts/openserp_batch_lab.py
+          grep -q 'test_multiword_brand_is_preserved' .github/scripts/test_openserp_batch_lab.py
+          echo "COLLECTOR_TEST_CONTRACT_OK"
 
       - name: Python contract tests (offline, no provider calls)
         shell: bash
