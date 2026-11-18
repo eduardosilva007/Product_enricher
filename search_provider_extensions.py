@@ -6,6 +6,8 @@ exclusivamente no Source Sieve do pipeline.
 from __future__ import annotations
 
 import ipaddress
+import re
+import unicodedata
 from typing import Any
 from urllib.parse import urlparse
 
@@ -111,6 +113,13 @@ def iter_openserp_cohorts(document: dict[str, Any]):
         raise ValueError("OPENSERP_DOCUMENT_UNKNOWN_SCHEMA")
 
 
+def _query_identity(value: str) -> str:
+    """Separator-insensitive only; does not permit token edits or fuzzy SKU matches."""
+    plain = unicodedata.normalize("NFKD", _safe(value))
+    plain = "".join(ch for ch in plain if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]", "", plain.casefold())
+
+
 def load_openserp_staging(path: str, brand: str, model: str, query: str):
     """Consume um Search já capturado, sem rede, para o fluxo normal de coleta.
 
@@ -158,8 +167,26 @@ def load_openserp_staging(path: str, brand: str, model: str, query: str):
     if len(matches) != 1:
         raise ValueError(f"OPENSERP_SKU_NOT_IN_ARTIFACT: {brand} {model}")
     match = matches[0]
-    if " ".join(_safe(match.get("query")).casefold().split()) != " ".join(query.casefold().split()):
-        raise ValueError(f"OPENSERP_QUERY_MISMATCH: expected {query!r}")
+    # The provider may have searched the literal model, while the pipeline
+    # generates a separator-normalized search query (e.g. F 2/4 B -> F 2 4 B).
+    # Accept ONLY byte-equivalent alphanumeric identity; no fuzzy matching,
+    # no token replacement and no change to the canonical business key.
+    staged_query = _safe(match.get("query"))
+    original_query = _safe(match.get("original_provider_query"))
+    raw_sku_query = f"{brand} {model}"
+    requested = _query_identity(query)
+    staged = _query_identity(staged_query)
+    if not requested or staged != requested:
+        # Provider's original query may be the literal model (not a trimmed
+        # search anchor). This path remains deliberately fail-closed if its
+        # identity differs from the pipeline's current query anchor.
+        raise ValueError(
+            f"OPENSERP_QUERY_MISMATCH: staged={staged_query!r} expected={query!r}"
+        )
+    if original_query and _query_identity(original_query) not in {
+        _query_identity(raw_sku_query), requested
+    }:
+        raise ValueError("OPENSERP_ORIGINAL_QUERY_IDENTITY_MISMATCH")
     rows = match.get("normalized_results")
     if not isinstance(rows, list):
         raise ValueError("OPENSERP_RAW_RESULTS_INVALID")
