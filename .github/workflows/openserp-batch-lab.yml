@@ -61,9 +61,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          grep -q 'EXPECTED_EXPLICIT_BRAND_PIPE_MODEL' .github/scripts/openserp_batch_lab.py
-          grep -q 'test_multiword_brand_is_preserved' .github/scripts/test_openserp_batch_lab.py
-          echo "COLLECTOR_TEST_CONTRACT_OK"
+          python3 - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          source=Path(".github/scripts/openserp_batch_lab.py")
+          spec=importlib.util.spec_from_file_location("openserp_lab", source)
+          module=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          records=module.parse_skus("BRIGGS & STRATTON|40U7770010")
+          assert len(records)==1
+          assert records[0]["brand"]=="BRIGGS & STRATTON"
+          assert records[0]["model"]=="40U7770010"
+          tests=Path(".github/scripts/test_openserp_batch_lab.py").read_text(encoding="utf-8")
+          assert "test_multiword_brand_is_preserved" in tests
+          print("COLLECTOR_TEST_CONTRACT_OK")
+          PY
 
       - name: Python contract tests (offline, no provider calls)
         shell: bash
