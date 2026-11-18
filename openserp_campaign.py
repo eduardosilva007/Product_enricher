@@ -139,9 +139,9 @@ def wait_run(token, nonce, max_seconds):
     while time.monotonic() < end:
         run = find_run(token, nonce)
         if run and run.get("status") == "completed":
-            if run.get("conclusion") != "success":
-                raise RuntimeError("WORKFLOW_NOT_SUCCESS:" + str(run.get("conclusion")))
-            return int(run["id"])
+            # Return terminal failures too: caller must durably record run_id
+            # before raising. The run may have already performed searches.
+            return run
         time.sleep(15)
     raise RuntimeError("WORKFLOW_WAIT_TIMEOUT_NO_REDISPATCH")
 
@@ -346,10 +346,29 @@ def main():
             batch["status"] = "DISPATCHED"
             write_state(state_path, state)
         if batch["status"] == "DISPATCHED":
-            run_id = wait_run(token, batch["nonce"], args.wait_seconds)
-            batch["run_id"] = run_id
+            run = wait_run(token, batch["nonce"], args.wait_seconds)
+            batch["run_id"] = int(run["id"])
+            batch["run_url"] = str(run.get("html_url") or "")
+            batch["run_conclusion"] = str(run.get("conclusion") or "")
+            if run.get("conclusion") != "success":
+                # Persist a terminal, non-retriable state even when the remote
+                # runner failed after issuing some or all search requests.
+                batch["status"] = "RUN_FAILED_NO_RETRY"
+                state["status"] = "PAUSED_REMOTE_FAILURE"
+                write_state(state_path, state)
+                raise RuntimeError(
+                    "WORKFLOW_NOT_SUCCESS:" + batch["run_conclusion"]
+                    + ":run_id=" + str(batch["run_id"])
+                    + ":url=" + batch["run_url"]
+                    + ":NO_REDISPATCH"
+                )
             batch["status"] = "RUN_SUCCESS"
             write_state(state_path, state)
+        if batch["status"] == "RUN_FAILED_NO_RETRY":
+            raise RuntimeError(
+                "PREVIOUS_WORKFLOW_FAILURE_NO_REDISPATCH:run_id="
+                + str(batch.get("run_id")) + ":inspect remote logs and ledger"
+            )
         if batch["status"] == "RUN_SUCCESS":
             raw = download_artifact(token, batch["run_id"])
             batch["artifact_sha256"] = unpack_checked(raw, folder, batch["skus"])
