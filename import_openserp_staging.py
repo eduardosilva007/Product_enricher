@@ -29,6 +29,15 @@ def build_staging(document, manifest, policy_config):
     seen_queries = set()
     seen_canonical_queries = set()
     seen_skus = set()
+    # AI Overview stays outside normalized_results/approved_candidates.
+    # Map only exact provider-query keys, never fuzzy or model-only matches.
+    overview_by_query = {}
+    if isinstance(document, dict):
+        for record in document.get("results", []) if isinstance(document.get("results"), list) else []:
+            if isinstance(record, dict) and record.get("provider") == "openserp":
+                overview = record.get("ai_overview")
+                if isinstance(overview, dict) and record.get("query"):
+                    overview_by_query[str(record["query"]).strip()] = overview
     for query, results in iter_openserp_cohorts(document):
         if query not in manifest:
             raise ValueError(f"MANIFEST_MISSING_QUERY: {query}")
@@ -67,6 +76,7 @@ def build_staging(document, manifest, policy_config):
             "normalized_results": results,
             "source_audit": audits,
             "approved_candidates": approved,
+            "ai_overview": overview_by_query.get(query),
         })
     if seen_queries != set(manifest):
         raise ValueError(f"MANIFEST_UNUSED_QUERIES: {sorted(set(manifest)-seen_queries)}")
