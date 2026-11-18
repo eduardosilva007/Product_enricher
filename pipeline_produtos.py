@@ -11342,22 +11342,23 @@ def _menu_limit(prompt: str) -> int:
 
 def _menu_search_provider() -> str:
     """Seleção numérica explícita; nunca iniciar coleta com provider inválido."""
-    options = {"1": "tavily", "2": "serper", "3": "brightdata", "4": "scraperapi", "5": "openserp"}
+    options = {"1": "tavily", "2": "serper", "3": "brightdata", "4": "scraperapi", "5": "openserp", "6": "auto"}
     while True:
         print("\nAPI DE COLETA / SEARCH")
         print("1 - TAVILY")
         print("2 - SERPER")
         print("3 - BRIGHT DATA")
         print("4 - SCRAPERAPI (MANUAL / EXPERIMENTAL)")
-        print("5 - OPENSERP (ARTEFATO VALIDADO / 0 NOVAS BUSCAS)")
-        raw = input("Selecione [1/2/3/4/5] (ENTER = 1 / TAVILY): ").strip()
+        print("5 - OPENSERP (IMPORTAR BUSCAS JA CAPTURADAS / SEM PESQUISA AO VIVO)")
+        print("6 - AUTOMATICO (TAVILY / BRIGHT DATA / SERPER: ROTACAO ENTRE CONTAS)")
+        raw = input("Selecione [1/2/3/4/5/6] (ENTER = 6 / AUTOMATICO): ").strip()
         if not raw:
-            raw = "1"
+            raw = "6"
         if raw in options:
             choice = options[raw]
             print(f"API selecionada: {choice.upper()}")
             return choice
-        print("Opção inválida. Escolha 1, 2, 3, 4 ou 5.")
+        print("Opção inválida. Escolha 1, 2, 3, 4, 5 ou 6.")
 
 
 def _menu_llm_provider() -> str:
@@ -11383,16 +11384,17 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print("=" * 86)
     print(f"1 - COLETA / EXTRAÇÃO {COLLECTION_LABEL} (1 REQUEST/PRODUTO)")
     print("2 - CLASSIFICAÇÃO")
-    print("3 - PROCESSO COMPLETO")
+    print("3 - PROCESSO COMPLETO (COLETA -> CURADORIA -> CLASSIFICACAO)")
     print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
     print("5 - AUDITORIA / REPARO BASE (SEM CLEF)")
     print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
     print("7 - EXPORTAR EVIDENCE BUNDLE (SEM BUSCA / 0 CRÉDITOS)")
-    print("8 - SAIR")
     print("9 - CENTRALIZAR CACHE DOS PILOTOS E GRAVAR BASE FINAL (0 APIS)")
     print("10 - LIMPAR BASE FINAL: 11 COLUNAS (SEM BUSCA / SEM CLASSIFICACAO)")
     print("11 - AUDITAR / RECUPERAR CLASSIFICACOES JA COLETADAS (0 APIS)")
     print("12 - VALIDAR CHAVES / PROCV NA BASE FINAL (0 APIS)")
+    print("0 - SAIR")
+    print("8 - SAIR (ATALHO LEGADO)")
     op = input("Opção: ").strip()
     if op == "1":
         provider = _menu_search_provider()
@@ -11403,11 +11405,15 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         if raw_limit and raw_limit != "TODOS" and (not raw_limit.isdecimal() or int(raw_limit) <= 0):
             raise ValueError("Limite de coleta deve ser inteiro positivo ou TODOS/ENTER")
         limite = int(raw_limit) if raw_limit and raw_limit != "TODOS" else 0
-        argv = ["--mode", "collect", "--search-provider", provider]
+        argv = ["--mode", "collect"]
+        if provider == "auto":
+            argv += ["--auto-providers"]
+        else:
+            argv += ["--search-provider", provider]
         if provider == "openserp":
             artifact = input("Artefato OpenSERP (ENTER = openserp_staging.json): ").strip() or "openserp_staging.json"
             argv += ["--openserp-artifact", artifact]
-        if provider in {"openserp", "scraperapi"} and not 1 <= limite <= 10:
+        if provider in {"openserp", "scraperapi", "auto"} and not 1 <= limite <= 10:
             raise ValueError("PILOTO_EXIGE_LIMITE_EXPLICITO_1_A_10")
         if limite:
             argv += ["--max-search-new", str(limite)]
@@ -11424,16 +11430,22 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         limite_search = _menu_limit("Limite de produtos na coleta (ENTER = todos): ")
         limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
         llm = _menu_llm_provider()
-        argv = ["--mode", "full", "--search-provider", provider, "--llm-provider", llm]
+        argv = ["--mode", "full", "--llm-provider", llm]
+        if provider == "auto":
+            argv += ["--auto-providers"]
+        else:
+            argv += ["--search-provider", provider]
         if provider == "openserp":
             artifact = input("Artefato OpenSERP (ENTER = openserp_staging.json): ").strip() or "openserp_staging.json"
             argv += ["--openserp-artifact", artifact]
-        if provider in {"openserp", "scraperapi"}:
+        if provider in {"openserp", "scraperapi", "auto"}:
             if not (1 <= limite_search <= 10 and 1 <= limite_class <= 10):
                 raise ValueError("PILOTO_EXIGE_LIMITES_1_A_10")
             argv += ["--max-api-calls", "15", "--max-tokens", "30000"]
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
+            if provider in {"openserp", "scraperapi"}:
+                raise ValueError("EXPERIMENTAL_NO_RECOLLECT_OR_REPROCESS")
             argv += ["--recollect-low-evidence"]
         if limite_search:
             argv += ["--max-search-new", str(limite_search)]
