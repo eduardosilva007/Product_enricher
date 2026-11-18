@@ -35,9 +35,27 @@ class GLiNEREntityExtractor:
             raise RuntimeError("GLINER_MODEL_PATH_NOT_CONFIGURED")
         try:
             from gliner2 import AutoExtractor
-        except ImportError as exc:
-            raise RuntimeError("GLINER2_NOT_INSTALLED") from exc
-        self.model = AutoExtractor.from_pretrained(self.model_name)
+        except ImportError:
+            # Older pilots used the original GLiNER package rather than GLiNER2.
+            try:
+                from gliner import GLiNER
+            except ImportError as exc:
+                raise RuntimeError("GLINER_OR_GLINER2_NOT_INSTALLED") from exc
+            legacy = GLiNER.from_pretrained(self.model_name)
+            class _LegacyAdapter:
+                def __init__(self, inner):
+                    self.inner = inner
+                def extract_entities(self, text, labels):
+                    spans = self.inner.predict_entities(text, list(labels))
+                    return {"entities": {
+                        key: [str(row.get("text", "")).strip()
+                              for row in spans if row.get("label") == key
+                              and str(row.get("text", "")).strip()]
+                        for key in labels
+                    }}
+            self.model = _LegacyAdapter(legacy)
+        else:
+            self.model = AutoExtractor.from_pretrained(self.model_name)
 
     @staticmethod
     def _values(result: Any, label: str) -> list[str]:
