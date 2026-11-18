@@ -12604,8 +12604,9 @@ def main() -> int:
         if args.auto_providers or provider in {"openserp", "scraperapi"}:
             targets = cfg.pop("_experimental_collected_targets", [])
             if not targets:
-                LOG.warning("EXPERIMENTAL FULL: nenhum SKU com evidência curada nesta coleta; classificação não iniciada")
-                return 2
+                LOG.warning("EXPERIMENTAL FULL: nenhum SKU com evidência curada nesta coleta; "
+                            "RAW preservado no cache central; nenhuma classificação autorizada")
+                return 0
             if len(targets) > int(args.max_items):
                 LOG.warning("EXPERIMENTAL FULL: truncando targets classificados %d para limite=%d", len(targets), args.max_items)
                 targets = targets[:int(args.max_items)]
