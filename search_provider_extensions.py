@@ -171,11 +171,11 @@ def _unverified_ai_overview(staging: dict, path, brand: str, model: str, query: 
     # Hypotheses for review are lexical hints, not canonical taxonomy labels.
     import re
     hints = (
-        ("CENTRIFUGAL PUMP", r"\\bcentrifugal pump\\b"),
-        ("CHAINSAW", r"\\bchainsaw\\b"),
-        ("LAWN MOWER", r"\\blawn mower\\b"),
-        ("ANGLE GRINDER", r"\\bangle grinder\\b"),
-        ("BLOWER", r"\\bleaf blower\\b"),
+        ("CENTRIFUGAL PUMP", r"\bcentrifugal pump\b"),
+        ("CHAINSAW", r"\bchainsaw\b"),
+        ("LAWN MOWER", r"\blawn mower\b"),
+        ("ANGLE GRINDER", r"\bangle grinder\b"),
+        ("BLOWER", r"\bleaf blower\b"),
     )
     type_hint = next((label for label, expr in hints if re.search(expr, body, re.I)), "")
     return {
