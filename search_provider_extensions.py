@@ -155,9 +155,8 @@ def _unverified_ai_overview(staging: dict, path, brand: str, model: str, query: 
     body = overview.get("text")
     if not isinstance(body, str) or not body.strip():
         return None
-    # Google generated text is not independently verified product evidence.
-    # Keep it in audit metadata only, with explicit flags and a bounded size.
-    body = body[:8000]
+    # Preserve the entire supplied text; segment into inference windows later.
+    # Only non-evidence Google UI boilerplate is removed here.
     for terminator in (
         "AI responses may include mistakes.",
         "Copied to clipboard",
@@ -168,21 +167,11 @@ def _unverified_ai_overview(staging: dict, path, brand: str, model: str, query: 
             body = body[:index].strip()
     if not body:
         return None
-    # Hypotheses for review are lexical hints, not canonical taxonomy labels.
-    import re
-    hints = (
-        ("CENTRIFUGAL PUMP", r"\bcentrifugal pump\b"),
-        ("CHAINSAW", r"\bchainsaw\b"),
-        ("LAWN MOWER", r"\blawn mower\b"),
-        ("ANGLE GRINDER", r"\bangle grinder\b"),
-        ("BLOWER", r"\bleaf blower\b"),
-    )
-    type_hint = next((label for label, expr in hints if re.search(expr, body, re.I)), "")
     return {
         "source": "google_ai_overview",
         "status": "UNVERIFIED_CONTEXT_ONLY",
         "text": body,
-        "type_hypothesis": type_hint,
+        "type_hypothesis": "",  # populated only by optional GLiNER extraction
         "may_approve_identity": False,
         "may_approve_classification": False,
     }
