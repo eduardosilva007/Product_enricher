@@ -81,7 +81,7 @@ DEFAULT_STRUCTURAL_EDGE_DECORATOR_REGEXES = (
 STRUCTURAL_CORE_MIN_COMPACT_CHARS = 6
 STRUCTURAL_CORE_MAX_EDGE_DECORATORS = 2
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
-ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata"}
+ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata", "scraperapi", "openserp"}
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -1274,6 +1274,23 @@ def build_precollection_plan(
             rep.action = "TENTATIVA_ANTERIOR_PRESERVADA"
             rep.reason = "Tentativa Search registrada em SQLite; não repetir automaticamente"
 
+    # RAW_MISSING remains a collection need even if a previous reservation
+    # blocks an automatic repeat of a potentially completed Search request.
+    # Make the blocking reason measurable instead of silently subtracting SKUs.
+    missing_total = sum(r.raw_state == "RAW_MISSING" for r in representatives)
+    missing_reserved = sum(
+        r.raw_state == "RAW_MISSING" and r.action == "TENTATIVA_ANTERIOR_PRESERVADA"
+        for r in representatives
+    )
+    missing_ready = sum(
+        r.raw_state == "RAW_MISSING" and r.action == "NOVA_COLETA"
+        for r in representatives
+    )
+    if missing_total != missing_reserved + missing_ready:
+        raise RuntimeError(
+            "RAW_MISSING_COHORT_ACCOUNTING_FAILED: "
+            f"total={missing_total} ready={missing_ready} reserved={missing_reserved}"
+        )
     candidates_all = [r for r in representatives if r.action in {"NOVA_COLETA", "RECOLETAR", "RECOLETAR_LOW_EVIDENCE"}]
     candidates = candidates_all[:max_tavily_new] if max_tavily_new else list(candidates_all)
 
@@ -1297,6 +1314,8 @@ def build_precollection_plan(
         "RAW_EMPTY": raw_counts["RAW_EMPTY"],
         "RAW_CORRUPT": raw_counts["RAW_CORRUPT"],
         "RAW_MISSING": raw_counts["RAW_MISSING"],
+        "RAW_MISSING aptos à coleta": missing_ready,
+        "RAW_MISSING bloqueados por reserva anterior": missing_reserved,
         "Já no cache": action_counts["JA_NO_CACHE"],
         "Classificados preservados na recoleta": action_counts["CLASSIFICADO_PRESERVADO"],
         "Recoleta LOW_TARGET_EVIDENCE": action_counts["RECOLETAR_LOW_EVIDENCE"],
@@ -1938,6 +1957,19 @@ def _provider_credentials(provider: str, cfg: Dict[str, Any]) -> Dict[str, str]:
         return {"api_key": api_key, "key_env": key_env}
     if provider == "serper":
         key_env = safe(pcfg.get("api_key_env")) or "SERPER_API_KEY"
+        api_key = os.getenv(key_env, "").strip()
+        if not api_key:
+            raise RuntimeError(f"{key_env} não configurada no .env")
+        return {"api_key": api_key, "key_env": key_env}
+    if provider == "openserp":
+        artifact = safe(cfg.get("_openserp_artifact_path")) or safe(pcfg.get("artifact_path"))
+        if not artifact:
+            raise RuntimeError("OPENSERP_ARTIFACT_REQUIRED: informe --openserp-artifact")
+        if not Path(artifact).is_file():
+            raise RuntimeError(f"OPENSERP_ARTIFACT_NOT_FOUND: {artifact}")
+        return {"artifact_path": artifact}
+    if provider == "scraperapi":
+        key_env = safe(pcfg.get("api_key_env")) or "SCRAPERAPI_API_KEY"
         api_key = os.getenv(key_env, "").strip()
         if not api_key:
             raise RuntimeError(f"{key_env} não configurada no .env")
@@ -2837,6 +2869,73 @@ def _provider_request_once(
             },
         }
 
+    if provider == "openserp":
+        # Um artefato previamente capturado = uma busca lógica por SKU.
+        # ZERO novas requests Search; reservas de SKU impedem repetição silenciosa.
+        from search_provider_extensions import load_openserp_staging
+        budget.reserve()
+        results, artifact_meta = load_openserp_staging(
+            creds["artifact_path"], *cfg["_openserp_target"], query
+        )
+        return results, {
+            "requests": budget.used,
+            "network_requests": 0,
+            "artifact_searches_reused": 1,
+            "artifact_sha256": artifact_meta["artifact_sha256"],
+            "provider_units": 0,
+            "reported_credits": 0,
+            "max_results_requested": len(results),
+            "raw_result_count": len(results),
+            "raw_content_requested": False,
+            "query_meta": artifact_meta,
+        }
+
+    if provider == "scraperapi":
+        # Apenas seleção manual: nenhuma conta ScraperAPI é adicionada ao auto-router.
+        # Uma GET autoparse, sem retries/paginação/redirect ou fallback de provedor.
+        from search_provider_extensions import normalize_scraperapi
+        import requests
+
+        max_results = min(10, max_results)
+        endpoint = safe(pcfg.get("base_url")) or "https://api.scraperapi.com/"
+        if endpoint.rstrip("/") != "https://api.scraperapi.com":
+            raise CollectionCostPolicyError("SCRAPERAPI_ENDPOINT_INVALID: somente endpoint HTTPS oficial")
+        google_url = "https://www.google.com/search?" + urlencode({"q": query, "num": max_results})
+        params = {
+            "api_key": creds["api_key"],
+            "url": google_url,
+            "autoparse": "true",
+        }
+        budget.reserve()
+        limiter.wait()
+        try:
+            response = requests.get(endpoint, params=params, timeout=timeout, allow_redirects=False)
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"SCRAPERAPI REQUEST_OUTCOME_UNKNOWN: {type(exc).__name__}"
+            ) from exc
+        status = int(response.status_code)
+        if status in {401, 403}:
+            raise OperationalPause("SCRAPERAPI_AUTH", f"ScraperAPI HTTP {status}")
+        if status in {429, 432, 433}:
+            raise OperationalPause("SCRAPERAPI_LIMIT", f"ScraperAPI HTTP {status}")
+        if not 200 <= status < 300:
+            raise RuntimeError(f"SCRAPERAPI HTTP {status}, sem retry")
+        try:
+            payload = response.json()
+            results = normalize_scraperapi(payload)
+        except (ValueError, TypeError) as exc:
+            raise OperationalPause("SCRAPERAPI_SCHEMA", str(exc)) from exc
+        return results, {
+            "requests": budget.used,
+            "provider_units": 1,
+            "reported_credits": None,
+            "max_results_requested": max_results,
+            "raw_result_count": len(results),
+            "raw_content_requested": False,
+            "query_meta": {"submitted_query": query},
+        }
+
     if provider == "brightdata":
         # parsed_light retorna top 10 orgânicos em uma única request SERP.
         max_results = min(10, max_results)
@@ -2927,6 +3026,8 @@ def search_product_once(
         raise ValueError("Query de coleta vazia")
 
     budget = CollectionRequestBudget(provider=provider)
+    if provider == "openserp":
+        cfg["_openserp_target"] = (brand, model)
     raw_results, usage = _provider_request_once(provider, query, cfg, limiter, budget)
     if budget.used != 1:
         raise CollectionCostPolicyError(
@@ -3077,6 +3178,9 @@ def search_product_once(
             "detected_query": safe(query_meta.get("detected_query")),
             "spelling_present": bool(query_meta.get("spelling_present")),
             "request_count": budget.used,
+            "network_requests": int(usage.get("network_requests", budget.used)),
+            "artifact_searches_reused": int(usage.get("artifact_searches_reused", 0)),
+            "artifact_sha256": safe(usage.get("artifact_sha256")),
             "max_requests_per_product": MAX_COLLECTION_REQUESTS_PER_PRODUCT,
             "exact_match": False,
             "include_domains": False,
@@ -3328,12 +3432,155 @@ def _failed_collection_payload(
     }
 
 
+
+def _enforce_central_search_paths(args: argparse.Namespace, cfg: Dict[str, Any], provider: str) -> None:
+    """Experimental providers only write to the existing production cache and ledgers."""
+    if provider not in {"openserp", "scraperapi"}:
+        return
+    if bool(getattr(args, "auto_providers", False)):
+        raise ValueError("EXPERIMENTAL_PROVIDER_MANUAL_ONLY: auto-router not validated")
+    if bool(getattr(args, "recollect_empty", False)) or bool(getattr(args, "recollect_low_evidence", False)) or bool(getattr(args, "reprocess", False)):
+        raise ValueError("EXPERIMENTAL_NO_RECOLLECT_OR_REPROCESS: pilot only on new eligible SKUs")
+    if getattr(args, "mode", "") not in {"collect", "full"}:
+        return
+    production = {
+        "input": ("Base de Produtos.xlsx", "input"),
+        "output": ("Classificacao_v3.xlsx", "output"),
+        "cache": ("cache_tavily.sqlite", "cache"),
+        "classification_db": ("pipeline_v3.sqlite", "db"),
+        "master": ("Consolidado Base de Produtos Enriquecida.xlsx", "master"),
+        "final": ("Base Final Produtos Enriquecida.xlsx", "final"),
+    }
+    for field, (filename, override_field) in production.items():
+        expected = (Path(__file__).resolve().parent / filename).resolve()
+        configured = Path(str((cfg.get("files") or {}).get(field) or "")).resolve()
+        if configured != expected:
+            raise ValueError(f"CENTRAL_PATH_REQUIRED: files.{field} must be {expected}")
+        override = safe(getattr(args, override_field, ""))
+        if override and Path(override).resolve() != expected:
+            raise ValueError(f"CENTRAL_PATH_REQUIRED: --{override_field} cannot redirect to {override}")
+    if not 1 <= int(getattr(args, "max_tavily_new", 0) or 0) <= 10:
+        raise ValueError("EXPERIMENTAL_PILOT_CAP_REQUIRED: --max-search-new 1..10")
+    if getattr(args, "mode", "") == "full":
+        if not 1 <= int(getattr(args, "max_items", 0) or 0) <= 10:
+            raise ValueError("EXPERIMENTAL_CLASSIFY_CAP_REQUIRED: --max-items 1..10")
+        if not 1 <= int(getattr(args, "max_api_calls", 0) or 0) <= 100:
+            raise ValueError("EXPERIMENTAL_LLM_CALL_CAP_REQUIRED: --max-api-calls 1..100")
+        if not 1 <= int(getattr(args, "max_tokens", 0) or 0) <= 200000:
+            raise ValueError("EXPERIMENTAL_TOKEN_CAP_REQUIRED: --max-tokens 1..200000")
+    if provider == "openserp":
+        _provider_credentials("openserp", cfg)
+
+
+def recover_confirmed_serper_quota_reservations(
+    db_path: Path, plan: PreCollectionPlan, max_releases: int = 0,
+    allowed_keys: Optional[set] = None,
+) -> int:
+    """Release RAW_MISSING only after explicit Serper no-credit response.
+
+    Preserve every historical event, do not release ambiguous outcomes or RAW
+    evidence, and do not create a separate database. One scan of the history
+    avoids per-SKU full-table queries on large production datasets.
+    """
+    allowed = set(allowed_keys) if allowed_keys is not None else None
+    candidates = [
+        r.key for r in getattr(plan, "representatives", ())
+        if r.raw_state == "RAW_MISSING"
+        and r.action == "TENTATIVA_ANTERIOR_PRESERVADA"
+        and (allowed is None or r.key in allowed)
+    ]
+    if not candidates:
+        return 0
+    selected = set(candidates)
+    recovered = 0
+    with closing(sqlite3.connect(db_path, timeout=30)) as conn:
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # The latest decisive event wins. A later recovery or unrelated
+            # search attempt must never be mistaken for the old quota failure.
+            latest = {}
+            for event_id, key, event_type, detail in conn.execute(
+                """SELECT id,business_key,event_type,detail FROM events
+                   WHERE event_type='SERPER_LIMIT'
+                      OR event_type='SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA'
+                      OR event_type LIKE 'SEARCH_%_SAVED'
+                      OR event_type LIKE 'SEARCH_%_ERROR_NO_RETRY'
+                   ORDER BY id"""
+            ):
+                if key not in selected:
+                    continue
+                quota_confirmed = event_type == "SERPER_LIMIT"
+                # Older code logged HTTP 400 insufficient-credit responses as
+                # generic SEARCH_ERROR_NO_RETRY. The explicit provider response
+                # is sufficient evidence; an arbitrary timeout is not.
+                if event_type.startswith("SEARCH_") and event_type.endswith("_ERROR_NO_RETRY"):
+                    message = safe(detail).casefold()
+                    quota_confirmed = (
+                        "serper" in message and
+                        ("not enough credits" in message
+                         or "insufficient credits" in message
+                         or "insufficient balance" in message)
+                    )
+                latest[key] = (event_id, "SERPER_LIMIT" if quota_confirmed else event_type)
+            reservations = {
+                key: (account, provider)
+                for key, account, provider in conn.execute(
+                    "SELECT business_key,account,provider FROM collection_attempt_reservations"
+                ) if key in selected
+            }
+            for key in candidates:
+                reservation = reservations.get(key)
+                event = latest.get(key)
+                if not reservation or reservation[1] != "serper":
+                    continue
+                if not event or event[1] != "SERPER_LIMIT":
+                    continue
+                account = reservation[0]
+                conn.execute(
+                    """INSERT INTO events(run_id,business_key,created_at,event_type,detail)
+                       VALUES(?,?,?,?,?)""",
+                    ("QUOTA_RECOVERY", key, now_iso(),
+                     "SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA",
+                     f"prior_account={account}; quota_event_id={event[0]}"),
+                )
+                conn.execute(
+                    "DELETE FROM collection_attempt_reservations WHERE business_key=? AND provider='serper'",
+                    (key,),
+                )
+                if safe(account).startswith("serper:"):
+                    conn.execute(
+                        """INSERT INTO collection_disabled_accounts(account,reason)
+                           VALUES(?,?) ON CONFLICT(account) DO UPDATE SET
+                           reason=excluded.reason,updated_at=CURRENT_TIMESTAMP""",
+                        (account, "SERPER_LIMIT_HISTORICAL"),
+                    )
+                recovered += 1
+                if max_releases and recovered >= max_releases:
+                    break
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    return recovered
+
+
 def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules) -> bool:
     provider = _resolve_search_provider(args, cfg)
+    _enforce_central_search_paths(args, cfg, provider)
     policy_errors = validate_collection_cost_policy(cfg)
     if policy_errors:
         raise CollectionCostPolicyError(" | ".join(policy_errors))
     auto_route = bool(getattr(args, "auto_providers", False))
+    if auto_route and getattr(args, "mode", "collect") == "full":
+        if not 1 <= int(args.max_tavily_new or 0) <= 10:
+            raise ValueError("AUTO_ROUTE_PILOT_SEARCH_CAP_REQUIRED: --max-search-new 1..10")
+        if args.mode == "full" and (
+            not 1 <= int(args.max_items or 0) <= 10
+            or not 1 <= int(args.max_api_calls or 0) <= 100
+            or not 1 <= int(args.max_tokens or 0) <= 200000
+        ):
+            raise ValueError("AUTO_ROUTE_PILOT_CLASSIFICATION_CAP_REQUIRED")
     if not auto_route:
         _provider_credentials(provider, cfg)  # preflight antes da primeira request
 
@@ -3366,13 +3613,41 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     plan = build_precollection_plan(
         input_path=input_path, cache_path=cache_path, report_path=pre_report,
         recollect_empty=bool(args.recollect_empty), recollect_low_evidence=bool(args.recollect_low_evidence),
-        cfg=cfg, max_tavily_new=int(args.max_tavily_new or 0),
+        cfg=cfg, max_tavily_new=0 if provider == "openserp" else int(args.max_tavily_new or 0),
         preserve_keys=protected_keys, exclude_attempted_keys=attempted_keys,
     )
+    # Historical Serper quota failures are not product evidence. Unlock only
+    # explicitly confirmed no-credit responses, preserving all audit events.
+    artifact_keys = None
+    if provider == "openserp":
+        staging = read_json(Path(_provider_credentials("openserp", cfg)["artifact_path"]))
+        cohorts = staging.get("cohorts") if isinstance(staging, dict) else None
+        if not isinstance(cohorts, list):
+            raise ValueError("OPENSERP_ARTIFACT_COHORTS_INVALID")
+        artifact_keys = {
+            business_key(safe(c.get("brand")), safe(c.get("model")))
+            for c in cohorts if isinstance(c, dict)
+        }
+    recovered_quota = recover_confirmed_serper_quota_reservations(
+        db_path, plan, max_releases=int(args.max_tavily_new or 0),
+        allowed_keys=artifact_keys,
+    )
+    if recovered_quota:
+        LOG.info("SERPER QUOTA RECOVERY | released=%d | evidence=RAW_MISSING + SERPER_LIMIT | remaining reservations preserved", recovered_quota)
+        with closing(sqlite3.connect(db_path, timeout=30)) as attempt_db:
+            attempted_keys = {row[0] for row in attempt_db.execute(
+                "SELECT business_key FROM collection_attempt_reservations"
+            )}
+        plan = build_precollection_plan(
+            input_path=input_path, cache_path=cache_path, report_path=pre_report,
+            recollect_empty=False, recollect_low_evidence=False,
+            cfg=cfg, max_tavily_new=0 if provider == "openserp" else int(args.max_tavily_new or 0),
+            preserve_keys=protected_keys, exclude_attempted_keys=attempted_keys,
+        )
     # RAW_EMPTY é um estado sem evidência, NÃO comprovação de Search concluída.
     # Não transformar 1.030 RAW_EMPTY em consultas pagas sem consentimento explícito.
     raw_empty_count = int(plan.summary.get("RAW_EMPTY", 0) or 0)
-    if raw_empty_count and not bool(args.recollect_empty):
+    if raw_empty_count and not bool(args.recollect_empty) and provider != "openserp":
         limit = int(args.max_tavily_new or 0)
         print()
         print(f"ALERTA RAW_EMPTY: {raw_empty_count} SKU(s) sem resultados Search no cache.")
@@ -3402,6 +3677,30 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             print(f"RECOLETA AUTORIZADA | RAW_EMPTY={raw_empty_count} | fila limitada={len(plan.candidates)}")
         else:
             print("RECOLETA RAW_EMPTY RECUSADA. Nenhuma request por estes registros.")
+    if provider == "openserp":
+        # Match source input + central cache + durable attempt ledger BEFORE reservation.
+        # Never collect arbitrary first-N SKUs not contained in the staged evidence.
+        from search_provider_extensions import load_openserp_staging
+        artifact_path = _provider_credentials(provider, cfg)["artifact_path"]
+        document = read_json(Path(artifact_path))
+        cohorts = document.get("cohorts") if isinstance(document, dict) else None
+        if not isinstance(cohorts, list) or not 1 <= len(cohorts) <= 10:
+            raise ValueError("OPENSERP_ARTIFACT_BATCH_LIMIT: exactly 1..10 cohorts")
+        keys = [business_key(safe(c.get("brand")), safe(c.get("model")))
+                for c in cohorts if isinstance(c, dict)]
+        if len(keys) != len(cohorts) or len(set(keys)) != len(keys):
+            raise ValueError("OPENSERP_ARTIFACT_DUPLICATE_KEYS")
+        eligible = [r for r in plan.candidates if r.key in set(keys)]
+        selected = eligible[:int(args.max_tavily_new)]
+        template = safe(_collection_runtime_cfg(cfg).get("query_template")) or "{brand} {search_model}"
+        for row in selected:
+            query_model = derive_query_model(row.brand_original, row.model_original, cfg)
+            query = template.format(brand=row.brand_original, model=row.model_original,
+                                    search_model=query_model).strip()
+            load_openserp_staging(artifact_path, row.brand_original, row.model_original, query)
+        plan.candidates = selected
+        LOG.info("OPENSERP ARTIFACT PREFLIGHT | artifact=%d eligible=%d selected=%d",
+                 len(cohorts), len(eligible), len(selected))
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
     slots = configured_slots() if auto_route and candidates else []
     if auto_route and candidates and not slots:
@@ -3414,6 +3713,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     for label in [
         "Linhas recebidas", "Linhas válidas", "Linhas inválidas", "Produtos únicos por business_key",
         "Duplicidades internas removidas", "Já no cache", "RAW_EMPTY", "RAW_CORRUPT", "RAW_MISSING",
+        "RAW_MISSING aptos à coleta", "RAW_MISSING bloqueados por reserva anterior",
         "Fila real Tavily antes do limite", "Fila Tavily desta execução",
     ]:
         display = label.replace("Tavily", "Search")
@@ -3430,7 +3730,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     print("Provider failover............................... DESABILITADO")
     print("Search.......................................... ABERTO / SEM DOMAIN-COUNTRY-LANGUAGE FILTER")
     print("Stage 1 recebe.................................. SOMENTE curated_results")
-    print(f"Requests máximas planejadas..................... {len(candidates)}")
+    print(f"Requests máximas planejadas..................... {0 if provider == 'openserp' else len(candidates)}")
+    if provider == "openserp":
+        print(f"Artefatos OpenSERP a reutilizar................. {len(candidates)}")
     print(f"Relatório pré-coleta............................ {pre_report}")
     print("=" * 86)
 
@@ -3455,6 +3757,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     query_rows: List[Dict[str, Any]] = []
     completed = True
     total_requests = 0
+    experimental_targets = []
     try:
         for idx, (brand, model, prior_state) in enumerate(candidates, 1):
             key = business_key(brand, model)
@@ -3519,6 +3822,8 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                             else f"COLLECT_{provider.upper()}_{COLLECTION_LABEL}"
                         ),
                     )
+                if (auto_route or provider in {"openserp", "scraperapi"}) and curated:
+                    experimental_targets.append((brand, model, key))
                 reported_credits = usage.get("reported_credits")
                 product_rows.append({
                     "Marca": brand, "Modelo": model, "Search Model": safe(coll.get("search_model")),
@@ -3609,6 +3914,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             f"COLLECTION {COLLECTION_LABEL} FINAL | provider=%s | produtos=%d | requests=%d | hard_cap=%d/produto | relatório=%s",
             provider, len(product_rows), total_requests, MAX_COLLECTION_REQUESTS_PER_PRODUCT, report_path,
         )
+        if auto_route or provider in {"openserp", "scraperapi"}:
+            cfg["_experimental_collected_targets"] = list(experimental_targets)
+            LOG.info("EXPERIMENTAL CLASSIFICATION SCOPE | ready_targets=%d", len(experimental_targets))
         return completed
     except KeyboardInterrupt:
         _export_collection_quality_report(product_rows, source_rows, query_rows, report_path)
@@ -7071,6 +7379,20 @@ def _baseline_row_accepted(row: Any, df: Any) -> bool:
         return False
     return True
 
+
+def _cache_contract_human_or_accepted(row: Any, df: Any) -> bool:
+    """A coleta não modifica classificação aceita, Manual ou Revisão B.I=OK.
+
+    Esse predicado deve ser idêntico no espelhamento SQLite -> Excel e no
+    gate que o valida. O gate continua rigoroso para todos os pendentes.
+    """
+    return (
+        _is_bi_ok_value(row.get("Revisão B.I"))
+        or _is_manual_status(row.get("Status"))
+        or _baseline_row_accepted(row, df)
+    )
+
+
 def _accepted_keys_from_baseline_file(
     path: Optional[Path],
 ) -> Tuple[set, set, set]:
@@ -8930,9 +9252,7 @@ def _export_base_final(
         try:
             for idx, rec in out.iterrows():
                 brand, model = safe(rec.get("Marca")), safe(rec.get("Modelo"))
-                if (_is_bi_ok_value(rec.get("Revisão B.I"))
-                        or safe(rec.get("Status")).upper() == "MANUAL"
-                        or _baseline_row_accepted(rec, out)):
+                if _cache_contract_human_or_accepted(rec, out):
                     continue
                 raw = store.get(brand, model)
                 if raw.state == "RAW_EMPTY":
@@ -9024,7 +9344,7 @@ def _export_base_final(
                 if raw.state not in {"RAW_OK", "RAW_OK_MERGED", "RAW_EMPTY"}:
                     continue
                 for record in records:
-                    if _is_bi_ok_value(record.get("Revisão B.I")) or safe(record.get("Status")).upper() == "MANUAL":
+                    if _cache_contract_human_or_accepted(record, out):
                         expected["skipped_human"] += 1
                         continue
                     collection_status = safe(record.get("Status Coleta")).upper()
@@ -10972,7 +11292,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-stale-auto", action="store_true", help="Recuperar tambem autoaprovados antigos.")
     p.add_argument("--recovery-ledger", default="", help="Arquivo de chaves ja tentadas pela recuperacao, para execucao sequencial em lotes.")
     p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
-    p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata"], default="")
+    p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata", "scraperapi", "openserp"], default="")
+    p.add_argument("--openserp-artifact", default="", help="Artefato OpenSERP staging local; nenhuma nova Search")
     p.add_argument("--recollect-empty", action="store_true")
     p.add_argument("--auto-providers", action="store_true", help="Rotação entre contas/provedores apenas para SKUs distintos")
     p.add_argument("--recollect-low-evidence", action="store_true")
@@ -11021,20 +11342,23 @@ def _menu_limit(prompt: str) -> int:
 
 def _menu_search_provider() -> str:
     """Seleção numérica explícita; nunca iniciar coleta com provider inválido."""
-    options = {"1": "tavily", "2": "serper", "3": "brightdata"}
+    options = {"1": "tavily", "2": "serper", "3": "brightdata", "4": "scraperapi", "5": "openserp", "6": "auto"}
     while True:
         print("\nAPI DE COLETA / SEARCH")
         print("1 - TAVILY")
         print("2 - SERPER")
         print("3 - BRIGHT DATA")
-        raw = input("Selecione [1/2/3] (ENTER = 1 / TAVILY): ").strip()
+        print("4 - SCRAPERAPI (MANUAL / EXPERIMENTAL)")
+        print("5 - OPENSERP (BUSCA EM LOTES VIA GITHUB ACTIONS — SEM SERVICO LOCAL)")
+        print("6 - AUTOMATICO (TAVILY / BRIGHT DATA / SERPER: ROTACAO ENTRE CONTAS)")
+        raw = input("Selecione [1/2/3/4/5/6] (ENTER = 6 / AUTOMATICO): ").strip()
         if not raw:
-            raw = "1"
+            raw = "6"
         if raw in options:
             choice = options[raw]
             print(f"API selecionada: {choice.upper()}")
             return choice
-        print("Opção inválida. Escolha 1, 2 ou 3.")
+        print("Opção inválida. Escolha 1, 2, 3, 4, 5 ou 6.")
 
 
 def _menu_llm_provider() -> str:
@@ -11058,19 +11382,30 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print(" COLLECTION HARD RULE: 1 produto = no máximo 1 request | sem retry/fallback/extract/advanced")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 86)
-    print(f"1 - COLETA / EXTRAÇÃO {COLLECTION_LABEL} (1 REQUEST/PRODUTO)")
-    print("2 - CLASSIFICAÇÃO")
+    print("\nMENU PRINCIPAL")
+    print("1 - COLETA")
+    print("2 - CLASSIFICACAO")
     print("3 - PROCESSO COMPLETO")
-    print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
-    print("5 - AUDITORIA / REPARO BASE (SEM CLEF)")
-    print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
-    print("7 - EXPORTAR EVIDENCE BUNDLE (SEM BUSCA / 0 CRÉDITOS)")
-    print("8 - SAIR")
-    print("9 - CENTRALIZAR CACHE DOS PILOTOS E GRAVAR BASE FINAL (0 APIS)")
-    print("10 - LIMPAR BASE FINAL: 11 COLUNAS (SEM BUSCA / SEM CLASSIFICACAO)")
-    print("11 - AUDITAR / RECUPERAR CLASSIFICACOES JA COLETADAS (0 APIS)")
-    print("12 - VALIDAR CHAVES / PROCV NA BASE FINAL (0 APIS)")
-    op = input("Opção: ").strip()
+    print("4 - MANUTENCAO")
+    print("0 - SAIR")
+    op = input("Opcao: ").strip()
+    if op == "0":
+        raise SystemExit(0)
+    if op == "4":
+        print("\nMANUTENCAO")
+        print("4 - RECUPERAR PENDENCIAS DO CACHE")
+        print("5 - AUDITORIA / REPARO BASE")
+        print("6 - CURAR CACHE LEGADO")
+        print("7 - EXPORTAR EVIDENCE BUNDLE")
+        print("9 - CENTRALIZAR CACHE DOS PILOTOS")
+        print("10 - LIMPAR BASE FINAL")
+        print("11 - AUDITAR CLASSIFICACOES COLETADAS")
+        print("12 - VALIDAR CHAVES / PROCV")
+        op = input("Ferramenta: ").strip()
+        if op not in {"4","5","6","7","9","10","11","12"}:
+            raise ValueError("Ferramenta invalida")
+    elif op not in {"1","2","3"}:
+        raise ValueError("Opcao invalida")
     if op == "1":
         provider = _menu_search_provider()
         # Diferente do piloto de classificacao (ENTER=100), coleta em branco
@@ -11080,7 +11415,20 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         if raw_limit and raw_limit != "TODOS" and (not raw_limit.isdecimal() or int(raw_limit) <= 0):
             raise ValueError("Limite de coleta deve ser inteiro positivo ou TODOS/ENTER")
         limite = int(raw_limit) if raw_limit and raw_limit != "TODOS" else 0
-        argv = ["--mode", "collect", "--search-provider", provider]
+        argv = ["--mode", "collect"]
+        if provider == "auto":
+            argv += ["--auto-providers"]
+        else:
+            argv += ["--search-provider", provider]
+        if provider == "openserp":
+            raise RuntimeError(
+                "OPENSERP_GITHUB_ACTIONS_ONLY: coletas novas em lotes de 1 a 10 "
+                "rodam no workflow openserp-batch-lab.yml (GitHub Actions). "
+                "A importacao de staging e separada; nao existe servidor "
+                "OpenSERP local integrado ao pipeline Windows."
+            )
+        if provider in {"openserp", "scraperapi", "auto"} and not 1 <= limite <= 10:
+            raise ValueError("PILOTO_EXIGE_LIMITE_EXPLICITO_1_A_10")
         if limite:
             argv += ["--max-search-new", str(limite)]
         return parser.parse_args(argv)
@@ -11096,9 +11444,26 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         limite_search = _menu_limit("Limite de produtos na coleta (ENTER = todos): ")
         limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
         llm = _menu_llm_provider()
-        argv = ["--mode", "full", "--search-provider", provider, "--llm-provider", llm]
+        argv = ["--mode", "full", "--llm-provider", llm]
+        if provider == "auto":
+            argv += ["--auto-providers"]
+        else:
+            argv += ["--search-provider", provider]
+        if provider == "openserp":
+            raise RuntimeError(
+                "OPENSERP_GITHUB_ACTIONS_ONLY: coletas novas em lotes de 1 a 10 "
+                "rodam no workflow openserp-batch-lab.yml (GitHub Actions). "
+                "A importacao de staging e separada; nao existe servidor "
+                "OpenSERP local integrado ao pipeline Windows."
+            )
+        if provider in {"openserp", "scraperapi", "auto"}:
+            if not (1 <= limite_search <= 10 and 1 <= limite_class <= 10):
+                raise ValueError("PILOTO_EXIGE_LIMITES_1_A_10")
+            argv += ["--max-api-calls", "15", "--max-tokens", "30000"]
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
+            if provider in {"openserp", "scraperapi"}:
+                raise ValueError("EXPERIMENTAL_NO_RECOLLECT_OR_REPROCESS")
             argv += ["--recollect-low-evidence"]
         if limite_search:
             argv += ["--max-search-new", str(limite_search)]
@@ -11689,6 +12054,31 @@ def clean_final_business_schema(path: Path, *, commit: bool = False) -> Dict[str
             temp.unlink(missing_ok=True)
 
 
+
+def _brightdata_slot_diagnostic() -> Tuple[str, str]:
+    """Respeita contas BRIGHTDATA_API_KEY_1..4 e ZONE_1..4 já suportadas.
+
+    A mensagem de log nunca exige a chave sem sufixo, nem mostra segredos.
+    A validação de limite/cota permanece exclusivamente no roteador existente.
+    """
+    account_indexes = (1, 2, 3, 4)
+    keys = []
+    zones = []
+    for index in account_indexes:
+        suffix = f"_{index}"
+        key = os.getenv(f"BRIGHTDATA_API_KEY{suffix}", "").strip()
+        if index == 1 and not key:
+            key = os.getenv("BRIGHTDATA_API_KEY", "").strip()
+        zone = os.getenv(f"BRIGHTDATA_ZONE{suffix}", "").strip() or os.getenv("BRIGHTDATA_ZONE", "").strip()
+        if key:
+            keys.append(index)
+        if key and zone:
+            zones.append(index)
+    configured = f"CONFIGURADA({len(keys)}_CONTAS)" if keys else "AUSENTE"
+    zone_status = f"CONFIGURADA({len(zones)}_CONTAS)" if zones else "AUSENTE"
+    return configured, zone_status
+
+
 def main() -> int:
     base = Path(__file__).resolve().parent
     args = interactive_menu(base) if len(sys.argv) == 1 else build_parser().parse_args()
@@ -11698,6 +12088,8 @@ def main() -> int:
     rules_path = (base / args.rules).resolve() if not Path(args.rules).is_absolute() else Path(args.rules)
     env_info = load_env_file(base / ".env")
     cfg = read_json(cfg_path)
+    if safe(getattr(args, "openserp_artifact", "")):
+        cfg["_openserp_artifact_path"] = str(Path(args.openserp_artifact).resolve())
     collection_policy_name = args.collection_policy or safe((cfg.get("files", {}) or {}).get("collection_policy")) or "collection_quality_policy.json"
     collection_policy_path = (base / collection_policy_name).resolve() if not Path(collection_policy_name).is_absolute() else Path(collection_policy_name)
     collection_policy = read_json(collection_policy_path)
@@ -11732,8 +12124,8 @@ def main() -> int:
             "CONFIGURADA" if bool(os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()) and bool((os.getenv("CLOUDFLARE_API_TOKEN", "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip())) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("TAVILY_API_KEY", "").strip()) else "AUSENTE",
             "CONFIGURADA" if bool(os.getenv("SERPER_API_KEY", "").strip()) else "AUSENTE",
-            "CONFIGURADA" if bool(os.getenv("BRIGHTDATA_API_KEY", "").strip()) else "AUSENTE",
-            "CONFIGURADA" if bool(os.getenv("BRIGHTDATA_ZONE", "").strip()) else "AUSENTE",
+            _brightdata_slot_diagnostic()[0],
+            _brightdata_slot_diagnostic()[1],
         )
     else:
         LOG.warning(".env não encontrado em: %s", env_info["path"])
@@ -11876,6 +12268,8 @@ def main() -> int:
             "FLOW CONTRACT OK | 1_search_only=True | clef_after_non_rule=True | "
             "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
         )
+    if args.mode in {"collect", "full"}:
+        _enforce_central_search_paths(args, cfg, _resolve_search_provider(args, cfg))
     if args.mode in {"collect", "full", "classify", "recover", "overnight"}:
         central_integrity = audit_committed_classifications(cfg, commit=False)
         if central_integrity["status"] != "ALIGNED":
@@ -11957,7 +12351,18 @@ def main() -> int:
         if not completed:
             LOG.warning("PROCESSO COMPLETO interrompido após a coleta. Classificação não iniciada.")
             return 3
-        run_pipeline(args, cfg, rules)
+        if args.auto_providers or provider in {"openserp", "scraperapi"}:
+            targets = cfg.pop("_experimental_collected_targets", [])
+            if not targets:
+                LOG.warning("EXPERIMENTAL FULL: nenhum SKU com evidência curada nesta coleta; classificação não iniciada")
+                return 2
+            if len(targets) > int(args.max_items):
+                LOG.warning("EXPERIMENTAL FULL: truncando targets classificados %d para limite=%d", len(targets), args.max_items)
+                targets = targets[:int(args.max_items)]
+            LOG.info("EXPERIMENTAL FULL: classificação restrita aos %d SKUs da coleta atual", len(targets))
+            run_pipeline(args, cfg, rules, explicit_targets=targets)
+        else:
+            run_pipeline(args, cfg, rules)
         return 0
     return 0
 

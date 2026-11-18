@@ -1,0 +1,26 @@
+name: Search provider extensions offline QA
+
+on:
+  pull_request:
+    paths:
+      - "pipeline_produtos.py"
+      - "search_provider_extensions.py"
+      - "import_openserp_staging.py"
+      - "tests/test_search_provider_extensions.py"
+      - ".github/workflows/search-provider-extensions-qa.yml"
+  workflow_dispatch:
+
+jobs:
+  offline-qa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install existing offline CI dependencies
+        run: python -m pip install -r requirements-ci.txt
+      - name: Compile
+        run: python -m py_compile pipeline_produtos.py search_provider_extensions.py import_openserp_staging.py
+      - name: Run offline regressions
+        run: python -m unittest discover -s tests -p 'test_search_provider_extensions.py' -v

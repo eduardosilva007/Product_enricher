@@ -209,6 +209,24 @@
         "max_results": 10,
         "data_format": "parsed_light",
         "format": "json"
+      },
+      "scraperapi": {
+        "base_url": "https://api.scraperapi.com/",
+        "api_key_env": "SCRAPERAPI_API_KEY",
+        "requests_per_minute": 10,
+        "timeout_seconds": 60,
+        "max_results": 10,
+        "experimental": true,
+        "automatic_enabled": false
+      },
+      "openserp": {
+        "mode": "artifact_reuse_manual",
+        "artifact_path": "",
+        "requests_per_minute": 100,
+        "max_results": 10,
+        "experimental": true,
+        "automatic_enabled": false,
+        "allow_new_network_search": false
       }
     },
     "local_enrichment": {
