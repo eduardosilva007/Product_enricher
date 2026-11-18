@@ -316,11 +316,17 @@ class CampaignSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "RAW_ARTIFACT_SKU_IDENTITY_MISMATCH"):
                 audit(raw, "KSB", "MOVITEC VS F 2/5 B", "mock-model")
 
-    def test_wait_failure_fails_closed(self):
-        with patch.object(campaign, "find_run", return_value={
-            "id": 1234, "status": "completed", "conclusion": "failure"}):
-            with self.assertRaisesRegex(RuntimeError, "NOT_SUCCESS"):
-                campaign.wait_run("dummy", "unique", 20)
+    def test_wait_returns_failed_run_for_durable_audit(self):
+        failure = {"id": 1234, "status": "completed",
+                   "conclusion": "failure",
+                   "html_url": "https://github.com/example/actions/runs/1234"}
+        with patch.object(campaign, "find_run", return_value=failure):
+            self.assertEqual(campaign.wait_run("dummy", "unique", 20), failure)
+
+    def test_wait_returns_success_run(self):
+        success = {"id": 5678, "status": "completed", "conclusion": "success"}
+        with patch.object(campaign, "find_run", return_value=success):
+            self.assertEqual(campaign.wait_run("dummy", "unique", 20), success)
 
     def test_find_run_exact_nonce(self):
         with patch.object(campaign, "request", return_value={
