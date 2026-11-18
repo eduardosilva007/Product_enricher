@@ -65,6 +65,31 @@ class ProviderExtensionTests(unittest.TestCase):
         self.assertIn('_experimental_collected_targets', source)
         self.assertIn('run_pipeline(args, cfg, rules, explicit_targets=targets)', source)
 
+    def test_menu_full_auto_routes_to_existing_account_router(self):
+        from unittest.mock import patch
+        from pipeline_produtos import interactive_menu
+        responses = iter(("3", "6", "3", "3", "1", "N"))
+        with patch("builtins.input", side_effect=lambda *_: next(responses)):
+            args = interactive_menu(ROOT)
+        self.assertEqual(args.mode, "full")
+        self.assertTrue(args.auto_providers)
+        self.assertEqual(args.max_tavily_new, 3)
+        self.assertEqual(args.max_items, 3)
+        self.assertEqual(args.llm_provider, "jev")
+        self.assertEqual(args.max_api_calls, 15)
+        self.assertEqual(args.max_tokens, 30000)
+
+    def test_menu_openserp_is_explicitly_staged_no_live_search(self):
+        from unittest.mock import patch
+        from pipeline_produtos import interactive_menu
+        responses = iter(("3", "5", "3", "3", "1", "openserp_staging.json", "N"))
+        with patch("builtins.input", side_effect=lambda *_: next(responses)):
+            args = interactive_menu(ROOT)
+        self.assertEqual(args.mode, "full")
+        self.assertEqual(args.search_provider, "openserp")
+        self.assertEqual(args.openserp_artifact, "openserp_staging.json")
+        self.assertFalse(args.auto_providers)
+
     def test_staging_script_compiles(self):
         ast.parse((ROOT / "import_openserp_staging.py").read_text(encoding="utf-8"))
 
