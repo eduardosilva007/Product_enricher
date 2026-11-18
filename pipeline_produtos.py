@@ -3493,7 +3493,7 @@ def recover_confirmed_serper_quota_reservations(
         return 0
     selected = set(candidates)
     recovered = 0
-    with sqlite3.connect(db_path, timeout=30) as conn:
+    with closing(sqlite3.connect(db_path, timeout=30)) as conn:
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("BEGIN IMMEDIATE")
         try:
