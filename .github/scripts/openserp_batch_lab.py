@@ -120,6 +120,30 @@ def classify_candidate(brand: str, model: str, query: str, result: dict) -> dict
     }
 
 
+def ai_overview_unverified(payload: dict) -> dict | None:
+    """Retain AI Overview as untrusted context, never as source evidence."""
+    features = payload.get("serp_features")
+    if not isinstance(features, list):
+        return None
+    for feature in features:
+        if not isinstance(feature, dict) or feature.get("type") != "ai_summary":
+            continue
+        body = feature.get("text")
+        if not isinstance(body, str) or not body.strip():
+            continue
+        # Do not promote UI boilerplate or AI-generated citations to verified URLs.
+        # Preserve the original excerpt for deterministic provenance auditing.
+        return {
+            "source": "google_ai_overview",
+            "status": "UNVERIFIED_CONTEXT_ONLY",
+            "text": body[:8000],
+            "truncated": len(body) > 8000,
+            "may_approve_identity": False,
+            "may_approve_classification": False,
+        }
+    return None
+
+
 def process_response(brand: str, model: str, query: str, engine: str, payload: dict) -> dict:
     results = payload.get("results", [])
     meta = payload.get("meta") or {}
@@ -151,6 +175,7 @@ def process_response(brand: str, model: str, query: str, engine: str, payload: d
         "sku_key": hashlib.sha256((brand.casefold()+"|"+model.casefold()).encode()).hexdigest()[:16],
         "status": status, "results": candidates, "organic": organic, "source_meta": meta,
         "identity_candidates": sum(x["reason"] == "IDENTITY_CANDIDATE" for x in candidates),
+        "ai_overview": ai_overview_unverified(payload),
         "classification_approved": False, "evidence_approved": False,
     }
 
@@ -234,6 +259,7 @@ def run():
                 "query": x["query"],
                 "status": "CAPTURED",
                 "organic": x["organic"],
+                "ai_overview": x.get("ai_overview"),
             })
     (output / "pilot_summary.json").write_text(
         json.dumps({"results": importable}, ensure_ascii=False, indent=2), encoding="utf-8")
