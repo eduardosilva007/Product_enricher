@@ -120,6 +120,64 @@ def _query_identity(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", plain.casefold())
 
 
+def _unverified_ai_overview(staging: dict, path, brand: str, model: str, query: str):
+    """Read an exact-query AI summary; never turn it into approved sources."""
+    import hashlib
+    import json
+    from pathlib import Path
+
+    overview = staging.get("ai_overview")
+    if not isinstance(overview, dict):
+        # Backward-compatible with artifacts already captured before overview
+        # support. Collector filenames use SHA256(lower-brand|lower-model).
+        sku_hash = hashlib.sha256(
+            (brand.casefold() + "|" + model.casefold()).encode("utf-8")
+        ).hexdigest()[:16]
+        folder = Path(path).parent
+        raw_files = sorted(folder.glob("openserp_*_" + sku_hash + ".json"))
+        if len(raw_files) == 1 and raw_files[0].stat().st_size <= 10_000_000:
+            try:
+                raw = json.loads(raw_files[0].read_text(encoding="utf-8"))
+                raw_query = ((raw.get("query") or {}).get("text")
+                             if isinstance(raw.get("query"), dict) else "")
+                if _query_identity(raw_query) == _query_identity(query):
+                    items = raw.get("serp_features", [])
+                    for item in items if isinstance(items, list) else []:
+                        if isinstance(item, dict) and item.get("type") == "ai_summary":
+                            overview = {"text": item.get("text", ""), "source": "google_ai_overview"}
+                            break
+            except (ValueError, OSError, UnicodeError, TypeError):
+                pass
+    if not isinstance(overview, dict):
+        return None
+    if overview.get("source") != "google_ai_overview":
+        return None
+    body = overview.get("text")
+    if not isinstance(body, str) or not body.strip():
+        return None
+    # Google generated text is not independently verified product evidence.
+    # Keep it in audit metadata only, with explicit flags and a bounded size.
+    body = body[:8000]
+    # Hypotheses for review are lexical hints, not canonical taxonomy labels.
+    import re
+    hints = (
+        ("CENTRIFUGAL PUMP", r"\\bcentrifugal pump\\b"),
+        ("CHAINSAW", r"\\bchainsaw\\b"),
+        ("LAWN MOWER", r"\\blawn mower\\b"),
+        ("ANGLE GRINDER", r"\\bangle grinder\\b"),
+        ("BLOWER", r"\\bleaf blower\\b"),
+    )
+    type_hint = next((label for label, expr in hints if re.search(expr, body, re.I)), "")
+    return {
+        "source": "google_ai_overview",
+        "status": "UNVERIFIED_CONTEXT_ONLY",
+        "text": body,
+        "type_hypothesis": type_hint,
+        "may_approve_identity": False,
+        "may_approve_classification": False,
+    }
+
+
 def load_openserp_staging(path: str, brand: str, model: str, query: str):
     """Consume um Search já capturado, sem rede, para o fluxo normal de coleta.
 
@@ -218,6 +276,9 @@ def load_openserp_staging(path: str, brand: str, model: str, query: str):
             },
         })
     return normalized, {
+        "ai_overview_unverified": _unverified_ai_overview(
+            match, file_path, brand, model, query
+        ),
         "artifact_sha256": hashlib.sha256(raw).hexdigest(),
         "artifact_path": str(file_path),
         "submitted_query": query,
