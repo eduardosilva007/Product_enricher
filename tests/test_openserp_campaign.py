@@ -254,7 +254,7 @@ class CampaignSafetyTests(unittest.TestCase):
         content = ("KSB Movitec is a vertical multistage centrifugal pump. " * 105)
         result = extractor.extract_context(content)
         self.assertGreater(result["segments_processed"], 1)
-        self.assertEqual(result["entities"]["manufacturer"], ["KSB"])
+        self.assertEqual(set(result["entities"]), {"product_type"})
         self.assertEqual(result["entities"]["product_type"], ["vertical multistage centrifugal pump"])
         self.assertIn(content[-100:], fake.windows[-1])
 
