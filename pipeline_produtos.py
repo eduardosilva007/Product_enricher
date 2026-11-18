@@ -81,7 +81,7 @@ DEFAULT_STRUCTURAL_EDGE_DECORATOR_REGEXES = (
 STRUCTURAL_CORE_MIN_COMPACT_CHARS = 6
 STRUCTURAL_CORE_MAX_EDGE_DECORATORS = 2
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
-ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata", "scraperapi", "openserp"}
+ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata", "scraperapi"}
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -11325,9 +11325,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-stale-auto", action="store_true", help="Recuperar tambem autoaprovados antigos.")
     p.add_argument("--recovery-ledger", default="", help="Arquivo de chaves ja tentadas pela recuperacao, para execucao sequencial em lotes.")
     p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
-    p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata", "scraperapi", "openserp"], default="")
-    p.add_argument("--openserp-artifact", default="", help="Artefato OpenSERP staging local; nenhuma nova Search")
-    p.add_argument("--openserp-auto", action="store_true", help="Selecionar pelo planner oficial e pesquisar via GitHub Actions antes da coleta central")
+    p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata", "scraperapi"], default="")
     p.add_argument("--recollect-empty", action="store_true")
     p.add_argument("--auto-providers", action="store_true", help="Rotação entre contas/provedores apenas para SKUs distintos")
     p.add_argument("--recollect-low-evidence", action="store_true")
@@ -11376,23 +11374,22 @@ def _menu_limit(prompt: str) -> int:
 
 def _menu_search_provider() -> str:
     """Seleção numérica explícita; nunca iniciar coleta com provider inválido."""
-    options = {"1": "tavily", "2": "serper", "3": "brightdata", "4": "scraperapi", "5": "openserp", "6": "auto"}
+    options = {"1": "tavily", "2": "serper", "3": "brightdata", "4": "scraperapi", "5": "auto"}
     while True:
         print("\nAPI DE COLETA / SEARCH")
         print("1 - TAVILY")
         print("2 - SERPER")
         print("3 - BRIGHT DATA")
         print("4 - SCRAPERAPI (MANUAL / EXPERIMENTAL)")
-        print("5 - OPENSERP (BUSCA EM LOTES VIA GITHUB ACTIONS — SEM SERVICO LOCAL)")
-        print("6 - AUTOMATICO (TAVILY / BRIGHT DATA / SERPER: ROTACAO ENTRE CONTAS)")
-        raw = input("Selecione [1/2/3/4/5/6] (ENTER = 6 / AUTOMATICO): ").strip()
+        print("5 - AUTOMATICO (TAVILY / BRIGHT DATA / SERPER: ROTACAO ENTRE CONTAS)")
+        raw = input("Selecione [1/2/3/4/5] (ENTER = 5 / AUTOMATICO): ").strip()
         if not raw:
-            raw = "6"
+            raw = "5"
         if raw in options:
             choice = options[raw]
             print(f"API selecionada: {choice.upper()}")
             return choice
-        print("Opção inválida. Escolha 1, 2, 3, 4, 5 ou 6.")
+        print("Opção inválida. Escolha 1, 2, 3, 4 ou 5.")
 
 
 def _menu_llm_provider() -> str:
@@ -11454,12 +11451,8 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--auto-providers"]
         else:
             argv += ["--search-provider", provider]
-        if provider == "openserp":
-            argv += ["--openserp-auto", "--yes"]
         if provider in {"scraperapi", "auto"} and not 1 <= limite <= 10:
             raise ValueError("PILOTO_EXIGE_LIMITE_EXPLICITO_1_A_10")
-        if provider == "openserp" and limite < 1:
-            raise ValueError("OPENSERP_CAMPANHA_EXIGE_TOTAL_EXPLICITO")
         if limite:
             argv += ["--max-search-new", str(limite)]
         return parser.parse_args(argv)
@@ -11480,19 +11473,13 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--auto-providers"]
         else:
             argv += ["--search-provider", provider]
-        if provider == "openserp":
-            argv += ["--openserp-auto", "--yes"]
         if provider in {"scraperapi", "auto"}:
             if not (1 <= limite_search <= 10 and 1 <= limite_class <= 10):
                 raise ValueError("PILOTO_EXIGE_LIMITES_1_A_10")
             argv += ["--max-api-calls", "15", "--max-tokens", "30000"]
-        if provider == "openserp":
-            if limite_search < 1 or limite_class < limite_search:
-                raise ValueError("OPENSERP_FULL_EXIGE_CLASS_LIMIT_GE_SEARCH_TOTAL")
-            argv += ["--max-api-calls", "15", "--max-tokens", "30000"]
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
-            if provider in {"openserp", "scraperapi"}:
+            if provider == "scraperapi":
                 raise ValueError("EXPERIMENTAL_NO_RECOLLECT_OR_REPROCESS")
             argv += ["--recollect-low-evidence"]
         if limite_search:
@@ -12109,224 +12096,15 @@ def _brightdata_slot_diagnostic() -> Tuple[str, str]:
     return configured, zone_status
 
 
-def _prepare_openserp_automatic_batch(args, cfg):
-    """Transport evidence for the official collection flow, not a second collector.
-
-    Selection delegates to the existing precollection planner, human locks,
-    cache and durable attempt reservations. No SQLite writes here: the normal
-    collect_products() performs reservations, curation and central persistence.
-    """
-    import csv
-    import subprocess
-    import hashlib
-    from contextlib import closing
-
-    if safe(getattr(args, "openserp_artifact", "")):
-        raise ValueError("OPENSERP_AUTO_REJECTS_MANUAL_ARTIFACT")
-    limit = int(getattr(args, "max_tavily_new", 0) or 0)
-    if not 1 <= limit <= 10:
-        raise ValueError("OPENSERP_AUTOMATIC_PILOT_LIMIT_REQUIRED_1_TO_10")
-
-    files = cfg["files"]
-    root = Path(__file__).resolve().parent
-    input_path = root / files["input"]
-    cache_path = root / files["cache"]
-    db_path = root / files["classification_db"]
-    protected = load_baseline_inventory(root / files["master"], root / files["final"])["processed"]
-    existing = set()
-    if db_path.is_file():
-        with closing(sqlite3.connect(db_path, timeout=30)) as conn:
-            table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='collection_attempt_reservations'"
-            ).fetchone()
-            if table:
-                existing = {r[0] for r in conn.execute(
-                    "SELECT business_key FROM collection_attempt_reservations"
-                )}
-    # Retain the current pilot policy: only NEW missing evidence, no forced
-    # RAW_EMPTY or weak-evidence recollection and no human-locked SKUs.
-    plan = build_precollection_plan(
-        input_path=input_path, cache_path=cache_path,
-        report_path=root / files.get("precollection_report", "Pre_Coleta.xlsx"),
-        recollect_empty=False, recollect_low_evidence=False,
-        cfg=cfg, max_tavily_new=limit, preserve_keys=protected,
-        exclude_attempted_keys=existing,
-    )
-    selected = list(plan.candidates)
-    if not selected:
-        LOG.info("OPENSERP AUTO | 0 SKUs elegíveis no precollection planner")
-        return False
-    keys = [(r.brand_original, r.model_original) for r in selected]
-    digest = hashlib.sha256(
-        json.dumps(keys, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()[:20]
-    # The campaign directory is a resumable transport checkpoint, not a
-    # second cache. Do not overwrite any prior artifact or campaign state.
-    campaign = root / ".runtime_cache" / "openserp" / digest
-    campaign.mkdir(parents=True, exist_ok=True)
-    manifest = campaign / "input_manifest.csv"
-    if not manifest.exists():
-        with manifest.open("w", encoding="utf-8", newline="") as stream:
-            writer = csv.writer(stream)
-            writer.writerow(("brand", "model"))
-            writer.writerows(keys)
-    else:
-        with manifest.open(encoding="utf-8", newline="") as stream:
-            rows = list(csv.DictReader(stream))
-        if [(row["brand"], row["model"]) for row in rows] != keys:
-            raise RuntimeError("OPENSERP_CAMPAIGN_MANIFEST_DRIFT")
-    transport = campaign / "transport"
-    cmd = [sys.executable, str(root / "openserp_campaign.py"),
-           "--manifest", str(manifest),
-           "--campaign-dir", str(transport),
-           "--batch-size", str(len(selected)),
-           "--engine", "google", "--execute-live"]
-    LOG.info("OPENSERP AUTO | seleção pelo planner oficial=%d | lote=%s",
-             len(selected), digest)
-    subprocess.run(cmd, cwd=root, check=True)
-    staging = transport / "batch_0000" / "openserp_staging.json"
-    if not staging.is_file():
-        raise RuntimeError("OPENSERP_STAGING_NOT_RETURNED")
-    cfg["_openserp_artifact_path"] = str(staging.resolve())
-    return True
-
-
-def _run_openserp_batched_campaign(args: argparse.Namespace) -> int:
-    """Run N SKUs through sequential <=10-SKU official collector executions.
-
-    Each child executes the unchanged validated collection -> official SQLite
-    persistence -> baseline synchronization flow. No second collector/database.
-    Abort on child failure or missing progress, never launch duplicate searches.
-    """
-    import subprocess
-    import math
-    from contextlib import closing
-
-    total = int(args.max_tavily_new or 0)
-    if total <= 10 or not args.openserp_auto or args.search_provider != "openserp":
-        raise ValueError("OPENSERP_BATCHED_CAMPAIGN_INVALID_ARGUMENTS")
-    if args.mode not in {"collect", "full"}:
-        raise ValueError("OPENSERP_BATCHED_CAMPAIGN_INVALID_MODE")
-    if args.mode == "full" and int(args.max_items or 0) < total:
-        raise ValueError("OPENSERP_FULL_EXIGE_CLASS_LIMIT_GE_SEARCH_TOTAL")
-
-    parser = build_parser()
-    # Serialize the actual parsed Namespace instead of reconstructing only a
-    # subset of CLI flags; preserves configured input/cache/db/LLM and budgets.
-    def child_argv(batch_size: int) -> List[str]:
-        override = vars(args).copy()
-        override["max_tavily_new"] = batch_size
-        if args.mode == "full":
-            override["max_items"] = batch_size
-        tokens: List[str] = []
-        for action in parser._actions:
-            if not action.option_strings or action.dest == "help":
-                continue
-            val = override.get(action.dest)
-            if isinstance(action, argparse._StoreTrueAction):
-                if val:
-                    tokens.append(action.option_strings[0])
-            elif isinstance(action, argparse._StoreFalseAction):
-                if val is False:
-                    tokens.append(action.option_strings[0])
-            elif isinstance(action, argparse._AppendAction):
-                for item in val or []:
-                    tokens.extend([action.option_strings[0], str(item)])
-            elif val not in (None, "", 0) and val != action.default:
-                tokens.extend([action.option_strings[0], str(val)])
-        return tokens
-
-    cfg = read_json(Path(args.config))
-    db_path = Path(args.db or cfg["files"]["classification_db"])
-    cache_path = Path(args.cache or cfg["files"]["cache"])
-    if not db_path.is_absolute():
-        db_path = Path(__file__).resolve().parent / db_path
-    if not cache_path.is_absolute():
-        cache_path = Path(__file__).resolve().parent / cache_path
-
-    def progress() -> Tuple[int, int]:
-        reservations = 0
-        cached = 0
-        if db_path.is_file():
-            with closing(sqlite3.connect(
-                f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True
-            )) as cx:
-                if cx.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
-                              "AND name='collection_attempt_reservations'").fetchone():
-                    reservations = cx.execute(
-                        "SELECT COUNT(*) FROM collection_attempt_reservations"
-                    ).fetchone()[0]
-        if cache_path.is_file():
-            with closing(sqlite3.connect(
-                f"file:{cache_path.resolve().as_posix()}?mode=ro", uri=True
-            )) as cx:
-                if cx.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
-                              "AND name='tavily_cache'").fetchone():
-                    cached = cx.execute("SELECT COUNT(*) FROM tavily_cache").fetchone()[0]
-        return reservations, cached
-
-    print(f"OPENSERP CAMPANHA | total solicitado={total} SKU(s) "
-          f"| lotes maximos={math.ceil(total / 10)} | ate 10 SKUs por lote "
-          "| ate 1 Search por SKU | cache central unico", flush=True)
-    completed = 0
-    for batch_no in range(1, math.ceil(total / 10) + 1):
-        size = min(10, total - completed)
-        before = progress()
-        print(f"OPENSERP LOTE {batch_no}/{math.ceil(total / 10)} "
-              f"| solicitados={size} | progresso={completed}/{total}", flush=True)
-        proc = subprocess.run(
-            [sys.executable, str(Path(__file__).resolve()), *child_argv(size)],
-            cwd=Path(__file__).resolve().parent,
-            check=False,
-        )
-        if proc.returncode != 0:
-            print(f"OPENSERP CAMPANHA PAUSADA | lote={batch_no} "
-                  f"| retorno={proc.returncode} | confirme cache e ledger; sem retry",
-                  flush=True)
-            return proc.returncode
-        after = progress()
-        delta_reservations = after[0] - before[0]
-        delta_cached = after[1] - before[1]
-        if delta_reservations < 0 or delta_cached < 0:
-            raise RuntimeError("OPENSERP_CAMPANHA_CENTRAL_COUNTER_REGRESSION")
-        # A reserved SKU without a central RAW row is a failed persistence,
-        # not a completed campaign item. Pause before launching another batch.
-        if delta_reservations > delta_cached:
-            print(f"OPENSERP CAMPANHA PAUSADA | CACHE_NOT_CENTRALIZED "
-                  f"| reservas_novas={delta_reservations} | cache_novos={delta_cached} "
-                  "| recuperar artifact antes de prosseguir", flush=True)
-            return 3
-        advanced = delta_cached
-        if advanced == 0:
-            print(f"OPENSERP CAMPANHA ENCERRADA | sem novos SKUs elegiveis "
-                  f"| lotes concluídos={batch_no - 1} | progresso={completed}/{total}",
-                  flush=True)
-            return 0
-        completed += min(size, advanced)
-        print(f"OPENSERP LOTE FINALIZADO | lote={batch_no} "
-              f"| reservas_novas={delta_reservations} "
-              f"| cache_novos={delta_cached} | progresso={completed}/{total}",
-              flush=True)
-    print(f"OPENSERP CAMPANHA FINAL | processados_ou_reservados={completed}/{total}",
-          flush=True)
-    return 0
-
-
 def main() -> int:
     base = Path(__file__).resolve().parent
     args = interactive_menu(base) if len(sys.argv) == 1 else build_parser().parse_args()
-    if (args.mode in {"collect", "full"} and args.openserp_auto
-            and args.search_provider == "openserp"
-            and int(args.max_tavily_new or 0) > 10):
-        return _run_openserp_batched_campaign(args)
     setup_logging(args.verbose)
     os.chdir(base)
     cfg_path = (base / args.config).resolve() if not Path(args.config).is_absolute() else Path(args.config)
     rules_path = (base / args.rules).resolve() if not Path(args.rules).is_absolute() else Path(args.rules)
     env_info = load_env_file(base / ".env")
     cfg = read_json(cfg_path)
-    if safe(getattr(args, "openserp_artifact", "")):
-        cfg["_openserp_artifact_path"] = str(Path(args.openserp_artifact).resolve())
     collection_policy_name = args.collection_policy or safe((cfg.get("files", {}) or {}).get("collection_policy")) or "collection_quality_policy.json"
     collection_policy_path = (base / collection_policy_name).resolve() if not Path(collection_policy_name).is_absolute() else Path(collection_policy_name)
     collection_policy = read_json(collection_policy_path)
@@ -12524,17 +12302,7 @@ def main() -> int:
             return 2
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
-    # OpenSERP auto/collect uses the same protected baseline inventory and
-    # central precollection planner. The pre-sync previously rewrote both
-    # 34k-row Excel workbooks BEFORE even downloading the already completed
-    # GitHub artifact; the official post-collect sync still runs once after
-    # the evidence cache is persisted. Full/classification retains pre-sync.
-    openserp_collect_auto = (
-        args.mode == "collect"
-        and _resolve_search_provider(args, cfg) == "openserp"
-        and bool(getattr(args, "openserp_auto", False))
-    )
-    if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and args.auto_providers) and not openserp_collect_auto:
+    if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and args.auto_providers):
         files_cfg = cfg.get("files", {}) or {}
         input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
         master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
@@ -12559,9 +12327,6 @@ def main() -> int:
             LOG.error("INPUT BASELINE SYNC FAILED; interrompendo para preservar os dados: %s", exc)
             return 2
 
-    if args.mode in {"collect", "full"} and _resolve_search_provider(args, cfg) == "openserp" and args.openserp_auto:
-        if not _prepare_openserp_automatic_batch(args, cfg):
-            return 0
     if args.mode == "sync-input":
         return 0
     if args.mode == "inventory":
@@ -12601,7 +12366,7 @@ def main() -> int:
         if not completed:
             LOG.warning("PROCESSO COMPLETO interrompido após a coleta. Classificação não iniciada.")
             return 3
-        if args.auto_providers or provider in {"openserp", "scraperapi"}:
+        if args.auto_providers or provider == "scraperapi":
             targets = cfg.pop("_experimental_collected_targets", [])
             if not targets:
                 LOG.warning("EXPERIMENTAL FULL: nenhum SKU com evidência curada nesta coleta; "
