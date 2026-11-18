@@ -158,6 +158,16 @@ def _unverified_ai_overview(staging: dict, path, brand: str, model: str, query: 
     # Google generated text is not independently verified product evidence.
     # Keep it in audit metadata only, with explicit flags and a bounded size.
     body = body[:8000]
+    for terminator in (
+        "AI responses may include mistakes.",
+        "Copied to clipboard",
+        "A copy of this chat will be included.",
+    ):
+        index = body.find(terminator)
+        if index >= 0:
+            body = body[:index].strip()
+    if not body:
+        return None
     # Hypotheses for review are lexical hints, not canonical taxonomy labels.
     import re
     hints = (
