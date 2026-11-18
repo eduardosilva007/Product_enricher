@@ -82,40 +82,17 @@ class ProviderExtensionTests(unittest.TestCase):
     def test_menu_openserp_is_explicitly_staged_no_live_search(self):
         from unittest.mock import patch
         from pipeline_produtos import interactive_menu
-        responses = iter(("3", "5", "3", "3", "1", "N"))
+        responses = iter(("3", "5"))
         with patch("builtins.input", side_effect=lambda *_: next(responses)):
-            args = interactive_menu(ROOT)
-        self.assertEqual(args.mode, "full")
-        self.assertEqual(args.search_provider, "openserp")
-        self.assertTrue(args.openserp_live)
-        self.assertEqual(args.openserp_artifact, "")
-        self.assertFalse(args.auto_providers)
+            with self.assertRaisesRegex(RuntimeError, "OPENSERP_GITHUB_ACTIONS_ONLY"):
+                interactive_menu(ROOT)
 
-    def test_menu_simplified_maintenance_keeps_recovery(self):
+    def test_simplified_menu_routes_maintenance(self):
         from unittest.mock import patch
         from pipeline_produtos import interactive_menu
-        with patch("builtins.input",side_effect=["4","11"]):
-            args=interactive_menu(ROOT)
-        self.assertEqual(args.mode,"audit-central-cache")
-
-    def test_openserp_live_one_get_and_normalized_evidence(self):
-        from types import SimpleNamespace
-        from unittest.mock import patch
-        from pipeline_produtos import _provider_request_once, CollectionRequestBudget
-        cfg={"_openserp_live":True,"_openserp_engine":"google"}
-        response=SimpleNamespace(status_code=200,json=lambda:{
-            "results":[{"type":"organic","rank":1,"title":"STIHL FS250",
-                        "url":"https://example.com/stihl-fs250","snippet":"Brush cutter"}]})
-        with patch("requests.get",return_value=response) as get:
-            rows,usage=_provider_request_once(
-                "openserp","STIHL FS250",cfg,SimpleNamespace(wait=lambda:None),
-                CollectionRequestBudget(provider="openserp"))
-        self.assertEqual(get.call_count,1)
-        self.assertEqual(usage["network_requests"],1)
-        self.assertEqual(usage["requests"],1)
-        self.assertEqual(len(rows),1)
-        self.assertEqual(rows[0]["url"],"https://example.com/stihl-fs250")
-        self.assertIn("127.0.0.1:7000/google/search",get.call_args.args[0])
+        with patch("builtins.input", side_effect=["4", "11"]):
+            args = interactive_menu(ROOT)
+        self.assertEqual(args.mode, "audit-central-cache")
 
     def test_staging_script_compiles(self):
         ast.parse((ROOT / "import_openserp_staging.py").read_text(encoding="utf-8"))
