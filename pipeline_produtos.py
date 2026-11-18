@@ -3088,6 +3088,28 @@ def search_product_once(
             })
 
     curated = _dedupe_curated(curated)
+    # Only insufficient independently verified evidence triggers optional NER.
+    # The result is quarantined in _search_meta, NEVER in curated_results,
+    # evidence_cache or semantic/classification inputs.
+    if provider == "openserp" and isinstance(usage.get("ai_overview_unverified"), dict):
+        if query_ok and not curated:
+            from openserp_ai_gliner import extract_unverified_context
+            overview = extract_unverified_context(
+                usage["ai_overview_unverified"],
+                model_name=os.getenv("GLINER_MODEL_PATH", ""),
+            )
+            usage["ai_overview_unverified"] = overview
+            extraction = (overview or {}).get("entity_extraction") or {}
+            LOG.info("OPENSERP GLINER | sku=%s %s | status=%s | segments=%s | entities=%s "
+                     "| source_trust=UNVERIFIED",
+                     brand, model, safe(extraction.get("status")),
+                     extraction.get("segments_processed", 0),
+                     sum(len(items) for items in (extraction.get("entities") or {}).values()))
+        else:
+            usage["ai_overview_unverified"]["entity_extraction"] = {
+                "status": "SKIPPED_VERIFIED_EVIDENCE_AVAILABLE" if curated else "SKIPPED_QUERY_GATE",
+                "verified": False,
+            }
     # TF-IDF char 2-5 is ONLY a tie-breaker among structurally approved
     # evidence. It can never promote a rejected/weak-identity candidate.
     if bool((cfg.get("identity", {}) or {}).get("char_tfidf_enabled", False)) and curated:
