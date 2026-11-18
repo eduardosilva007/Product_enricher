@@ -45,7 +45,15 @@ def audit(raw_path: Path, brand: str, model: str, model_path: str) -> dict:
             "brand": brand, "model": model, "status": "NO_AI_OVERVIEW",
             "api_calls": 0, "official_writes": 0
         }
-    enriched = extract_unverified_context(overview, model_name=model_path)
+    # Reuse one loaded model for both comparisons (avoid duplicated inference setup).
+    shared_factory = None
+    if model_path.strip():
+        from v42_adapters import GLiNEREntityExtractor
+        extractor = GLiNEREntityExtractor(model_path)
+        shared_factory = lambda _: extractor
+    enriched = extract_unverified_context(
+        overview, model_name=model_path, extractor_factory=shared_factory
+    )
     extraction = enriched.get("entity_extraction", {})
     # Offline-only A/B: compare full noisy Google summary against its opening
     # descriptive passage. Never use this passage alone for source validation.
@@ -67,7 +75,8 @@ def audit(raw_path: Path, brand: str, model: str, model_path: str) -> dict:
     opening = lead[:boundary.start()].strip() if boundary else lead.strip()
     opening = opening or lead
     opening_result = extract_unverified_context(
-        {**overview, "text": opening}, model_name=model_path
+        {**overview, "text": opening}, model_name=model_path,
+        extractor_factory=shared_factory,
     )
     opening_extraction = opening_result.get("entity_extraction", {})
     comparison = {
