@@ -284,13 +284,14 @@ class ProviderExtensionTests(unittest.TestCase):
 
     def test_serper_quota_recovery_preserves_unknown_and_audit(self):
         import sqlite3
+        from contextlib import closing
         from types import SimpleNamespace
         from pipeline_produtos import (
             recover_confirmed_serper_quota_reservations, PreCollectionPlan,
         )
         with tempfile.TemporaryDirectory() as folder:
             db = Path(folder) / "central_test.sqlite"
-            with sqlite3.connect(db) as con:
+            with closing(sqlite3.connect(db)) as con, con:
                 con.executescript("""
                     CREATE TABLE collection_attempt_reservations (
                         business_key TEXT PRIMARY KEY, account TEXT, provider TEXT);
@@ -325,7 +326,7 @@ class ProviderExtensionTests(unittest.TestCase):
             )
             self.assertEqual(recover_confirmed_serper_quota_reservations(db, plan),2)
             self.assertEqual(recover_confirmed_serper_quota_reservations(db, plan),0)
-            with sqlite3.connect(db) as con:
+            with closing(sqlite3.connect(db)) as con, con:
                 self.assertEqual(con.execute("SELECT COUNT(*) FROM collection_attempt_reservations").fetchone()[0],3)
                 self.assertEqual(con.execute("SELECT COUNT(*) FROM events WHERE event_type='SERPER_LIMIT'").fetchone()[0],3)
                 self.assertEqual(con.execute("SELECT reason FROM collection_disabled_accounts WHERE account='serper:1'").fetchone()[0],"SERPER_LIMIT_HISTORICAL")
