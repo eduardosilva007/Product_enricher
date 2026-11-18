@@ -31,6 +31,35 @@ MAX_ZIP_BYTES = 30_000_000
 MAX_MEMBER_BYTES = 20_000_000
 
 
+def github_token():
+    """Use an existing environment credential, or a token from the local .env.
+
+    This intentionally reads only GH_TOKEN/GITHUB_TOKEN, without exporting
+    unrelated secrets. Existing process environment takes precedence.
+    """
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        token = os.environ.get(name, "").strip()
+        if token:
+            return token
+    env_file = Path(__file__).resolve().parent / ".env"
+    if not env_file.is_file():
+        return ""
+    for raw_line in env_file.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        if name not in {"GH_TOKEN", "GITHUB_TOKEN"}:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        if value:
+            return value
+    return ""
+
+
 def key(brand, model):
     import re
     return (re.sub(r"[^a-z0-9]", "", brand.casefold()),
@@ -209,7 +238,7 @@ def main():
                           "batch_size": args.batch_size, "api_calls_max": total_batches *
                           args.max_api_calls_per_batch, "production_writes": False}, indent=2))
         return
-    token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
+    token = github_token()
     if not token:
         raise RuntimeError("GITHUB_TOKEN_REQUIRED_IN_ENV_NO_INSTALL")
     directory = Path(args.campaign_dir).resolve()
