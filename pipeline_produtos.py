@@ -1961,6 +1961,11 @@ def _provider_credentials(provider: str, cfg: Dict[str, Any]) -> Dict[str, str]:
         if not api_key:
             raise RuntimeError(f"{key_env} não configurada no .env")
         return {"api_key": api_key, "key_env": key_env}
+    if provider == "openserp" and cfg.get("_openserp_live"):
+        engine = safe(cfg.get("_openserp_engine") or "google").lower()
+        if engine not in {"google","bing","duckduckgo"}:
+            raise ValueError("OPENSERP_ENGINE_INVALID")
+        return {"base_url":"http://127.0.0.1:7000","engine":engine}
     if provider == "openserp":
         artifact = safe(cfg.get("_openserp_artifact_path")) or safe(pcfg.get("artifact_path"))
         if not artifact:
@@ -2869,6 +2874,46 @@ def _provider_request_once(
             },
         }
 
+    if provider == "openserp" and cfg.get("_openserp_live"):
+        # The existing OpenSERP lab uses this live HTTP endpoint.
+        # One request per SKU, no retries, fallback or second search engine.
+        import requests
+        from search_provider_extensions import normalize_openserp
+        budget.reserve()
+        limiter.wait()
+        try:
+            response = requests.get(
+                creds["base_url"] + "/" + creds["engine"] + "/search",
+                params={"text":query, "limit":min(10,max_results)},
+                timeout=100, allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError("OPENSERP_OUTCOME_UNKNOWN: "+type(exc).__name__) from exc
+        if response.status_code != 200:
+            raise OperationalPause("OPENSERP_HTTP_ERROR",f"OpenSERP HTTP {response.status_code}")
+        try:
+            payload = response.json()
+            if not isinstance(payload,dict) or not isinstance(payload.get("results"),list):
+                raise ValueError("OPENSERP_LIVE_SCHEMA_INVALID")
+            if (payload.get("meta") or {}).get("engines_failed"):
+                raise ValueError("OPENSERP_ENGINE_FAILED")
+            organic = [
+                {"rank":x.get("rank"),"title":x.get("title"),
+                 "url":x.get("url"),"snippet":x.get("snippet")}
+                for x in payload["results"]
+                if isinstance(x,dict) and x.get("type")=="organic"
+            ]
+            results = normalize_openserp({"status":"CAPTURED","organic":organic})
+        except (ValueError,TypeError,KeyError) as exc:
+            raise OperationalPause("OPENSERP_SCHEMA",str(exc)) from exc
+        return results,{
+            "requests":budget.used,"network_requests":budget.used,
+            "provider_units":1,"reported_credits":0,
+            "max_results_requested":min(10,max_results),
+            "raw_result_count":len(results),"raw_content_requested":False,
+            "query_meta":{"submitted_query":query,"engine":creds["engine"]},
+        }
+
     if provider == "openserp":
         # Um artefato previamente capturado = uma busca lógica por SKU.
         # ZERO novas requests Search; reservas de SKU impedem repetição silenciosa.
@@ -3026,7 +3071,7 @@ def search_product_once(
         raise ValueError("Query de coleta vazia")
 
     budget = CollectionRequestBudget(provider=provider)
-    if provider == "openserp":
+    if provider == "openserp" and not cfg.get("_openserp_live"):
         cfg["_openserp_target"] = (brand, model)
     raw_results, usage = _provider_request_once(provider, query, cfg, limiter, budget)
     if budget.used != 1:
@@ -3619,7 +3664,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     # Historical Serper quota failures are not product evidence. Unlock only
     # explicitly confirmed no-credit responses, preserving all audit events.
     artifact_keys = None
-    if provider == "openserp":
+    if provider == "openserp" and not cfg.get("_openserp_live"):
         staging = read_json(Path(_provider_credentials("openserp", cfg)["artifact_path"]))
         cohorts = staging.get("cohorts") if isinstance(staging, dict) else None
         if not isinstance(cohorts, list):
@@ -3677,7 +3722,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             print(f"RECOLETA AUTORIZADA | RAW_EMPTY={raw_empty_count} | fila limitada={len(plan.candidates)}")
         else:
             print("RECOLETA RAW_EMPTY RECUSADA. Nenhuma request por estes registros.")
-    if provider == "openserp":
+    if provider == "openserp" and not cfg.get("_openserp_live"):
         # Match source input + central cache + durable attempt ledger BEFORE reservation.
         # Never collect arbitrary first-N SKUs not contained in the staged evidence.
         from search_provider_extensions import load_openserp_staging
@@ -3730,8 +3775,10 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     print("Provider failover............................... DESABILITADO")
     print("Search.......................................... ABERTO / SEM DOMAIN-COUNTRY-LANGUAGE FILTER")
     print("Stage 1 recebe.................................. SOMENTE curated_results")
-    print(f"Requests máximas planejadas..................... {0 if provider == 'openserp' else len(candidates)}")
-    if provider == "openserp":
+    print(f"Requests máximas planejadas..................... {0 if provider == 'openserp' and not cfg.get('_openserp_live') else len(candidates)}")
+    if provider == "openserp" and cfg.get("_openserp_live"):
+        print(f"Buscas OpenSERP ao vivo........................ {len(candidates)}")
+    elif provider == "openserp":
         print(f"Artefatos OpenSERP a reutilizar................. {len(candidates)}")
     print(f"Relatório pré-coleta............................ {pre_report}")
     print("=" * 86)
@@ -11293,7 +11340,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--recovery-ledger", default="", help="Arquivo de chaves ja tentadas pela recuperacao, para execucao sequencial em lotes.")
     p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
     p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata", "scraperapi", "openserp"], default="")
-    p.add_argument("--openserp-artifact", default="", help="Artefato OpenSERP staging local; nenhuma nova Search")
+    p.add_argument("--openserp-artifact", default="", help="Replay de staging opcional")
+    p.add_argument("--openserp-live", action="store_true", help="Busca HTTP ao vivo no servidor local OpenSERP")
+    p.add_argument("--openserp-engine", choices=["google","bing","duckduckgo"], default="google")
     p.add_argument("--recollect-empty", action="store_true")
     p.add_argument("--auto-providers", action="store_true", help="Rotação entre contas/provedores apenas para SKUs distintos")
     p.add_argument("--recollect-low-evidence", action="store_true")
@@ -11349,7 +11398,7 @@ def _menu_search_provider() -> str:
         print("2 - SERPER")
         print("3 - BRIGHT DATA")
         print("4 - SCRAPERAPI (MANUAL / EXPERIMENTAL)")
-        print("5 - OPENSERP (IMPORTAR BUSCAS JA CAPTURADAS / SEM PESQUISA AO VIVO)")
+        print("5 - OPENSERP (BUSCA NOVA / 1 A 10 SKUS)")
         print("6 - AUTOMATICO (TAVILY / BRIGHT DATA / SERPER: ROTACAO ENTRE CONTAS)")
         raw = input("Selecione [1/2/3/4/5/6] (ENTER = 6 / AUTOMATICO): ").strip()
         if not raw:
@@ -11382,20 +11431,33 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     print(" COLLECTION HARD RULE: 1 produto = no máximo 1 request | sem retry/fallback/extract/advanced")
     print(" Revisão B.I=OK = HARD LOCK ABSOLUTO | novos itens mantêm Revisão B.I vazia")
     print("=" * 86)
-    print(f"1 - COLETA / EXTRAÇÃO {COLLECTION_LABEL} (1 REQUEST/PRODUTO)")
-    print("2 - CLASSIFICAÇÃO")
-    print("3 - PROCESSO COMPLETO (COLETA -> CURADORIA -> CLASSIFICACAO)")
-    print("4 - RECUPERAR PENDÊNCIAS DO CACHE (SEM BUSCA)")
-    print("5 - AUDITORIA / REPARO BASE (SEM CLEF)")
-    print("6 - CURAR CACHE LEGADO (SEM BUSCA / 0 CRÉDITOS)")
-    print("7 - EXPORTAR EVIDENCE BUNDLE (SEM BUSCA / 0 CRÉDITOS)")
-    print("9 - CENTRALIZAR CACHE DOS PILOTOS E GRAVAR BASE FINAL (0 APIS)")
-    print("10 - LIMPAR BASE FINAL: 11 COLUNAS (SEM BUSCA / SEM CLASSIFICACAO)")
-    print("11 - AUDITAR / RECUPERAR CLASSIFICACOES JA COLETADAS (0 APIS)")
-    print("12 - VALIDAR CHAVES / PROCV NA BASE FINAL (0 APIS)")
+    print("\\nMENU PRINCIPAL")
+    print("1 - COLETAR PRODUTOS")
+    print("2 - CLASSIFICAR PRODUTOS")
+    print("3 - PROCESSO COMPLETO")
+    print("4 - FERRAMENTAS / MANUTENCAO")
     print("0 - SAIR")
-    print("8 - SAIR (ATALHO LEGADO)")
-    op = input("Opção: ").strip()
+    op = input("Opcao: ").strip()
+    if op == "0":
+        raise SystemExit(0)
+    if op == "4":
+        print("\\nFERRAMENTAS / MANUTENCAO")
+        print("4 - RECUPERAR PENDENCIAS DO CACHE")
+        print("5 - AUDITORIA / REPARO BASE")
+        print("6 - CURAR CACHE LEGADO")
+        print("7 - EXPORTAR EVIDENCE BUNDLE")
+        print("9 - CENTRALIZAR CACHE")
+        print("10 - LIMPAR BASE FINAL")
+        print("11 - AUDITAR CLASSIFICACOES")
+        print("12 - VALIDAR CHAVES / PROCV")
+        print("0 - SAIR")
+        op = input("Ferramenta: ").strip()
+        if op == "0":
+            raise SystemExit(0)
+        if op not in {"4","5","6","7","9","10","11","12"}:
+            raise ValueError("Ferramenta invalida")
+    elif op not in {"1","2","3"}:
+        raise ValueError("Opcao invalida")
     if op == "1":
         provider = _menu_search_provider()
         # Diferente do piloto de classificacao (ENTER=100), coleta em branco
@@ -11411,8 +11473,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         else:
             argv += ["--search-provider", provider]
         if provider == "openserp":
-            artifact = input("Artefato OpenSERP (ENTER = openserp_staging.json): ").strip() or "openserp_staging.json"
-            argv += ["--openserp-artifact", artifact]
+            argv += ["--openserp-live"]
         if provider in {"openserp", "scraperapi", "auto"} and not 1 <= limite <= 10:
             raise ValueError("PILOTO_EXIGE_LIMITE_EXPLICITO_1_A_10")
         if limite:
@@ -11436,8 +11497,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         else:
             argv += ["--search-provider", provider]
         if provider == "openserp":
-            artifact = input("Artefato OpenSERP (ENTER = openserp_staging.json): ").strip() or "openserp_staging.json"
-            argv += ["--openserp-artifact", artifact]
+            argv += ["--openserp-live"]
         if provider in {"openserp", "scraperapi", "auto"}:
             if not (1 <= limite_search <= 10 and 1 <= limite_class <= 10):
                 raise ValueError("PILOTO_EXIGE_LIMITES_1_A_10")
@@ -12072,6 +12132,11 @@ def main() -> int:
     cfg = read_json(cfg_path)
     if safe(getattr(args, "openserp_artifact", "")):
         cfg["_openserp_artifact_path"] = str(Path(args.openserp_artifact).resolve())
+    if bool(getattr(args,"openserp_live",False)):
+        if safe(getattr(args,"openserp_artifact","")):
+            raise ValueError("OPENSERP_LIVE_ARTIFACT_CONFLICT")
+        cfg["_openserp_live"] = True
+        cfg["_openserp_engine"] = safe(args.openserp_engine) or "google"
     collection_policy_name = args.collection_policy or safe((cfg.get("files", {}) or {}).get("collection_policy")) or "collection_quality_policy.json"
     collection_policy_path = (base / collection_policy_name).resolve() if not Path(collection_policy_name).is_absolute() else Path(collection_policy_name)
     collection_policy = read_json(collection_policy_path)
