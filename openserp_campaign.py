@@ -86,7 +86,7 @@ def request(token, method, route, payload=None):
             return {}
         if response.headers.get("Content-Type", "").startswith("application/zip"):
             return body
-        if body.startswith(b"PK\\x03\\x04"):
+        if body.startswith(bytes((80, 75, 3, 4))):
             return body
         return json.loads(body)
 
@@ -246,12 +246,17 @@ def main():
             # The durable intent is written BEFORE the dispatch. If an HTTP
             # response is lost, reruns find the nonce rather than dispatch again.
             batch["status"] = "DISPATCH_INTENT"
+            batch["dispatch_attempted"] = False
             write_state(state_path, state)
         if batch["status"] == "DISPATCH_INTENT":
             existing = find_run(token, batch["nonce"])
             if not existing:
-                # Dispatch ambiguity must be reconciled manually after any
-                # network failure; intentionally do not automatically retry.
+                if batch.get("dispatch_attempted"):
+                    raise RuntimeError("UNCERTAIN_DISPATCH_NO_RETRY_RECONCILE_MANUALLY")
+                # Durably mark before network I/O: a lost POST response must
+                # never cause a silent duplicate search on resume.
+                batch["dispatch_attempted"] = True
+                write_state(state_path, state)
                 payload = {"ref": BRANCH, "inputs": {
                     "engine": args.engine, "run_nonce": batch["nonce"],
                     "sku_lines": "\n".join(x["brand"] + "|" + x["model"]
