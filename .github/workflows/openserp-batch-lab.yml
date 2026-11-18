@@ -46,7 +46,7 @@ jobs:
       - name: Verify exact workflow branch and SHA
         shell: bash
         env:
-          EXPECTED_REF: refs/heads/feature/openserp-orchestrator-safe-20261117
+          EXPECTED_REF: refs/heads/fix/openserp-durable-failure-20261118
         run: |
           set -euo pipefail
           echo "Executing ref: $GITHUB_REF"
