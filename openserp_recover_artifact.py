@@ -54,9 +54,11 @@ def recover(*, artifact: Path, brand: str, model: str, commit: bool,
             "SELECT provider, reserved_at FROM collection_attempt_reservations "
             "WHERE business_key=?", (key,)
         ).fetchall()
-    # Recovery of a previously attempted SKU, NOT an alternate collection path.
-    if not reservations:
-        raise RuntimeError("REPLAY_NO_PRIOR_ATTEMPT; use normal collection planner")
+    # This replays a captured artifact, NOT another Search request.
+    # A reservation is useful audit history, but never a prerequisite:
+    # GitHub transport may have completed before the central ledger reserved.
+    # The staging SKU/query and the central-cache absence are the hard gates.
+    # Do not create or delete reservations during recovery.
     files = cfg.get("files", {})
     master = Path(files.get("master", ""))
     final = Path(files.get("final", ""))
@@ -77,6 +79,7 @@ def recover(*, artifact: Path, brand: str, model: str, commit: bool,
     rows, meta = load_openserp_staging(str(artifact), brand, model, query)
     # The source-only pilot must be auditable even with zero accepted sources.
     result = {
+        "recovery_kind": "EXISTING_ARTIFACT_NO_SEARCH",
         "brand": brand, "model": model, "business_key": key,
         "artifact_sha256": meta["artifact_sha256"],
         "staged_raw_results": len(rows),
