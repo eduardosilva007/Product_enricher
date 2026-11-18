@@ -143,6 +143,38 @@ class CampaignSafetyTests(unittest.TestCase):
         self.assertIn("and not openserp_collect_auto:", source)
         self.assertIn('if completed and not args.auto_providers:', source)
 
+    def test_staging_query_separator_normalization_kSB(self):
+        from search_provider_extensions import _query_identity, load_openserp_staging
+        self.assertEqual(_query_identity("KSB MOVITEC VS F 2/4 B"),
+                         _query_identity("KSB MOVITEC VS F 2 4 B"))
+        self.assertNotEqual(_query_identity("KSB MOVITEC VS F 2 5 B"),
+                            _query_identity("KSB MOVITEC VS F 2 4 B"))
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "staging.json"
+            p.write_text(json.dumps({
+                "schema": "openserp-staging-v1",
+                "promotion_allowed": False,
+                "cohorts": [{
+                    "provider": "openserp", "status": "STAGED_REVIEW_REQUIRED",
+                    "brand": "KSB", "model": "MOVITEC VS F 2/4 B",
+                    "query": "KSB MOVITEC VS F 2/4 B",
+                    "original_provider_query": "KSB MOVITEC VS F 2/4 B",
+                    "normalized_results": [{
+                        "title": "KSB MOVITEC VS F 2/4 B",
+                        "url": "https://example.com/pump",
+                        "content": "", "_provider_position": 1
+                    }]
+                }]
+            }), encoding="utf-8")
+            rows, metadata = load_openserp_staging(
+                str(p), "KSB", "MOVITEC VS F 2/4 B",
+                "KSB MOVITEC VS F 2 4 B")
+            self.assertEqual(len(rows), 1)
+            with self.assertRaisesRegex(ValueError, "OPENSERP_QUERY_MISMATCH"):
+                load_openserp_staging(
+                    str(p), "KSB", "MOVITEC VS F 2/4 B",
+                    "KSB MOVITEC VS F 2 5 B")
+
     def test_wait_failure_fails_closed(self):
         with patch.object(campaign, "find_run", return_value={
             "id": 1234, "status": "completed", "conclusion": "failure"}):
