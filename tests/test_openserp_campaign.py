@@ -188,7 +188,8 @@ class CampaignSafetyTests(unittest.TestCase):
             hint = _unverified_ai_overview(
                 doc, Path(folder) / "openserp_staging.json",
                 "KSB", "MOVITEC VS F 2/4 B", "KSB MOVITEC VS F 2 4 B")
-            self.assertEqual(hint["type_hypothesis"], "CENTRIFUGAL PUMP")
+            self.assertEqual(hint["type_hypothesis"], "")
+            self.assertIn("centrifugal pump", hint["text"])
             self.assertEqual(hint["status"], "UNVERIFIED_CONTEXT_ONLY")
             self.assertFalse(hint["may_approve_identity"])
             self.assertFalse(hint["may_approve_classification"])
@@ -210,7 +211,8 @@ class CampaignSafetyTests(unittest.TestCase):
             overview = _unverified_ai_overview(
                 {}, Path(folder) / "openserp_staging.json",
                 brand, model, "KSB MOVITEC VS F 2 4 B")
-            self.assertEqual(overview["type_hypothesis"], "CENTRIFUGAL PUMP")
+            self.assertEqual(overview["type_hypothesis"], "")
+            self.assertIn("centrifugal pump", overview["text"])
 
     def test_ai_overview_mismatched_raw_sku_not_reused(self):
         from search_provider_extensions import _unverified_ai_overview
@@ -235,6 +237,59 @@ class CampaignSafetyTests(unittest.TestCase):
         self.assertIn('"ai_overview_unverified": usage.get(', source)
         self.assertIn('"curated_results": curated,', source)
         self.assertIn('"ai_overview_unverified": artifact_meta.get(', source)
+
+    def test_gliner_segmented_context_does_not_truncate(self):
+        from v42_adapters import GLiNEREntityExtractor
+        class FakeModel:
+            def __init__(self):
+                self.windows = []
+            def extract_entities(self, text, labels):
+                self.windows.append(text)
+                return {"entities": {"product_type": ["vertical multistage centrifugal pump"],
+                                     "manufacturer": ["KSB"],
+                                     "model": ["VSF 2/4 B"]}}
+        extractor = GLiNEREntityExtractor("fake")
+        fake = FakeModel()
+        extractor.model = fake
+        content = ("KSB Movitec is a vertical multistage centrifugal pump. " * 105)
+        result = extractor.extract_context(content)
+        self.assertGreater(result["segments_processed"], 1)
+        self.assertEqual(result["entities"]["manufacturer"], ["KSB"])
+        self.assertEqual(result["entities"]["product_type"], ["vertical multistage centrifugal pump"])
+        self.assertIn(content[-100:], fake.windows[-1])
+
+    def test_gliner_quarantine_and_failure_fallback(self):
+        from openserp_ai_gliner import extract_unverified_context
+        overview = {"source": "google_ai_overview", "text": "KSB centrifugal pump",
+                    "status": "UNVERIFIED_CONTEXT_ONLY"}
+        class FakeExtractor:
+            def __init__(self, model_name):
+                pass
+            def extract_context(self, text):
+                return {"entities": {"product_type": ["centrifugal pump"]},
+                        "segments_processed": 1}
+        result = extract_unverified_context(
+            overview, model_name="mock-model", extractor_factory=FakeExtractor)
+        self.assertEqual(result["entity_extraction"]["status"], "EXTRACTED")
+        self.assertFalse(result["may_approve_identity"])
+        self.assertFalse(result["may_approve_classification"])
+        self.assertNotIn("entity_extraction", overview)
+        self.assertEqual(extract_unverified_context(
+            overview, model_name="")["entity_extraction"]["status"],
+            "SKIPPED_MODEL_NOT_CONFIGURED")
+        class BrokenExtractor:
+            def __init__(self, model_name):
+                raise RuntimeError("offline model missing")
+        failed = extract_unverified_context(
+            overview, model_name="bad-model", extractor_factory=BrokenExtractor)
+        self.assertEqual(failed["entity_extraction"]["status"], "UNAVAILABLE")
+        self.assertNotIn("offline model missing", json.dumps(failed))
+
+    def test_gliner_only_if_source_sieve_lacks_curated_results(self):
+        source = (Path(__file__).resolve().parents[1] / "pipeline_produtos.py").read_text(encoding="utf-8-sig")
+        self.assertIn("if query_ok and not curated:", source)
+        self.assertIn("from openserp_ai_gliner import extract_unverified_context", source)
+        self.assertIn('"ai_overview_unverified": usage.get(', source)
 
     def test_wait_failure_fails_closed(self):
         with patch.object(campaign, "find_run", return_value={
