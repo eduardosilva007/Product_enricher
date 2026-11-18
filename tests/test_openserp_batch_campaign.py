@@ -33,8 +33,16 @@ class OpenSERPBatchCampaignTest(unittest.TestCase):
         ])
         self.issued = 0
 
+    def parse_child(self, argv):
+        # argv[0:2] are interpreter + script; parse aliases using the
+        # production parser rather than depending on a particular flag spelling.
+        parsed = pp.build_parser().parse_args(argv[2:])
+        self.assertTrue(parsed.openserp_auto)
+        self.assertEqual(parsed.search_provider, "openserp")
+        return parsed
+
     def callback(self, argv, **kwargs):
-        limit = int(argv[argv.index("--max-search-new") + 1])
+        limit = self.parse_child(argv).max_tavily_new
         self.issued += limit
         with closing(sqlite3.connect(self.db)) as cx, cx:
             for i in range(self.issued-limit, self.issued):
@@ -47,7 +55,7 @@ class OpenSERPBatchCampaignTest(unittest.TestCase):
     def test_twenty_five_skus_split_10_10_5(self):
         sizes = []
         def fake_run(argv, **kwargs):
-            sizes.append(int(argv[argv.index("--max-search-new") + 1]))
+            sizes.append(self.parse_child(argv).max_tavily_new)
             return self.callback(argv, **kwargs)
         with patch("subprocess.run", side_effect=fake_run):
             status = pp._run_openserp_batched_campaign(self.args)
@@ -77,7 +85,7 @@ class OpenSERPBatchCampaignTest(unittest.TestCase):
         self.args.max_items = 25
         caps = []
         def fake_run(argv, **kwargs):
-            caps.append(int(argv[argv.index("--max-items") + 1]))
+            caps.append(self.parse_child(argv).max_items)
             return self.callback(argv, **kwargs)
         with patch("subprocess.run", side_effect=fake_run):
             status = pp._run_openserp_batched_campaign(self.args)
