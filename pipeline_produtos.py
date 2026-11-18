@@ -12289,7 +12289,14 @@ def _run_openserp_batched_campaign(args: argparse.Namespace) -> int:
         delta_cached = after[1] - before[1]
         if delta_reservations < 0 or delta_cached < 0:
             raise RuntimeError("OPENSERP_CAMPANHA_CENTRAL_COUNTER_REGRESSION")
-        advanced = max(delta_reservations, delta_cached)
+        # A reserved SKU without a central RAW row is a failed persistence,
+        # not a completed campaign item. Pause before launching another batch.
+        if delta_reservations > delta_cached:
+            print(f"OPENSERP CAMPANHA PAUSADA | CACHE_NOT_CENTRALIZED "
+                  f"| reservas_novas={delta_reservations} | cache_novos={delta_cached} "
+                  "| recuperar artifact antes de prosseguir", flush=True)
+            return 3
+        advanced = delta_cached
         if advanced == 0:
             print(f"OPENSERP CAMPANHA ENCERRADA | sem novos SKUs elegiveis "
                   f"| lotes concluídos={batch_no - 1} | progresso={completed}/{total}",
