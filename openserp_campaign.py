@@ -25,7 +25,7 @@ import zipfile
 
 REPO = "eduardosilva007/Product_enricher"
 WORKFLOW = "openserp-batch-lab.yml"
-BRANCH = "feature/openserp-orchestrator-safe-20261117"
+BRANCH = "fix/openserp-durable-failure-20261118"
 MAX_BATCH = 10
 MAX_ZIP_BYTES = 30_000_000
 MAX_MEMBER_BYTES = 20_000_000
@@ -221,6 +221,10 @@ def preserve_failed_run(token, batch, folder):
         report["job_diagnostics_error"] = type(exc).__name__ + ":" + str(exc)[:180]
     try:
         raw = download_artifact(token, batch["run_id"])
+        # Keep the original ZIP for forensic recovery, including partial files.
+        # It is never imported automatically when the complete cohort fails.
+        (folder / "remote_artifact_quarantine.zip").write_bytes(raw)
+        report["raw_zip_sha256"] = hashlib.sha256(raw).hexdigest()
         # This check prevents importing partial or mismatched cohorts.
         report["artifact_sha256"] = unpack_checked(raw, folder, batch["skus"])
         report["artifact"] = "COMPLETE_VALIDATED"
