@@ -3468,7 +3468,7 @@ def _enforce_central_search_paths(args: argparse.Namespace, cfg: Dict[str, Any],
             raise ValueError("EXPERIMENTAL_LLM_CALL_CAP_REQUIRED: --max-api-calls 1..100")
         if not 1 <= int(getattr(args, "max_tokens", 0) or 0) <= 200000:
             raise ValueError("EXPERIMENTAL_TOKEN_CAP_REQUIRED: --max-tokens 1..200000")
-    if provider == "openserp":
+    if provider == "openserp" and not getattr(args, "openserp_auto", False):
         _provider_credentials("openserp", cfg)
 
 
@@ -11294,6 +11294,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
     p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata", "scraperapi", "openserp"], default="")
     p.add_argument("--openserp-artifact", default="", help="Artefato OpenSERP staging local; nenhuma nova Search")
+    p.add_argument("--openserp-auto", action="store_true", help="Selecionar pelo planner oficial e pesquisar via GitHub Actions antes da coleta central")
     p.add_argument("--recollect-empty", action="store_true")
     p.add_argument("--auto-providers", action="store_true", help="Rotação entre contas/provedores apenas para SKUs distintos")
     p.add_argument("--recollect-low-evidence", action="store_true")
@@ -11421,12 +11422,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         else:
             argv += ["--search-provider", provider]
         if provider == "openserp":
-            raise RuntimeError(
-                "OPENSERP_GITHUB_ACTIONS_ONLY: coletas novas em lotes de 1 a 10 "
-                "rodam no workflow openserp-batch-lab.yml (GitHub Actions). "
-                "A importacao de staging e separada; nao existe servidor "
-                "OpenSERP local integrado ao pipeline Windows."
-            )
+            argv += ["--openserp-auto", "--yes"]
         if provider in {"openserp", "scraperapi", "auto"} and not 1 <= limite <= 10:
             raise ValueError("PILOTO_EXIGE_LIMITE_EXPLICITO_1_A_10")
         if limite:
@@ -11450,12 +11446,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         else:
             argv += ["--search-provider", provider]
         if provider == "openserp":
-            raise RuntimeError(
-                "OPENSERP_GITHUB_ACTIONS_ONLY: coletas novas em lotes de 1 a 10 "
-                "rodam no workflow openserp-batch-lab.yml (GitHub Actions). "
-                "A importacao de staging e separada; nao existe servidor "
-                "OpenSERP local integrado ao pipeline Windows."
-            )
+            argv += ["--openserp-auto", "--yes"]
         if provider in {"openserp", "scraperapi", "auto"}:
             if not (1 <= limite_search <= 10 and 1 <= limite_class <= 10):
                 raise ValueError("PILOTO_EXIGE_LIMITES_1_A_10")
@@ -12079,6 +12070,88 @@ def _brightdata_slot_diagnostic() -> Tuple[str, str]:
     return configured, zone_status
 
 
+def _prepare_openserp_automatic_batch(args, cfg):
+    """Transport evidence for the official collection flow, not a second collector.
+
+    Selection delegates to the existing precollection planner, human locks,
+    cache and durable attempt reservations. No SQLite writes here: the normal
+    collect_products() performs reservations, curation and central persistence.
+    """
+    import csv
+    import subprocess
+    import hashlib
+    from contextlib import closing
+
+    if safe(getattr(args, "openserp_artifact", "")):
+        raise ValueError("OPENSERP_AUTO_REJECTS_MANUAL_ARTIFACT")
+    limit = int(getattr(args, "max_tavily_new", 0) or 0)
+    if not 1 <= limit <= 10:
+        raise ValueError("OPENSERP_AUTOMATIC_PILOT_LIMIT_REQUIRED_1_TO_10")
+
+    files = cfg["files"]
+    root = Path(__file__).resolve().parent
+    input_path = root / files["input"]
+    cache_path = root / files["cache"]
+    db_path = root / files["classification_db"]
+    protected = load_baseline_inventory(root / files["master"], root / files["final"])["processed"]
+    existing = set()
+    if db_path.is_file():
+        with closing(sqlite3.connect(db_path, timeout=30)) as conn:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='collection_attempt_reservations'"
+            ).fetchone()
+            if table:
+                existing = {r[0] for r in conn.execute(
+                    "SELECT business_key FROM collection_attempt_reservations"
+                )}
+    # Retain the current pilot policy: only NEW missing evidence, no forced
+    # RAW_EMPTY or weak-evidence recollection and no human-locked SKUs.
+    plan = build_precollection_plan(
+        input_path=input_path, cache_path=cache_path,
+        report_path=root / files.get("precollection_report", "Pre_Coleta.xlsx"),
+        recollect_empty=False, recollect_low_evidence=False,
+        cfg=cfg, max_tavily_new=limit, preserve_keys=protected,
+        exclude_attempted_keys=existing,
+    )
+    selected = list(plan.candidates)
+    if not selected:
+        LOG.info("OPENSERP AUTO | 0 SKUs elegíveis no precollection planner")
+        return False
+    keys = [(r.brand_original, r.model_original) for r in selected]
+    digest = hashlib.sha256(
+        json.dumps(keys, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:20]
+    # The campaign directory is a resumable transport checkpoint, not a
+    # second cache. Do not overwrite any prior artifact or campaign state.
+    campaign = root / ".runtime_cache" / "openserp" / digest
+    campaign.mkdir(parents=True, exist_ok=True)
+    manifest = campaign / "input_manifest.csv"
+    if not manifest.exists():
+        with manifest.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(("brand", "model"))
+            writer.writerows(keys)
+    else:
+        with manifest.open(encoding="utf-8", newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        if [(row["brand"], row["model"]) for row in rows] != keys:
+            raise RuntimeError("OPENSERP_CAMPAIGN_MANIFEST_DRIFT")
+    transport = campaign / "transport"
+    cmd = [sys.executable, str(root / "openserp_campaign.py"),
+           "--manifest", str(manifest),
+           "--campaign-dir", str(transport),
+           "--batch-size", str(len(selected)),
+           "--engine", "google", "--execute-live"]
+    LOG.info("OPENSERP AUTO | seleção pelo planner oficial=%d | lote=%s",
+             len(selected), digest)
+    subprocess.run(cmd, cwd=root, check=True)
+    staging = transport / "batch_0000" / "openserp_staging.json"
+    if not staging.is_file():
+        raise RuntimeError("OPENSERP_STAGING_NOT_RETURNED")
+    cfg["_openserp_artifact_path"] = str(staging.resolve())
+    return True
+
+
 def main() -> int:
     base = Path(__file__).resolve().parent
     args = interactive_menu(base) if len(sys.argv) == 1 else build_parser().parse_args()
@@ -12312,6 +12385,9 @@ def main() -> int:
             LOG.error("INPUT BASELINE SYNC FAILED; interrompendo para preservar os dados: %s", exc)
             return 2
 
+    if args.mode in {"collect", "full"} and _resolve_search_provider(args, cfg) == "openserp" and args.openserp_auto:
+        if not _prepare_openserp_automatic_batch(args, cfg):
+            return 0
     if args.mode == "sync-input":
         return 0
     if args.mode == "inventory":
