@@ -136,8 +136,8 @@ def ai_overview_unverified(payload: dict) -> dict | None:
         return {
             "source": "google_ai_overview",
             "status": "UNVERIFIED_CONTEXT_ONLY",
-            "text": body[:8000],
-            "truncated": len(body) > 8000,
+            "text": body,
+            "truncated": False,
             "may_approve_identity": False,
             "may_approve_classification": False,
         }
