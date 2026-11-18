@@ -1,8 +1,14 @@
 name: OpenSERP isolated batch lab
+run-name: openserp-${{ inputs.run_nonce }}
 
 on:
   workflow_dispatch:
     inputs:
+      run_nonce:
+        description: "Unique orchestration correlation ID (optional for manual runs)"
+        required: false
+        default: manual
+        type: string
       engine:
         description: "Search engine"
         required: true
