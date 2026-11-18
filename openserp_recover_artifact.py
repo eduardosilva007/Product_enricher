@@ -107,6 +107,20 @@ def recover(*, artifact: Path, brand: str, model: str, commit: bool,
         ).fetchone():
             raise RuntimeError("REPLAY_CACHE_CONCURRENT_WRITE")
         writer.put(brand, model, payload, archive_reason="OPENSERP_EXISTING_ARTIFACT_RECOVERY")
+        # A successful put is not sufficient: verify the authoritative cache
+        # row inside the same connection before reporting COMMITTED.
+        persisted = writer.conn.execute(
+            "SELECT response_json FROM tavily_cache WHERE cache_key=?",
+            ("v3|" + key,),
+        ).fetchone()
+        if persisted is None:
+            raise RuntimeError("REPLAY_POSTCOMMIT_CACHE_MISSING")
+        saved = json.loads(persisted[0])
+        saved_meta = saved.get("_search_meta") or {}
+        if (saved_meta.get("artifact_sha256") != meta["artifact_sha256"]
+                or int(saved_meta.get("network_requests", -1)) != 0
+                or len(saved.get("results") or []) != len(payload["results"])):
+            raise RuntimeError("REPLAY_POSTCOMMIT_INTEGRITY_FAILURE")
     finally:
         writer.close()
     result.update({
