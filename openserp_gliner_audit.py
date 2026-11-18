@@ -53,7 +53,7 @@ def audit(raw_path: Path, brand: str, model: str, model_path: str) -> dict:
     start = complete.find("AI Mode reply for ")
     if start >= 0:
         lead = complete[start:]
-        newline = lead.find("\\n")
+        newline = lead.find("\n")
         if newline >= 0:
             lead = lead[newline + 1:]
     else:
@@ -61,7 +61,7 @@ def audit(raw_path: Path, brand: str, model: str, model_path: str) -> dict:
     # Split at the generic explanation heading, not a product-specific label.
     import re
     boundary = re.search(
-        r"(?i)\\b(?:Breakdown of the Model Designation|Key Specifications for)\\b",
+        r"(?i)\b(?:Breakdown of the Model Designation|Key Specifications for)\b",
         lead,
     )
     opening = lead[:boundary.start()].strip() if boundary else lead.strip()
