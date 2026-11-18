@@ -87,6 +87,24 @@ class CampaignSafetyTests(unittest.TestCase):
                 campaign.execute_pipeline(Path(d), 1, 15, 30000, False, False)
                 self.assertEqual(run.call_count, 1)
 
+    def test_pipeline_native_openserp_is_wired_to_existing_collector(self):
+        import ast
+        source = Path(__file__).resolve().parents[1] / "pipeline_produtos.py"
+        text = source.read_text(encoding="utf-8-sig")
+        tree = ast.parse(text)
+        functions = {node.name: node for node in tree.body
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        self.assertIn("_prepare_openserp_automatic_batch", functions)
+        helper = ast.get_source_segment(text, functions["_prepare_openserp_automatic_batch"])
+        self.assertIn("build_precollection_plan(", helper)
+        self.assertIn("exclude_attempted_keys=existing", helper)
+        self.assertIn("load_baseline_inventory(", helper)
+        self.assertNotIn("TavilyWritableStore(", helper)
+        self.assertIn("def collect_products(", text)
+        self.assertIn('cfg["_openserp_artifact_path"]', helper)
+        self.assertIn('"--openserp-auto"', text)
+        self.assertNotIn("OPENSERP_GITHUB_ACTIONS_ONLY", text)
+
     def test_wait_failure_fails_closed(self):
         with patch.object(campaign, "find_run", return_value={
             "id": 1234, "status": "completed", "conclusion": "failure"}):
