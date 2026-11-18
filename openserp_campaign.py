@@ -146,13 +146,59 @@ def wait_run(token, nonce, max_seconds):
     raise RuntimeError("WORKFLOW_WAIT_TIMEOUT_NO_REDISPATCH")
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Expose the GitHub 302 so the PAT is never sent to blob storage."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _download_artifact_zip(token, artifact_id):
+    api_url = f"https://api.github.com/repos/{REPO}/actions/artifacts/{artifact_id}/zip"
+    req = urllib.request.Request(api_url, method="GET", headers={
+        "Authorization": "Bearer " + token,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "ProductEnricher-OpenSERP-Orchestrator",
+    })
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=45) as response:
+            # A direct ZIP response is also supported.
+            raw = response.read(MAX_ZIP_BYTES + 1)
+            if len(raw) > MAX_ZIP_BYTES:
+                raise RuntimeError("ARTIFACT_TOO_LARGE")
+            return raw
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (301, 302, 303, 307, 308):
+            raise
+        location = exc.headers.get("Location", "")
+        parsed = urllib.parse.urlsplit(location)
+        host = (parsed.hostname or "").lower()
+        # The redirect must go to HTTPS GitHub Actions storage, never to an
+        # arbitrary hostname. Never forward PAT/Authorization to the blob.
+        safe = (host == "results-receiver.actions.githubusercontent.com"
+                or host.endswith(".blob.core.windows.net"))
+        if parsed.scheme != "https" or not safe or parsed.username or parsed.password:
+            raise RuntimeError("UNTRUSTED_ARTIFACT_REDIRECT_HOST")
+        storage_request = urllib.request.Request(location, headers={
+            "User-Agent": "ProductEnricher-OpenSERP-Orchestrator",
+        })
+        with urllib.request.urlopen(storage_request, timeout=90) as response:
+            raw = response.read(MAX_ZIP_BYTES + 1)
+        if len(raw) > MAX_ZIP_BYTES:
+            raise RuntimeError("ARTIFACT_TOO_LARGE")
+        if not raw.startswith(bytes((80, 75, 3, 4))):
+            raise RuntimeError("ARTIFACT_NOT_ZIP")
+        return raw
+
+
 def download_artifact(token, run_id):
     response = request(token, "GET", f"/actions/runs/{run_id}/artifacts?per_page=100")
     items = [a for a in response.get("artifacts", [])
              if a.get("name") == f"openserp-batch-{run_id}" and not a.get("expired")]
     if len(items) != 1:
         raise RuntimeError("ARTIFACT_MISSING_OR_AMBIGUOUS")
-    return request(token, "GET", f"/actions/artifacts/{items[0]['id']}/zip")
+    return _download_artifact_zip(token, items[0]["id"])
 
 
 def unpack_checked(raw, folder, expected):
