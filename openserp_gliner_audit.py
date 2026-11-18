@@ -47,6 +47,41 @@ def audit(raw_path: Path, brand: str, model: str, model_path: str) -> dict:
         }
     enriched = extract_unverified_context(overview, model_name=model_path)
     extraction = enriched.get("entity_extraction", {})
+    # Offline-only A/B: compare full noisy Google summary against its opening
+    # descriptive passage. Never use this passage alone for source validation.
+    complete = overview.get("text", "")
+    start = complete.find("AI Mode reply for ")
+    if start >= 0:
+        lead = complete[start:]
+        newline = lead.find("\\n")
+        if newline >= 0:
+            lead = lead[newline + 1:]
+    else:
+        lead = complete
+    # Split at the generic explanation heading, not a product-specific label.
+    import re
+    boundary = re.search(
+        r"(?i)\\b(?:Breakdown of the Model Designation|Key Specifications for)\\b",
+        lead,
+    )
+    opening = lead[:boundary.start()].strip() if boundary else lead.strip()
+    opening = opening or lead
+    opening_result = extract_unverified_context(
+        {**overview, "text": opening}, model_name=model_path
+    )
+    opening_extraction = opening_result.get("entity_extraction", {})
+    comparison = {
+        "full_context": {
+            "status": extraction.get("status", "UNKNOWN"),
+            "characters": len(complete),
+            "entities": extraction.get("entities", {}),
+        },
+        "opening_description": {
+            "status": opening_extraction.get("status", "UNKNOWN"),
+            "characters": len(opening),
+            "entities": opening_extraction.get("entities", {}),
+        },
+    }
     return {
         "brand": brand,
         "model": model,
@@ -54,6 +89,7 @@ def audit(raw_path: Path, brand: str, model: str, model_path: str) -> dict:
         "status": extraction.get("status", "UNKNOWN"),
         "type_hypothesis": (extraction.get("entities") or {}).get("product_type", []),
         "entities": extraction.get("entities", {}),
+        "context_comparison": comparison,
         "segments_processed": extraction.get("segments_processed", 0),
         "ai_overview_characters": len(enriched.get("text", "")),
         "source": "google_ai_overview",
