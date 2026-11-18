@@ -2882,6 +2882,7 @@ def _provider_request_once(
             "network_requests": 0,
             "artifact_searches_reused": 1,
             "artifact_sha256": artifact_meta["artifact_sha256"],
+            "ai_overview_unverified": artifact_meta.get("ai_overview_unverified"),
             "provider_units": 0,
             "reported_credits": 0,
             "max_results_requested": len(results),
@@ -3181,6 +3182,9 @@ def search_product_once(
             "network_requests": int(usage.get("network_requests", budget.used)),
             "artifact_searches_reused": int(usage.get("artifact_searches_reused", 0)),
             "artifact_sha256": safe(usage.get("artifact_sha256")),
+            # Metadata only. Not a curated result, not an identity source, and
+            # never part of the Stage 1 or semantic classification evidence.
+            "ai_overview_unverified": usage.get("ai_overview_unverified") if provider == "openserp" else None,
             "max_requests_per_product": MAX_COLLECTION_REQUESTS_PER_PRODUCT,
             "exact_match": False,
             "include_domains": False,
