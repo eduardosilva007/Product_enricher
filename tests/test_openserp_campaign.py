@@ -291,6 +291,30 @@ class CampaignSafetyTests(unittest.TestCase):
         self.assertIn("from openserp_ai_gliner import extract_unverified_context", source)
         self.assertIn('"ai_overview_unverified": usage.get(', source)
 
+    def test_offline_gliner_audit_checks_sku_before_extracting(self):
+        from openserp_gliner_audit import audit
+        with tempfile.TemporaryDirectory() as folder:
+            raw = Path(folder) / "raw.json"
+            raw.write_text(json.dumps({
+                "query": {"text": "KSB MOVITEC VS F 2/4 B"},
+                "serp_features": [{
+                    "type": "ai_summary",
+                    "text": "KSB Movitec VSF 2/4 B is a multistage centrifugal pump."
+                }]
+            }), encoding="utf-8")
+            with patch("openserp_gliner_audit.extract_unverified_context",
+                       return_value={"text": "KSB", "entity_extraction": {
+                           "status": "EXTRACTED", "segments_processed": 1,
+                           "entities": {"product_type": ["centrifugal pump"]}}}) as extracted:
+                result = audit(raw, "KSB", "MOVITEC VS F 2/4 B", "mock-model")
+            self.assertEqual(result["type_hypothesis"], ["centrifugal pump"])
+            self.assertFalse(result["identity_approved"])
+            self.assertEqual(result["api_calls"], 0)
+            self.assertEqual(result["official_writes"], 0)
+            extracted.assert_called_once()
+            with self.assertRaisesRegex(ValueError, "RAW_ARTIFACT_SKU_IDENTITY_MISMATCH"):
+                audit(raw, "KSB", "MOVITEC VS F 2/5 B", "mock-model")
+
     def test_wait_failure_fails_closed(self):
         with patch.object(campaign, "find_run", return_value={
             "id": 1234, "status": "completed", "conclusion": "failure"}):
