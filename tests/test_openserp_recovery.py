@@ -72,11 +72,45 @@ class OpenSERPRecoveryTest(unittest.TestCase):
         with closing(sqlite3.connect(self.cache)) as cx, cx:
             self.assertEqual(cx.execute("SELECT COUNT(*) FROM tavily_cache").fetchone()[0], 0)
 
-    def test_missing_reservation_is_not_new_collection(self):
+    def test_missing_reservation_still_recovers_captured_artifact_without_search(self):
         with closing(sqlite3.connect(self.db)) as cx, cx:
             cx.execute("DELETE FROM collection_attempt_reservations")
-        with self.assertRaisesRegex(RuntimeError, "REPLAY_NO_PRIOR_ATTEMPT"):
-            self.invoke()
+        with patch("pipeline_produtos.load_baseline_inventory", return_value={"processed": set()}), \
+             patch("pipeline_produtos.search_product_once") as search:
+            report = self.invoke()
+        self.assertEqual(report["status"], "PREFLIGHT_OK")
+        self.assertEqual(report["previous_attempts"], [])
+        self.assertEqual(report["network_search_calls"], 0)
+        search.assert_not_called()
+        with closing(sqlite3.connect(self.db)) as cx, cx:
+            self.assertEqual(cx.execute(
+                "SELECT COUNT(*) FROM collection_attempt_reservations"
+            ).fetchone()[0], 0)
+
+    def test_commit_without_prior_reservation_keeps_ledger_unchanged(self):
+        with closing(sqlite3.connect(self.db)) as cx, cx:
+            cx.execute("DELETE FROM collection_attempt_reservations")
+        from hashlib import sha256
+        payload = {
+            "results": [{"title": "KSB pump", "url": "https://example.org/pump"}],
+            "_search_meta": {
+                "network_requests": 0, "artifact_searches_reused": 1,
+                "artifact_sha256": sha256(self.artifact.read_bytes()).hexdigest(),
+            },
+            "_collection": {
+                "state": "NO_TARGET_EVIDENCE", "curated_results": [],
+                "usage": {"requests": 1},
+            },
+        }
+        with patch("pipeline_produtos.load_baseline_inventory", return_value={"processed": set()}), \
+             patch("pipeline_produtos.search_product_once", return_value=payload):
+            report = self.invoke(commit=True)
+        self.assertTrue(report["committed"])
+        self.assertEqual(report["network_search_calls"], 0)
+        with closing(sqlite3.connect(self.db)) as cx, cx:
+            self.assertEqual(cx.execute(
+                "SELECT COUNT(*) FROM collection_attempt_reservations"
+            ).fetchone()[0], 0)
 
     def test_cannot_replay_other_model_or_override_prior_cache(self):
         with self.assertRaisesRegex(ValueError, "REPLAY_COHORT_IDENTITY_MISMATCH"):
