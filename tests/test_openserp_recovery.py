@@ -1,4 +1,5 @@
 import json
+from contextlib import closing
 import sqlite3
 import tempfile
 import unittest
@@ -22,9 +23,9 @@ class OpenSERPRecoveryTest(unittest.TestCase):
         self.brand = "KSB"
         self.model = "MOVITEC VS F 2/4 B"
         self.key = pp.business_key(self.brand, self.model)
-        with sqlite3.connect(self.cache) as cx:
+        with closing(sqlite3.connect(self.cache)) as cx, cx:
             cx.execute("CREATE TABLE tavily_cache(cache_key TEXT PRIMARY KEY, brand TEXT, model TEXT, response_json TEXT, created_at TEXT)")
-        with sqlite3.connect(self.db) as cx:
+        with closing(sqlite3.connect(self.db)) as cx, cx:
             cx.execute("CREATE TABLE collection_attempt_reservations(business_key TEXT PRIMARY KEY, account TEXT, provider TEXT, reserved_at TEXT)")
             cx.execute("INSERT INTO collection_attempt_reservations VALUES (?,?,?,?)",
                        (self.key, "single:tavily", "tavily", "2026-11-17 14:01:57"))
@@ -68,11 +69,11 @@ class OpenSERPRecoveryTest(unittest.TestCase):
         self.assertEqual(report["staged_raw_results"], 1)
         self.assertEqual(report["network_search_calls"], 0)
         self.assertFalse(report["committed"])
-        with sqlite3.connect(self.cache) as cx:
+        with closing(sqlite3.connect(self.cache)) as cx, cx:
             self.assertEqual(cx.execute("SELECT COUNT(*) FROM tavily_cache").fetchone()[0], 0)
 
     def test_missing_reservation_is_not_new_collection(self):
-        with sqlite3.connect(self.db) as cx:
+        with closing(sqlite3.connect(self.db)) as cx, cx:
             cx.execute("DELETE FROM collection_attempt_reservations")
         with self.assertRaisesRegex(RuntimeError, "REPLAY_NO_PRIOR_ATTEMPT"):
             self.invoke()
@@ -83,7 +84,7 @@ class OpenSERPRecoveryTest(unittest.TestCase):
                     model="MOVITEC VS F 2/5 B", commit=False,
                     config=self.config, policy=self.policy,
                     cache=self.cache, db=self.db)
-        with sqlite3.connect(self.cache) as cx:
+        with closing(sqlite3.connect(self.cache)) as cx, cx:
             cx.execute("INSERT INTO tavily_cache VALUES (?,?,?,?,?)",
                        ("v3|" + self.key, self.brand, self.model, '{"results":[]}', "now"))
         with self.assertRaisesRegex(RuntimeError, "REPLAY_CACHE_ALREADY_EXISTS"):
@@ -109,12 +110,12 @@ class OpenSERPRecoveryTest(unittest.TestCase):
             report = self.invoke(commit=True)
         self.assertTrue(report["committed"])
         self.assertEqual(report["curated_sources"], 0)
-        with sqlite3.connect(self.cache) as cx:
+        with closing(sqlite3.connect(self.cache)) as cx, cx:
             row = cx.execute("SELECT response_json FROM tavily_cache WHERE cache_key=?",
                              ("v3|" + self.key,)).fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(len(json.loads(row[0])["results"]), 1)
-        with sqlite3.connect(self.db) as cx:
+        with closing(sqlite3.connect(self.db)) as cx, cx:
             self.assertEqual(cx.execute("SELECT COUNT(*) FROM collection_attempt_reservations").fetchone()[0], 1)
 
 
