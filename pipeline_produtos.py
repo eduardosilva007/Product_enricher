@@ -3030,6 +3030,13 @@ def search_product_once(
     if provider == "openserp":
         cfg["_openserp_target"] = (brand, model)
     raw_results, usage = _provider_request_once(provider, query, cfg, limiter, budget)
+    overview = usage.get("ai_overview_unverified")
+    if provider == "openserp" and isinstance(overview, dict):
+        LOG.info(
+            "OPENSERP AI OVERVIEW | sku=%s %s | hypothesis=%s | status=UNVERIFIED_CONTEXT_ONLY "
+            "| auto_identity=BLOCKED | auto_classification=BLOCKED",
+            brand, model, safe(overview.get("type_hypothesis")) or "NONE",
+        )
     if budget.used != 1:
         raise CollectionCostPolicyError(
             f"HARD LIMIT BROKEN: provider={provider}; request_count={budget.used}; esperado=1"
