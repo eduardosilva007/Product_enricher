@@ -13,12 +13,12 @@ on:
           - bing
           - duckduckgo
       sku_lines:
-        description: "One real brand + model per line; max 10; no production data"
+        description: "One BRAND|MODEL per line; max 10. Example: BRIGGS & STRATTON|40U7770010"
         required: true
         default: |
-          STIHL MS382
-          STIHL FS250
-          NOVABOT N2000
+          STIHL|MS382
+          STIHL|FS250
+          NOVABOT|N2000
         type: string
 
 permissions:
@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   batch:
-    name: Read-only batch and normalization
+    name: Read-only batch and import-ready normalization
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -53,8 +53,8 @@ jobs:
           spec = importlib.util.spec_from_file_location("lab", ".github/scripts/openserp_batch_lab.py")
           mod = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(mod)
-          batch = mod.parse_queries(os.environ["OPENSERP_SKUS"])
-          print(f"Validated {len(batch)} real brand/model search queries")
+          batch = mod.parse_skus(os.environ["OPENSERP_SKUS"])
+          print(f"Validated {len(batch)} explicit BRAND|MODEL SKUs")
           PY
 
       - name: Start isolated service
@@ -74,6 +74,26 @@ jobs:
             --engine "$OPENSERP_ENGINE" \
             --skus "$OPENSERP_SKUS" \
             --output-dir openserp-lab-results
+
+      - name: Validate import-ready artifact contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s openserp-lab-results/pilot_summary.json
+          test -s openserp-lab-results/openserp_manifest.csv
+          python3 - <<'PY'
+          import csv, json
+          from pathlib import Path
+          base=Path("openserp-lab-results")
+          doc=json.loads((base/"pilot_summary.json").read_text(encoding="utf-8"))
+          rows=list(csv.DictReader((base/"openserp_manifest.csv").open(encoding="utf-8")))
+          assert isinstance(doc.get("results"), list)
+          assert rows
+          assert len(doc["results"]) == len(rows)
+          assert all(x.get("provider")=="openserp" and x.get("status")=="CAPTURED" for x in doc["results"])
+          assert all(isinstance(x.get("organic"), list) for x in doc["results"])
+          print(f"Import-ready captured cohorts: {len(rows)}")
+          PY
 
       - name: Upload isolated artifacts
         if: always()
