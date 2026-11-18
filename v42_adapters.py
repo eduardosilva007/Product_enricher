@@ -75,6 +75,55 @@ class GLiNEREntityExtractor:
         )
 
 
+    def extract_context(self, text: str) -> Dict[str, Any]:
+        """Extract unverified product mentions from complete external context.
+
+        Separate from V4.2 extract(): no taxonomy mapping, no identity approval,
+        no source approval. Windows are an inference constraint, not a truncation
+        of the input; all text is visited in order with a small overlap.
+        """
+        self.load()
+        content = pp.safe(text)
+        if not content:
+            return {"entities": {}, "segments_processed": 0}
+        labels = {
+            "product_type": "literal phrase naming a physical product or machinery type",
+            "manufacturer": "manufacturer or brand name of the product",
+            "model": "manufacturer product model or full model designation",
+            "power_source": "power source or energy supply mentioned for a product",
+            "voltage": "literal voltage specification of the product",
+            "technical_specification": "technical characteristic or specification of the product",
+        }
+        # Model inference windows may be bounded, but never discard the rest.
+        window, overlap = 2400, 160
+        fields: Dict[str, List[str]] = {key: [] for key in labels}
+        segments = 0
+        position = 0
+        while position < len(content):
+            end = min(len(content), position + window)
+            if end < len(content):
+                boundary = max(content.rfind("\n", position + window // 2, end),
+                               content.rfind(". ", position + window // 2, end))
+                if boundary > position:
+                    end = boundary + 1
+            segment = content[position:end]
+            result = self.model.extract_entities(segment, labels)
+            for label in labels:
+                for value in self._values(result, label):
+                    if value not in fields[label]:
+                        fields[label].append(value)
+            segments += 1
+            if end >= len(content):
+                break
+            position = max(position + 1, end - overlap)
+        return {
+            "entities": {key: values for key, values in fields.items() if values},
+            "segments_processed": segments,
+            "extractor": self.name,
+            "model": self.model_name,
+        }
+
+
 class JevDecisionProvider:
     """TypeSafe/JEV V4.2 backend using closed joint choices only."""
 
