@@ -105,6 +105,44 @@ class CampaignSafetyTests(unittest.TestCase):
         self.assertIn('"--openserp-auto"', text)
         self.assertNotIn("OPENSERP_GITHUB_ACTIONS_ONLY", text)
 
+    def test_signed_artifact_redirect_never_exposes_pat(self):
+        from email.message import Message
+        from unittest.mock import Mock
+        import urllib.error
+        import urllib.request
+        headers = Message()
+        headers["Location"] = "https://store.blob.core.windows.net/artifact/file.zip?sig=masked"
+        redirect = urllib.error.HTTPError(
+            "https://api.github.com/artifacts/12/zip", 302, "Found", headers, None
+        )
+        seen = []
+        class Storage:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self, n):
+                return b"PK" + bytes((3, 4)) + b"sample"
+        class FakeOpener:
+            def open(self, req, timeout):
+                seen.append(req)
+                raise redirect
+        def get_storage(req, timeout):
+            seen.append(req)
+            return Storage()
+        with patch.object(campaign.urllib.request, "build_opener", return_value=FakeOpener()):
+            with patch.object(campaign.urllib.request, "urlopen", side_effect=get_storage):
+                result = campaign._download_artifact_zip("very_secret", 12)
+        self.assertTrue(result.startswith(b"PK"))
+        self.assertEqual(seen[0].get_header("Authorization"), "Bearer very_secret")
+        self.assertIsNone(seen[1].get_header("Authorization"))
+
+    def test_pipeline_skips_pre_sync_only_for_openserp_auto_collect(self):
+        source = (Path(__file__).resolve().parents[1] / "pipeline_produtos.py").read_text(encoding="utf-8-sig")
+        self.assertIn("openserp_collect_auto = (", source)
+        self.assertIn("and not openserp_collect_auto:", source)
+        self.assertIn('if completed and not args.auto_providers:', source)
+
     def test_wait_failure_fails_closed(self):
         with patch.object(campaign, "find_run", return_value={
             "id": 1234, "status": "completed", "conclusion": "failure"}):
