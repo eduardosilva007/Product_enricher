@@ -311,7 +311,8 @@ class CampaignSafetyTests(unittest.TestCase):
             self.assertFalse(result["identity_approved"])
             self.assertEqual(result["api_calls"], 0)
             self.assertEqual(result["official_writes"], 0)
-            extracted.assert_called_once()
+            self.assertEqual(extracted.call_count, 2)
+            self.assertIn('opening_description', result['context_comparison'])
             with self.assertRaisesRegex(ValueError, "RAW_ARTIFACT_SKU_IDENTITY_MISMATCH"):
                 audit(raw, "KSB", "MOVITEC VS F 2/5 B", "mock-model")
 
