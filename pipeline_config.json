@@ -218,15 +218,6 @@
         "max_results": 10,
         "experimental": true,
         "automatic_enabled": false
-      },
-      "openserp": {
-        "mode": "artifact_reuse_manual",
-        "artifact_path": "",
-        "requests_per_minute": 100,
-        "max_results": 10,
-        "experimental": true,
-        "automatic_enabled": false,
-        "allow_new_network_search": false
       }
     },
     "local_enrichment": {
