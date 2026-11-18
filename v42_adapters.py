@@ -94,42 +94,40 @@ class GLiNEREntityExtractor:
 
 
     def extract_context(self, text: str) -> Dict[str, Any]:
-        """Extract unverified product mentions from complete external context.
+        """Extract physical product TYPE only from unverified external context.
 
-        Separate from V4.2 extract(): no taxonomy mapping, no identity approval,
-        no source approval. Windows are an inference constraint, not a truncation
-        of the input; all text is visited in order with a small overlap.
+        This OpenSERP-specific method is independent of V4.2 extract(), so the
+        previously evaluated classifier contracts remain unchanged. All input
+        segments are visited; extraction does not imply identity approval.
         """
         self.load()
         content = pp.safe(text)
         if not content:
             return {"entities": {}, "segments_processed": 0}
         labels = {
-            "product_type": "literal phrase naming a physical product or machinery type",
-            "manufacturer": "manufacturer or brand name of the product",
-            "model": "manufacturer product model or full model designation",
-            "power_source": "power source or energy supply mentioned for a product",
-            "voltage": "literal voltage specification of the product",
-            "technical_specification": "technical characteristic or specification of the product",
+            "product_type": (
+                "literal complete noun phrase describing what the physical "
+                "product is, including the product head noun (e.g. pump)"
+            ),
         }
-        # Model inference windows may be bounded, but never discard the rest.
         window, overlap = 2400, 160
-        fields: Dict[str, List[str]] = {key: [] for key in labels}
+        fields: Dict[str, List[str]] = {"product_type": []}
         segments = 0
         position = 0
         while position < len(content):
             end = min(len(content), position + window)
             if end < len(content):
-                boundary = max(content.rfind("\n", position + window // 2, end),
-                               content.rfind(". ", position + window // 2, end))
+                boundary = max(
+                    content.rfind("\n", position + window // 2, end),
+                    content.rfind(". ", position + window // 2, end),
+                )
                 if boundary > position:
                     end = boundary + 1
             segment = content[position:end]
             result = self.model.extract_entities(segment, labels)
-            for label in labels:
-                for value in self._values(result, label):
-                    if value not in fields[label]:
-                        fields[label].append(value)
+            for value in self._values(result, "product_type"):
+                if value not in fields["product_type"]:
+                    fields["product_type"].append(value)
             segments += 1
             if end >= len(content):
                 break
