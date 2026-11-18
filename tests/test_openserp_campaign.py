@@ -65,6 +65,28 @@ class CampaignSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "UNSAFE_ARTIFACT"):
                 campaign.unpack_checked(buf.getvalue(), Path(d), [])
 
+    def test_persist_cache_uses_official_collect_mode(self):
+        skus = [{"brand": "STIHL", "model": "FS250"}]
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            (base / "pilot_summary.json").write_text("{}", encoding="utf-8")
+            (base / "openserp_manifest.csv").write_text(
+                "query,brand,model\\nSTIHL FS250,STIHL,FS250\\n", encoding="utf-8")
+            with patch.object(campaign.subprocess, "run") as run:
+                campaign.execute_pipeline(base, len(skus), 15, 30000, False, True)
+                self.assertEqual(run.call_count, 2)
+                args = run.call_args_list[1].args[0]
+                self.assertEqual(args[args.index("--mode") + 1], "collect")
+                self.assertEqual(args[args.index("--search-provider") + 1], "openserp")
+                self.assertNotIn("--cache", args)
+                self.assertNotIn("--db", args)
+
+    def test_without_persist_cache_only_staging(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(campaign.subprocess, "run") as run:
+                campaign.execute_pipeline(Path(d), 1, 15, 30000, False, False)
+                self.assertEqual(run.call_count, 1)
+
     def test_wait_failure_fails_closed(self):
         with patch.object(campaign, "find_run", return_value={
             "id": 1234, "status": "completed", "conclusion": "failure"}):
