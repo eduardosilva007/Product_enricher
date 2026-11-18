@@ -193,16 +193,16 @@ def unpack_checked(raw, folder, expected):
     return hashlib.sha256(raw).hexdigest()
 
 
-def execute_pipeline(folder, size, max_api_calls, max_tokens, classify):
+def execute_pipeline(folder, size, max_api_calls, max_tokens, classify, persist_cache):
     root = Path(__file__).resolve().parent
     staging = folder / "openserp_staging.json"
     commands = [[sys.executable, str(root / "import_openserp_staging.py"),
                  "--input", str(folder / "pilot_summary.json"),
                  "--manifest", str(folder / "openserp_manifest.csv"),
                  "--output", str(staging)]]
-    if classify:
+    if persist_cache:
         commands.append([sys.executable, str(root / "pipeline_produtos.py"),
-                         "--mode", "full", "--search-provider", "openserp",
+                         "--mode", "full" if classify else "collect", "--search-provider", "openserp",
                          "--openserp-artifact", str(staging), "--llm-provider", "jev",
                          "--max-search-new", str(size), "--max-items", str(size),
                          "--max-api-calls", str(max_api_calls),
@@ -218,15 +218,19 @@ def main():
     ap.add_argument("--batch-size", type=int, default=3)
     ap.add_argument("--engine", choices=["google", "bing", "duckduckgo"], default="google")
     ap.add_argument("--execute-live", action="store_true")
-    ap.add_argument("--classify", action="store_true", help="Explicitly authorize pipeline production writes")
+    ap.add_argument("--classify", action="store_true", help="Classify as well as write the central cache")
+    ap.add_argument("--persist-cache", action="store_true",
+                    help="Write curated evidence using existing pipeline and central SQLite")
     ap.add_argument("--max-api-calls-per-batch", type=int, default=15)
     ap.add_argument("--max-tokens-per-batch", type=int, default=30000)
     ap.add_argument("--wait-seconds", type=int, default=1800)
     args = ap.parse_args()
     if not 1 <= args.batch_size <= MAX_BATCH:
         ap.error("BATCH_SIZE_MUST_BE_1_TO_10")
-    if args.classify and not args.execute_live:
-        ap.error("CLASSIFY_REQUIRES_EXECUTE_LIVE")
+    if args.classify and not args.persist_cache:
+        ap.error("CLASSIFY_REQUIRES_PERSIST_CACHE")
+    if (args.classify or args.persist_cache) and not args.execute_live:
+        ap.error("CENTRAL_WRITES_REQUIRE_EXECUTE_LIVE")
     if args.max_api_calls_per_batch < 1 or args.max_tokens_per_batch < 1:
         ap.error("BUDGET_LIMITS_REQUIRED")
     path = Path(args.manifest).resolve()
@@ -247,6 +251,7 @@ def main():
         state = json.loads(state_path.read_text(encoding="utf-8"))
         expected = {"manifest_sha256": manifest_hash, "batch_size": args.batch_size,
                     "engine": args.engine, "classify": args.classify,
+                    "persist_cache": args.persist_cache,
                     "max_api_calls": args.max_api_calls_per_batch,
                     "max_tokens": args.max_tokens_per_batch}
         if state.get("settings") != expected:
@@ -257,6 +262,7 @@ def main():
         state = {"settings": {"manifest_sha256": manifest_hash,
                              "batch_size": args.batch_size, "engine": args.engine,
                              "classify": args.classify,
+                             "persist_cache": args.persist_cache,
                              "max_api_calls": args.max_api_calls_per_batch,
                              "max_tokens": args.max_tokens_per_batch},
                  "batches": [], "status": "READY"}
@@ -310,7 +316,7 @@ def main():
             write_state(state_path, state)
             execute_pipeline(folder, len(batch["skus"]),
                              args.max_api_calls_per_batch,
-                             args.max_tokens_per_batch, args.classify)
+                             args.max_tokens_per_batch, args.classify, args.persist_cache)
             batch["status"] = "DONE"
             write_state(state_path, state)
         if batch["status"] != "DONE":
@@ -318,7 +324,8 @@ def main():
     state["status"] = "COMPLETE"
     write_state(state_path, state)
     print(json.dumps({"status": "COMPLETE", "batches": total_batches,
-                      "classify": args.classify}, indent=2))
+                      "classify": args.classify,
+                      "persist_cache": args.persist_cache}, indent=2))
 
 
 if __name__ == "__main__":
