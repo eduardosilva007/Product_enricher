@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+from contextlib import closing
 import sqlite3
 from pathlib import Path
 
@@ -41,14 +42,14 @@ def recover(*, artifact: Path, brand: str, model: str, commit: bool,
         raise RuntimeError("REPLAY_REQUIRES_EXISTING_CENTRAL_SQLITE_FILES")
     cache_uri = f"file:{cache.resolve().as_posix()}?mode=ro"
     db_uri = f"file:{db.resolve().as_posix()}?mode=ro"
-    with sqlite3.connect(cache_uri, uri=True) as conn:
+    with closing(sqlite3.connect(cache_uri, uri=True)) as conn, conn:
         existing = conn.execute(
             "SELECT COUNT(*) FROM tavily_cache WHERE cache_key=?",
             ("v3|" + key,),
         ).fetchone()[0]
     if existing:
         raise RuntimeError("REPLAY_CACHE_ALREADY_EXISTS; refusing overwrite")
-    with sqlite3.connect(db_uri, uri=True) as conn:
+    with closing(sqlite3.connect(db_uri, uri=True)) as conn, conn:
         reservations = conn.execute(
             "SELECT provider, reserved_at FROM collection_attempt_reservations "
             "WHERE business_key=?", (key,)
