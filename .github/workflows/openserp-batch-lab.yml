@@ -133,6 +133,20 @@ jobs:
           print(f"Import-ready captured cohorts: {len(rows)}")
           PY
 
+      - name: Diagnose failed collector or OpenSERP service
+        if: failure()
+        shell: bash
+        run: |
+          echo "::group::OpenSERP container status"
+          docker ps -a --filter name=openserp-batch-lab || true
+          echo "::endgroup::"
+          echo "::group::OpenSERP container logs"
+          docker logs --tail 120 openserp-batch-lab 2>&1 || true
+          echo "::endgroup::"
+          echo "::group::Captured artifact inventory"
+          find openserp-lab-results -maxdepth 1 -type f -printf '%f %s bytes\\n' 2>/dev/null || true
+          echo "::endgroup::"
+
       - name: Upload isolated artifacts
         if: always()
         uses: actions/upload-artifact@v4
