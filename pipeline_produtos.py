@@ -11456,8 +11456,10 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--search-provider", provider]
         if provider == "openserp":
             argv += ["--openserp-auto", "--yes"]
-        if provider in {"openserp", "scraperapi", "auto"} and not 1 <= limite <= 10:
+        if provider in {"scraperapi", "auto"} and not 1 <= limite <= 10:
             raise ValueError("PILOTO_EXIGE_LIMITE_EXPLICITO_1_A_10")
+        if provider == "openserp" and limite < 1:
+            raise ValueError("OPENSERP_CAMPANHA_EXIGE_TOTAL_EXPLICITO")
         if limite:
             argv += ["--max-search-new", str(limite)]
         return parser.parse_args(argv)
@@ -11480,9 +11482,13 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--search-provider", provider]
         if provider == "openserp":
             argv += ["--openserp-auto", "--yes"]
-        if provider in {"openserp", "scraperapi", "auto"}:
+        if provider in {"scraperapi", "auto"}:
             if not (1 <= limite_search <= 10 and 1 <= limite_class <= 10):
                 raise ValueError("PILOTO_EXIGE_LIMITES_1_A_10")
+            argv += ["--max-api-calls", "15", "--max-tokens", "30000"]
+        if provider == "openserp":
+            if limite_search < 1 or limite_class < limite_search:
+                raise ValueError("OPENSERP_FULL_EXIGE_CLASS_LIMIT_GE_SEARCH_TOTAL")
             argv += ["--max-api-calls", "15", "--max-tokens", "30000"]
         low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
         if low == "S":
@@ -12185,9 +12191,127 @@ def _prepare_openserp_automatic_batch(args, cfg):
     return True
 
 
+def _run_openserp_batched_campaign(args: argparse.Namespace) -> int:
+    """Run N SKUs through sequential <=10-SKU official collector executions.
+
+    Each child executes the unchanged validated collection -> official SQLite
+    persistence -> baseline synchronization flow. No second collector/database.
+    Abort on child failure or missing progress, never launch duplicate searches.
+    """
+    import subprocess
+    import math
+    from contextlib import closing
+
+    total = int(args.max_tavily_new or 0)
+    if total <= 10 or not args.openserp_auto or args.search_provider != "openserp":
+        raise ValueError("OPENSERP_BATCHED_CAMPAIGN_INVALID_ARGUMENTS")
+    if args.mode not in {"collect", "full"}:
+        raise ValueError("OPENSERP_BATCHED_CAMPAIGN_INVALID_MODE")
+    if args.mode == "full" and int(args.max_items or 0) < total:
+        raise ValueError("OPENSERP_FULL_EXIGE_CLASS_LIMIT_GE_SEARCH_TOTAL")
+
+    parser = build_parser()
+    # Serialize the actual parsed Namespace instead of reconstructing only a
+    # subset of CLI flags; preserves configured input/cache/db/LLM and budgets.
+    def child_argv(batch_size: int) -> List[str]:
+        override = vars(args).copy()
+        override["max_tavily_new"] = batch_size
+        if args.mode == "full":
+            override["max_items"] = batch_size
+        tokens: List[str] = []
+        for action in parser._actions:
+            if not action.option_strings or action.dest == "help":
+                continue
+            val = override.get(action.dest)
+            if isinstance(action, argparse._StoreTrueAction):
+                if val:
+                    tokens.append(action.option_strings[0])
+            elif isinstance(action, argparse._StoreFalseAction):
+                if val is False:
+                    tokens.append(action.option_strings[0])
+            elif isinstance(action, argparse._AppendAction):
+                for item in val or []:
+                    tokens.extend([action.option_strings[0], str(item)])
+            elif val not in (None, "", 0) and val != action.default:
+                tokens.extend([action.option_strings[0], str(val)])
+        return tokens
+
+    cfg = read_json(Path(args.config))
+    db_path = Path(args.db or cfg["files"]["classification_db"])
+    cache_path = Path(args.cache or cfg["files"]["cache"])
+    if not db_path.is_absolute():
+        db_path = Path(__file__).resolve().parent / db_path
+    if not cache_path.is_absolute():
+        cache_path = Path(__file__).resolve().parent / cache_path
+
+    def progress() -> Tuple[int, int]:
+        reservations = 0
+        cached = 0
+        if db_path.is_file():
+            with closing(sqlite3.connect(
+                f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True
+            )) as cx:
+                if cx.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                              "AND name='collection_attempt_reservations'").fetchone():
+                    reservations = cx.execute(
+                        "SELECT COUNT(*) FROM collection_attempt_reservations"
+                    ).fetchone()[0]
+        if cache_path.is_file():
+            with closing(sqlite3.connect(
+                f"file:{cache_path.resolve().as_posix()}?mode=ro", uri=True
+            )) as cx:
+                if cx.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                              "AND name='tavily_cache'").fetchone():
+                    cached = cx.execute("SELECT COUNT(*) FROM tavily_cache").fetchone()[0]
+        return reservations, cached
+
+    print(f"OPENSERP CAMPANHA | total solicitado={total} SKU(s) "
+          f"| lotes maximos={math.ceil(total / 10)} | ate 10 SKUs por lote "
+          "| ate 1 Search por SKU | cache central unico", flush=True)
+    completed = 0
+    for batch_no in range(1, math.ceil(total / 10) + 1):
+        size = min(10, total - completed)
+        before = progress()
+        print(f"OPENSERP LOTE {batch_no}/{math.ceil(total / 10)} "
+              f"| solicitados={size} | progresso={completed}/{total}", flush=True)
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), *child_argv(size)],
+            cwd=Path(__file__).resolve().parent,
+            check=False,
+        )
+        if proc.returncode != 0:
+            print(f"OPENSERP CAMPANHA PAUSADA | lote={batch_no} "
+                  f"| retorno={proc.returncode} | confirme cache e ledger; sem retry",
+                  flush=True)
+            return proc.returncode
+        after = progress()
+        delta_reservations = after[0] - before[0]
+        delta_cached = after[1] - before[1]
+        if delta_reservations < 0 or delta_cached < 0:
+            raise RuntimeError("OPENSERP_CAMPANHA_CENTRAL_COUNTER_REGRESSION")
+        advanced = max(delta_reservations, delta_cached)
+        if advanced == 0:
+            print(f"OPENSERP CAMPANHA ENCERRADA | sem novos SKUs elegiveis "
+                  f"| lotes concluídos={batch_no - 1} | progresso={completed}/{total}",
+                  flush=True)
+            return 0
+        completed += min(size, advanced)
+        print(f"OPENSERP LOTE FINALIZADO | lote={batch_no} "
+              f"| reservas_novas={delta_reservations} "
+              f"| cache_novos={delta_cached} | progresso={completed}/{total}",
+              flush=True)
+    print(f"OPENSERP CAMPANHA FINAL | processados_ou_reservados={completed}/{total}",
+          flush=True)
+    return 0
+
+
 def main() -> int:
     base = Path(__file__).resolve().parent
     args = interactive_menu(base) if len(sys.argv) == 1 else build_parser().parse_args()
+    if (args.mode in {"collect", "full"} and args.openserp_auto
+            and args.search_provider == "openserp"
+            and int(args.max_tavily_new or 0) > 10):
+        return _run_openserp_batched_campaign(args)
     setup_logging(args.verbose)
     os.chdir(base)
     cfg_path = (base / args.config).resolve() if not Path(args.config).is_absolute() else Path(args.config)
