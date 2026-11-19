@@ -12314,8 +12314,17 @@ def main() -> int:
         if args.auto_providers or (args.search_provider and args.search_provider.casefold() != "tavily"):
             LOG.error("ONLY_TAVILY_SEARCH_SUPPORTED: provedor alternativo desativado para coleta/full")
             return 2
-        # CLI legado --search-provider tavily sem pool continua aceito para compatibilidade.
-        _enforce_central_search_paths(args, cfg, _resolve_search_provider(args, cfg))
+        # Reject legacy single-key routing before any costly workbook reconciliation.
+        if not args.tavily_pool:
+            LOG.error("TAVILY_POOL_REQUIRED: execute --search-provider tavily --tavily-pool --max-search-new N")
+            return 2
+        if not 1 <= int(args.max_tavily_new or 0) <= (10 if args.mode == "full" else 100):
+            LOG.error("TAVILY_POOL_EXPLICIT_BATCH_REQUIRED")
+            return 2
+        if not [s for s in configured_slots() if s.provider == "tavily"]:
+            LOG.error("TAVILY_POOL_NO_AUTHORIZED_BUDGET: nenhuma chave Tavily com LIMIT_N configurado")
+            return 2
+        _enforce_central_search_paths(args, cfg, "tavily")
     if args.mode in {"collect", "full", "classify", "recover", "overnight"}:
         central_integrity = audit_committed_classifications(cfg, commit=False)
         if central_integrity["status"] != "ALIGNED":
@@ -12333,7 +12342,7 @@ def main() -> int:
             return 2
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
-    if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and (args.auto_providers or args.tavily_pool)):
+    if args.mode in {"collect", "full", "sync-input"} and not (args.mode in {"collect", "full"} and args.tavily_pool or args.mode == "collect" and args.auto_providers):
         files_cfg = cfg.get("files", {}) or {}
         input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
         master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
