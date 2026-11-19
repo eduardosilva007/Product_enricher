@@ -68,3 +68,12 @@ Digite `N` para recoleta de `RAW_EMPTY`; confira as 3 linhas elegíveis e a quan
 ## Limitações conscientes
 
 O doctor contabiliza reservas por conta em SQLite; ele **não consulta créditos reais** da Tavily. As contas devem ser autorizadas pelo provedor e o limite configurado deve permanecer conservador. A seleção é sequencial por conta e não usa rotação para simular usuários ou evitar detecção. 
+
+## Performance — etapa incremental (2026-11-19)
+
+- `collect --tavily-pool` e `full --tavily-pool` **não executam a sincronização inicial geral de Excel**. As verificações de integridade de classificação continuam ativas.
+- O comando manual `--mode sync-input` usa um manifest local `.runtime_cache/baseline_sync_verified_v1.json` **apenas após a primeira sincronização completa aprovada**. Antes de pular uma segunda sincronização, compara SHA-256 de entrada, Master, Final, cache SQLite e arquivos de WAL/journal, configuração, taxonomia e política. Qualquer alteração ou ausência força sincronização completa. O manifest não autoriza escrita e não substitui auditorias de classificação.
+- A classificação `full` **continua escrevendo Master/Final depois de classificar**, para preservar a persistência e conferência por SKU. Ainda não existe gravação seletiva de linhas individuais no Excel. Não anunciar como implementada.
+- Logs `PERF STAGE` medem integridade central, pré-reconciliação, leitura de inventário e exportação Excel. Comparar tempos antes de novo refactoring.
+- `--mode sync-input` é uma operação que pode regravar Excel na primeira vez; use somente quando necessário e com os arquivos fechados.
+- Testes offline devem passar antes do próximo piloto, especialmente invalidar o fingerprint se uma revisão B.I modificar Base Final ou se o WAL do cache mudar.
