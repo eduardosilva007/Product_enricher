@@ -28,6 +28,15 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
         self.assertIn("TAVILY_POOL_REQUIRED", source)
         self.assertIn("TAVILY_POOL_NO_AUTHORIZED_BUDGET", source)
 
+    def test_full_cohort_does_not_drop_collected_without_curated(self):
+        code = (Path(__file__).resolve().parents[1] / "pipeline_produtos.py").read_text(
+            encoding="utf-8-sig")
+        self.assertIn('experimental_targets.append((brand, model, key))', code)
+        self.assertNotIn('if (auto_route or provider in {"openserp", "scraperapi"}) and curated:', code)
+        self.assertIn("FULL COLLECTION SCOPE | collected_targets=%d", code)
+        self.assertIn("FULL CLASSIFICATION SCOPE | collected=%d", code)
+        self.assertIn("FULL_COHORT_LIMIT_MISMATCH", code)
+
     def test_interactive_collect_directly_uses_tavily_pool(self):
         from pipeline_produtos import interactive_menu
         responses = iter(["1", "3"])
