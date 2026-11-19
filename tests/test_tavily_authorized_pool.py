@@ -55,7 +55,10 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
                 self.assertIsNone(resumed.reserve("SKU-C"))
             finally:
                 resumed.close()
-            with sqlite3.connect(path) as db:
+            # sqlite3.Connection.__exit__ commits/rolls back but does NOT close.
+            # Windows prevents TemporaryDirectory cleanup while the DB handle is open.
+            from contextlib import closing
+            with closing(sqlite3.connect(path)) as db:
                 count = db.execute("SELECT COUNT(*) FROM collection_attempt_reservations").fetchone()[0]
             self.assertEqual(count, 2)
 
