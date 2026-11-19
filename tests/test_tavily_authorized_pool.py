@@ -80,10 +80,12 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
                 router.close()
 
     def test_explicit_new_period_keeps_old_sku_reservations(self):
+        from datetime import datetime, timezone
+        today_utc = datetime.now(timezone.utc).date().isoformat()
         env = {
             "TAVILY_API_KEY_1": "offline-key-1",
             "TAVILY_LIMIT_1": "2",
-            "TAVILY_BUDGET_SINCE_1": "2099-01-01",
+            "TAVILY_BUDGET_SINCE_1": today_utc,
         }
         with patch.dict(os.environ, env, clear=True):
             slots = [s for s in configured_slots() if s.provider == "tavily"]
