@@ -3628,7 +3628,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     pre_report = Path(args.precollection_output or cfg.get("files", {}).get("precollection_report", "Pre_Coleta_R9_6.xlsx"))
     report_path = Path(cfg.get("files", {}).get("collection_report", "Coleta_Search_R9_6.xlsx"))
     if auto_route:
-        report_path = pre_report.with_name("Coleta_Argentina_Piloto.xlsx")
+        report_path = pre_report.with_name("Coleta_Tavily_Pool.xlsx" if tavily_pool else "Coleta_Argentina_Piloto.xlsx")
 
     files_cfg = cfg.get("files", {}) or {}
     master = Path(args.master or files_cfg.get("master", "")) if (args.master or files_cfg.get("master")) else None
@@ -3666,7 +3666,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             business_key(safe(c.get("brand")), safe(c.get("model")))
             for c in cohorts if isinstance(c, dict)
         }
-    recovered_quota = recover_confirmed_serper_quota_reservations(
+    # The Tavily-only pilot is strictly read-only with respect to historical
+    # Serper reservations: separate forensic audit is required for release.
+    recovered_quota = 0 if tavily_pool else recover_confirmed_serper_quota_reservations(
         db_path, plan, max_releases=int(args.max_tavily_new or 0),
         allowed_keys=artifact_keys,
     )
