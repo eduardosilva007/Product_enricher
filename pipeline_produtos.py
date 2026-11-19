@@ -12490,8 +12490,10 @@ def configured_slots() -> list[Slot]:
                 # SQLite reserved_at is UTC; never guess renewal based on local time.
                 try:
                     from datetime import date as _budget_date
-                    if _budget_date.fromisoformat(budget_since).isoformat() != budget_since:
-                        raise ValueError("not canonical")
+                    from datetime import datetime as _budget_datetime, timezone as _budget_timezone
+                    parsed_period = _budget_date.fromisoformat(budget_since)
+                    if parsed_period.isoformat() != budget_since or parsed_period > _budget_datetime.now(_budget_timezone.utc).date():
+                        raise ValueError("future or non-canonical date")
                 except ValueError as exc:
                     raise ValueError(f"Invalid budget date for {prefix}_BUDGET_SINCE{suffix}: expected YYYY-MM-DD") from exc
             slots.append(Slot(provider, f"{provider}:{n}", key_env,zone_env,limit,group,budget_since))
