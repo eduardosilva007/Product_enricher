@@ -10543,6 +10543,7 @@ def run_pipeline(
             raise RuntimeError("OUTPUT_ONLY_INVALID_COHORT_STATE")
 
     baseline_pre_stats: Dict[str, int] = {}
+    t_baseline_pre = time.perf_counter()
     if args.mode in {"classify", "full", "recover"}:
         backup_root = Path(cfg.get("files", {}).get("baseline_backup_dir", "Backups_Baseline"))
         backup_folder = _backup_baseline_files(master_path, final_path, backup_root)
@@ -10610,7 +10611,10 @@ def run_pipeline(
             "SIM" if baseline_pre_stats.get("pre_reconciled") else "NÃO",
         )
 
+    LOG.info("PERF STAGE | baseline_pre_reconciliation=%.2fs", time.perf_counter() - t_baseline_pre)
+    t_baseline_inventory = time.perf_counter()
     baseline_inventory = load_baseline_inventory(master_path, final_path)
+    LOG.info("PERF STAGE | baseline_inventory=%.2fs", time.perf_counter() - t_baseline_inventory)
     # Em Cache Recovery, explicit_targets é um conjunto deliberadamente autorizado
     # a substituir AUTO_APROVADO técnico antigo. HARD LOCK humano continua sendo
     # revalidado separadamente e nunca é vencido por esta lista.
@@ -10932,6 +10936,7 @@ def run_pipeline(
                          "canonical_promotion=BLOCKED")
             else:
                 try:
+                    t_final_excel = time.perf_counter()
                     baseline_stats = persist_baseline_excels(
                         rows=rows,
                         master_path=master_path,
@@ -10943,6 +10948,8 @@ def run_pipeline(
                         cache_path=cache_path,
                         cfg=cfg,
                     )
+                    LOG.info("PERF STAGE | baseline_write_and_audit=%.2fs | rows=%d",
+                             time.perf_counter() - t_final_excel, len(rows))
                     if baseline_stats:
                         post_inv = load_baseline_inventory(master_path, final_path)
                         final_cohort_accepted = len(
@@ -12382,6 +12389,7 @@ def main() -> int:
             return 2
         _enforce_central_search_paths(args, cfg, "tavily")
     if args.mode in {"collect", "full", "classify", "recover", "overnight"}:
+        t_integrity = time.perf_counter()
         central_integrity = audit_committed_classifications(cfg, commit=False)
         if central_integrity["status"] != "ALIGNED":
             LOG.error(
@@ -12390,6 +12398,7 @@ def main() -> int:
                 json.dumps(central_integrity, ensure_ascii=False))
             return 2
         pending_cache = _night_pending_centralization()
+        LOG.info("PERF STAGE | central_integrity+pending_campaigns=%.2fs", time.perf_counter() - t_integrity)
         if pending_cache:
             LOG.error(
                 "CACHE CENTRAL PENDENTE: %d campanha(s) COMPLETE ainda isolada(s). "
