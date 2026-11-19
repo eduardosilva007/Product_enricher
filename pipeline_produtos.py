@@ -128,6 +128,62 @@ def file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
+def _baseline_signature(paths: Dict[str, Optional[Path]], rules_hash: str) -> Dict[str, Any]:
+    """Content-based signature; missing dependencies or mutable SQLite state fail closed.
+
+    This is intentionally not a shortcut for first-time data reconciliation.
+    All relevant files, including live SQLite WAL, are hashed before a warm skip.
+    """
+    result: Dict[str, Any] = {"version": 1, "rules_hash": rules_hash, "files": {}}
+    for name, path in sorted(paths.items()):
+        if path is None:
+            result["files"][name] = None
+            continue
+        resolved = Path(path).resolve()
+        if name in {"input", "master", "final"} and not resolved.is_file():
+            return {}
+        candidates = [resolved]
+        if resolved.suffix.lower() in {".sqlite", ".db"}:
+            candidates += [Path(str(resolved) + "-wal"), Path(str(resolved) + "-journal")]
+        file_parts = []
+        for p in candidates:
+            if p.is_file():
+                stat_before = p.stat()
+                digest = file_hash(p)
+                stat_after = p.stat()
+                if (stat_before.st_size, stat_before.st_mtime_ns) != (stat_after.st_size, stat_after.st_mtime_ns):
+                    return {}
+                file_parts.append({"name": p.name, "sha256": digest, "size": stat_after.st_size})
+            else:
+                file_parts.append({"name": p.name, "absent": True})
+        result["files"][name] = {"path": str(resolved), "parts": file_parts}
+    return result
+
+
+def _baseline_sync_manifest_check(manifest: Path, signature: Dict[str, Any]) -> bool:
+    if not signature or not manifest.is_file():
+        return False
+    try:
+        record = json.loads(manifest.read_text(encoding="utf-8"))
+        return (isinstance(record, dict) and record.get("status") == "VERIFIED"
+                and record.get("signature") == signature)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _baseline_sync_manifest_store(manifest: Path, signature: Dict[str, Any]) -> None:
+    if not signature:
+        return
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    temp = manifest.with_name(manifest.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        temp.write_text(json.dumps({"status": "VERIFIED", "signature": signature},
+                                   ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        os.replace(temp, manifest)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 def strip_accents(text: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", safe(text)) if not unicodedata.combining(c))
 
@@ -12343,29 +12399,47 @@ def main() -> int:
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
     if args.mode in {"collect", "full", "sync-input"} and not (args.mode in {"collect", "full"} and args.tavily_pool or args.mode == "collect" and args.auto_providers):
+        t_sync = time.perf_counter()
         files_cfg = cfg.get("files", {}) or {}
         input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
         master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
         final_sync = Path(files_cfg.get("final", "Base Final Produtos Enriquecida.xlsx"))
-        if not input_sync.exists():
-            LOG.error("Sincronização não iniciada: Base de entrada ausente: %s", input_sync)
-            return 2
-        try:
-            _backup_baseline_files(
-                master_sync, final_sync,
-                Path(files_cfg.get("baseline_backup_dir", "Backups_Baseline")),
-            )
-            sync_stats = persist_baseline_excels(
-                rows=[], master_path=master_sync, final_path=final_sync,
-                input_path=input_sync, rules=rules,
-                cache_path=Path(args.cache or files_cfg.get("cache", "cache_tavily.sqlite")),
-                cfg=cfg,
-            )
-            LOG.info("INPUT BASELINE SYNC OK | inserted=%s | final_rows=%s",
-                     sync_stats.get("input_registered", 0), sync_stats.get("final_rows", 0))
-        except Exception as exc:
-            LOG.error("INPUT BASELINE SYNC FAILED; interrompendo para preservar os dados: %s", exc)
-            return 2
+        cache_sync = Path(args.cache or files_cfg.get("cache", "cache_tavily.sqlite"))
+        # Fast path restricted to explicit sync-input, and only after a previous
+        # successful full reconciliation. A missing/changed file always reruns.
+        signature_paths = {
+            "input": input_sync, "master": master_sync, "final": final_sync,
+            "cache": cache_sync, "config": cfg_path, "taxonomy": rules_path,
+            "collection_policy": collection_policy_path,
+        }
+        manifest = base / ".runtime_cache" / "baseline_sync_verified_v1.json"
+        signature_before = (_baseline_signature(signature_paths, rules.hash)
+                            if args.mode == "sync-input" else {})
+        if args.mode == "sync-input" and _baseline_sync_manifest_check(manifest, signature_before):
+            LOG.info("BASELINE FINGERPRINT MATCH | no Excel rewrite | sha256 verified | elapsed=%.2fs",
+                     time.perf_counter() - t_sync)
+        else:
+            if not input_sync.exists():
+                LOG.error("Sincronização não iniciada: Base de entrada ausente: %s", input_sync)
+                return 2
+            try:
+                _backup_baseline_files(
+                    master_sync, final_sync,
+                    Path(files_cfg.get("baseline_backup_dir", "Backups_Baseline")),
+                )
+                sync_stats = persist_baseline_excels(
+                    rows=[], master_path=master_sync, final_path=final_sync,
+                    input_path=input_sync, rules=rules, cache_path=cache_sync, cfg=cfg,
+                )
+                LOG.info("INPUT BASELINE SYNC OK | inserted=%s | final_rows=%s | elapsed=%.2fs",
+                         sync_stats.get("input_registered", 0), sync_stats.get("final_rows", 0),
+                         time.perf_counter() - t_sync)
+                if args.mode == "sync-input":
+                    signature_after = _baseline_signature(signature_paths, rules.hash)
+                    _baseline_sync_manifest_store(manifest, signature_after)
+            except Exception as exc:
+                LOG.error("INPUT BASELINE SYNC FAILED; interrompendo para preservar os dados: %s", exc)
+                return 2
 
     if args.mode == "sync-input":
         return 0
