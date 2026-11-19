@@ -12135,13 +12135,25 @@ def tavily_pool_doctor(db_path: Path) -> int:
             LOG.error("TAVILY_POOL_LEDGER_UNREADABLE | %s", type(exc).__name__)
             return 2
     print("TAVILY POOL DOCTOR | read_only=True | network_requests=0 | keys_hidden=True")
+    print("NOTE: budget windows reflect local reservations, not provider-confirmed credits")
     total_available = 0
     for slot in slots:
-        used = int(counts.get(slot.account, 0))
+        historic = int(counts.get(slot.account, 0))
+        used = historic
+        if slot.budget_since and db_path.exists():
+            try:
+                with contextlib.closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+                    used = int(conn.execute(
+                        "SELECT COUNT(*) FROM collection_attempt_reservations WHERE account=? AND reserved_at>=?",
+                        (slot.account, slot.budget_since),
+                    ).fetchone()[0]) if "collection_attempt_reservations" in tables else 0
+            except sqlite3.Error as exc:
+                LOG.error("TAVILY_POOL_PERIOD_LEDGER_UNREADABLE | %s", type(exc).__name__)
+                return 2
         status = "DISABLED:" + disabled[slot.account] if slot.account in disabled else "READY"
         available = max(0, slot.limit - used) if status == "READY" else 0
         total_available += available
-        print(f"{slot.account} | reserved={used} | budget={slot.limit} | remaining_at_account={available} | group={slot.group} | {status}")
+        print(f"{slot.account} | historic_reserved={historic} | period_since={slot.budget_since or 'ALL_HISTORY'} | period_reserved={used} | budget={slot.limit} | remaining_at_account={available} | group={slot.group} | {status}")
     print(f"ACCOUNT_SLOTS={len(slots)} | SUM_OF_PER_ACCOUNT_REMAINING={total_available} | shared_billing_groups_may_lower_capacity=True")
     return 0
 
@@ -12444,6 +12456,7 @@ class Slot:
     zone_env: str
     limit: int
     group: str
+    budget_since: str = ""  # explicit YYYY-MM-DD UTC; legacy empty counts all history
 
 def configured_slots() -> list[Slot]:
     slots = []
@@ -12471,7 +12484,17 @@ def configured_slots() -> list[Slot]:
             if provider == "brightdata" and not os.getenv(zone_env):
                 continue
             group = os.getenv(f"{prefix}_BILLING_GROUP{suffix}", f"{provider}:{n}")
-            slots.append(Slot(provider, f"{provider}:{n}", key_env,zone_env,limit,group))
+            budget_since = os.getenv(f"{prefix}_BUDGET_SINCE{suffix}", "").strip()
+            if budget_since:
+                # An explicit reset requires an independently verified billing period.
+                # SQLite reserved_at is UTC; never guess renewal based on local time.
+                try:
+                    from datetime import date as _budget_date
+                    if _budget_date.fromisoformat(budget_since).isoformat() != budget_since:
+                        raise ValueError("not canonical")
+                except ValueError as exc:
+                    raise ValueError(f"Invalid budget date for {prefix}_BUDGET_SINCE{suffix}: expected YYYY-MM-DD") from exc
+            slots.append(Slot(provider, f"{provider}:{n}", key_env,zone_env,limit,group,budget_since))
     return slots
 
 class DurableRouter:
@@ -12479,6 +12502,7 @@ class DurableRouter:
         if not slots:
             raise ValueError("No accounts with positive explicitly configured budget")
         group_limits = {}
+        group_periods = {}
         accounts = set()
         for slot in slots:
             if slot.account in accounts:
@@ -12489,6 +12513,9 @@ class DurableRouter:
             prior = group_limits.setdefault(slot.group, slot.limit)
             if prior != slot.limit:
                 raise ValueError(f"Conflicting limits for billing group {slot.group}")
+            period = group_periods.setdefault(slot.group, slot.budget_since)
+            if period != slot.budget_since:
+                raise ValueError(f"Conflicting budget periods for billing group {slot.group}")
         self.conn = sqlite3.connect(path, timeout=30)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
@@ -12506,7 +12533,11 @@ class DurableRouter:
         for slot in self.slots:
             if self.conn.execute("SELECT 1 FROM collection_disabled_accounts WHERE account=?", (slot.account,)).fetchone():
                 continue
-            used = self.conn.execute("SELECT COUNT(*) FROM collection_attempt_reservations WHERE account=?", (slot.account,)).fetchone()[0]
+            used = self.conn.execute(
+                "SELECT COUNT(*) FROM collection_attempt_reservations WHERE account=?" +
+                (" AND reserved_at>=?" if slot.budget_since else ""),
+                ((slot.account, slot.budget_since) if slot.budget_since else (slot.account,)),
+            ).fetchone()[0]
             if used >= slot.limit:
                 continue
             # A shared billing group requires *the same total cap* configured on each key.
@@ -12514,8 +12545,9 @@ class DurableRouter:
             group_limit = group_slots[0].limit
             group_used = self.conn.execute(
                 "SELECT COUNT(*) FROM collection_attempt_reservations WHERE account IN (" +
-                ",".join("?" for _ in group_slots) + ")",
-                [s.account for s in group_slots]).fetchone()[0]
+                ",".join("?" for _ in group_slots) + ")" +
+                (" AND reserved_at>=?" if slot.budget_since else ""),
+                [s.account for s in group_slots] + ([slot.budget_since] if slot.budget_since else [])).fetchone()[0]
             if group_used >= group_limit:
                 continue
             return slot
