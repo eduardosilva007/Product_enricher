@@ -3604,7 +3604,12 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     policy_errors = validate_collection_cost_policy(cfg)
     if policy_errors:
         raise CollectionCostPolicyError(" | ".join(policy_errors))
-    auto_route = bool(getattr(args, "auto_providers", False))
+    tavily_pool = bool(getattr(args, "tavily_pool", False))
+    if tavily_pool and (bool(getattr(args, "auto_providers", False)) or provider != "tavily"):
+        raise ValueError("TAVILY_POOL_REQUIRES_EXCLUSIVE_TAVILY: use --search-provider tavily sem --auto-providers")
+    if tavily_pool and not 1 <= int(args.max_tavily_new or 0) <= 100:
+        raise ValueError("TAVILY_POOL_REQUIRES_EXPLICIT_BATCH_1_TO_100")
+    auto_route = bool(getattr(args, "auto_providers", False) or tavily_pool)
     if auto_route and getattr(args, "mode", "collect") == "full":
         if not 1 <= int(args.max_tavily_new or 0) <= 10:
             raise ValueError("AUTO_ROUTE_PILOT_SEARCH_CAP_REQUIRED: --max-search-new 1..10")
@@ -3736,8 +3741,11 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                  len(cohorts), len(eligible), len(selected))
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
     slots = configured_slots() if auto_route and candidates else []
+    if tavily_pool:
+        slots = [slot for slot in slots if slot.provider == "tavily"]
+        LOG.info("TAVILY POOL PREFLIGHT | configured_authorized_slots=%d | batch=%d | other_providers=DISABLED", len(slots), len(candidates))
     if auto_route and candidates and not slots:
-        raise RuntimeError("AUTO_PROVIDERS: configure ao menos um *_LIMIT_1 positivo e credencial no .env")
+        raise RuntimeError("TAVILY_POOL_NO_AUTHORIZED_BUDGET: configure TAVILY_API_KEY_1 e TAVILY_LIMIT_1 positivos, com contas autorizadas" if tavily_pool else "AUTO_PROVIDERS: configure ao menos um *_LIMIT_1 positivo e credencial no .env")
 
     print()
     print("=" * 86)
@@ -3916,6 +3924,10 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 })
                 if router and active_slot and (exc.code.endswith("_LIMIT") or exc.code.endswith("_AUTH") or exc.code.endswith("_SCHEMA")):
                     router.disable(active_slot.account, exc.code)
+                    if tavily_pool:
+                        LOG.error("TAVILY POOL PAUSADO | conta=%s | motivo=%s | sem trocar de conta apos bloqueio do provedor", active_slot.account, exc.code)
+                        completed = False
+                        break
                     LOG.warning("ROUTER | conta desabilitada=%s; segue no próximo SKU", active_slot.account)
                     continue
                 LOG.error("%s. Coleta pausada; tudo salvo até aqui permanece persistido.", exc)
@@ -11328,6 +11340,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata", "scraperapi"], default="")
     p.add_argument("--recollect-empty", action="store_true")
     p.add_argument("--auto-providers", action="store_true", help="Rotação entre contas/provedores apenas para SKUs distintos")
+    p.add_argument("--tavily-pool", action="store_true", help="Coleta somente Tavily, distribuida entre chaves com orçamento explicitamente autorizado; sem retry de SKU")
     p.add_argument("--recollect-low-evidence", action="store_true")
     p.add_argument("--curate-all-cache", action="store_true", help="No modo curate, ignora o arquivo de entrada e percorre todo o cache")
     p.add_argument("--force-curate", action="store_true", help="Reavaliar a curadoria atual sem repetir Search; preserva historico do SQLite.")
@@ -12302,7 +12315,7 @@ def main() -> int:
             return 2
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
-    if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and args.auto_providers):
+    if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and (args.auto_providers or args.tavily_pool)):
         files_cfg = cfg.get("files", {}) or {}
         input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
         master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
@@ -12334,10 +12347,10 @@ def main() -> int:
         return 0
     if args.mode == "collect":
         provider = _resolve_search_provider(args, cfg)
-        if not args.auto_providers:
+        if not (args.auto_providers or args.tavily_pool):
             _provider_credentials(provider, cfg)
         completed = collect_products(args, cfg, rules)
-        if completed and not args.auto_providers:
+        if completed and not (args.auto_providers or args.tavily_pool):
             files_cfg = cfg.get("files", {}) or {}
             persist_baseline_excels(
                 rows=[],
@@ -12360,13 +12373,13 @@ def main() -> int:
         return 0
     if args.mode == "full":
         provider = _resolve_search_provider(args, cfg)
-        if not args.auto_providers:
+        if not (args.auto_providers or args.tavily_pool):
             _provider_credentials(provider, cfg)
         completed = collect_products(args, cfg, rules)
         if not completed:
             LOG.warning("PROCESSO COMPLETO interrompido após a coleta. Classificação não iniciada.")
             return 3
-        if args.auto_providers or provider == "scraperapi":
+        if args.auto_providers or args.tavily_pool or provider == "scraperapi":
             targets = cfg.pop("_experimental_collected_targets", [])
             if not targets:
                 LOG.warning("EXPERIMENTAL FULL: nenhum SKU com evidência curada nesta coleta; "
@@ -12396,7 +12409,7 @@ class Slot:
 def configured_slots() -> list[Slot]:
     slots = []
     for provider, prefix in (("tavily","TAVILY"),("brightdata","BRIGHTDATA"),("serper","SERPER")):
-        for n in (1, 2, 3, 4):
+        for n in (range(1, 21) if provider == "tavily" else range(1, 5)):
             suffix = f"_{n}"
             key_env = f"{prefix}_API_KEY{suffix}"
             if n == 1 and not os.getenv(key_env):
