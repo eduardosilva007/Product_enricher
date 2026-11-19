@@ -11313,7 +11313,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "final-lookup-index", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "final-lookup-index", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup", "tavily-pool-doctor"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -12109,6 +12109,41 @@ def _brightdata_slot_diagnostic() -> Tuple[str, str]:
     return configured, zone_status
 
 
+def tavily_pool_doctor(db_path: Path) -> int:
+    """Read-only preflight for authorized Tavily slots and durable attempt budgets."""
+    slots = [slot for slot in configured_slots() if slot.provider == "tavily"]
+    if not slots:
+        LOG.error("TAVILY_POOL_NO_AUTHORIZED_BUDGET | configure key and explicit positive limit")
+        return 2
+    import contextlib
+    counts = {}
+    disabled = {}
+    if db_path.exists():
+        try:
+            with contextlib.closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+                tables = {row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                if "collection_attempt_reservations" in tables:
+                    counts = dict(conn.execute(
+                        "SELECT account,COUNT(*) FROM collection_attempt_reservations GROUP BY account"))
+                if "collection_disabled_accounts" in tables:
+                    disabled = dict(conn.execute(
+                        "SELECT account,reason FROM collection_disabled_accounts"))
+        except sqlite3.Error as exc:
+            LOG.error("TAVILY_POOL_LEDGER_UNREADABLE | %s", type(exc).__name__)
+            return 2
+    print("TAVILY POOL DOCTOR | read_only=True | network_requests=0 | keys_hidden=True")
+    total_available = 0
+    for slot in slots:
+        used = int(counts.get(slot.account, 0))
+        status = "DISABLED:" + disabled[slot.account] if slot.account in disabled else "READY"
+        available = max(0, slot.limit - used) if status == "READY" else 0
+        total_available += available
+        print(f"{slot.account} | reserved={used} | budget={slot.limit} | remaining_at_account={available} | group={slot.group} | {status}")
+    print(f"ACCOUNT_SLOTS={len(slots)} | SUM_OF_PER_ACCOUNT_REMAINING={total_available} | shared_billing_groups_may_lower_capacity=True")
+    return 0
+
+
 def main() -> int:
     base = Path(__file__).resolve().parent
     args = interactive_menu(base) if len(sys.argv) == 1 else build_parser().parse_args()
@@ -12118,6 +12153,8 @@ def main() -> int:
     rules_path = (base / args.rules).resolve() if not Path(args.rules).is_absolute() else Path(args.rules)
     env_info = load_env_file(base / ".env")
     cfg = read_json(cfg_path)
+    if args.mode == "tavily-pool-doctor":
+        return tavily_pool_doctor(Path(args.db or cfg.get("files", {}).get("classification_db", "pipeline_v3.sqlite")))
     collection_policy_name = args.collection_policy or safe((cfg.get("files", {}) or {}).get("collection_policy")) or "collection_quality_policy.json"
     collection_policy_path = (base / collection_policy_name).resolve() if not Path(collection_policy_name).is_absolute() else Path(collection_policy_name)
     collection_policy = read_json(collection_policy_path)
