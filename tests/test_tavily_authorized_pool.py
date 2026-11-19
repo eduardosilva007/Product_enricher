@@ -79,6 +79,42 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
             finally:
                 router.close()
 
+    def test_explicit_new_period_keeps_old_sku_reservations(self):
+        env = {
+            "TAVILY_API_KEY_1": "offline-key-1",
+            "TAVILY_LIMIT_1": "2",
+            "TAVILY_BUDGET_SINCE_1": "2099-01-01",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            slots = [s for s in configured_slots() if s.provider == "tavily"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "attempts.sqlite"
+            router = DurableRouter(path, slots)
+            try:
+                router.conn.execute(
+                    "INSERT INTO collection_attempt_reservations "
+                    "(business_key,account,provider,reserved_at) VALUES (?,?,?,?)",
+                    ("SKU-LEGACY", "tavily:1", "tavily", "2026-11-15 06:10:48"),
+                )
+                router.conn.commit()
+                self.assertIsNone(router.reserve("SKU-LEGACY"))
+                self.assertEqual(router.reserve("SKU-NEW").account, "tavily:1")
+            finally:
+                router.close()
+            from contextlib import closing
+            with closing(sqlite3.connect(path)) as db:
+                total = db.execute("SELECT COUNT(*) FROM collection_attempt_reservations").fetchone()[0]
+            self.assertEqual(total, 2)
+
+    def test_invalid_budget_period_rejected(self):
+        with patch.dict(os.environ, {
+            "TAVILY_API_KEY_1": "offline-key",
+            "TAVILY_LIMIT_1": "2",
+            "TAVILY_BUDGET_SINCE_1": "yesterday",
+        }, clear=True):
+            with self.assertRaisesRegex(ValueError, "Invalid budget date"):
+                configured_slots()
+
     def test_disabled_account_remains_disabled_after_restart(self):
         env = {
             "TAVILY_API_KEY_1": "offline-key-1", "TAVILY_LIMIT_1": "2",
