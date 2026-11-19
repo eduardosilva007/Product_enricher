@@ -11438,7 +11438,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     elif op not in {"1","2","3"}:
         raise ValueError("Opcao invalida")
     if op == "1":
-        print("\\nCOLETA: TAVILY (pool de contas autorizadas)")
+        print("\nCOLETA: TAVILY (pool de contas autorizadas)")
         limite = _menu_limit("Limite de SKUs para coleta (1 a 100; obrigatorio): ")
         if not 1 <= limite <= 100:
             raise ValueError("TAVILY_POOL_REQUIRES_EXPLICIT_BATCH_1_TO_100")
@@ -11452,7 +11452,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
     if op == "3":
-        print("\\nPROCESSO COMPLETO: TAVILY -> CURADORIA -> CLASSIFICACAO")
+        print("\nPROCESSO COMPLETO: TAVILY -> CURADORIA -> CLASSIFICACAO")
         limite_search = _menu_limit("Limite de SKUs para coleta (1 a 10 no piloto completo): ")
         limite_class = _menu_limit("Limite de SKUs para classificacao (1 a 10 no piloto completo): ")
         llm = _menu_llm_provider()
