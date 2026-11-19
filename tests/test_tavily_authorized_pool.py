@@ -22,6 +22,12 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
         self.assertFalse(args.auto_providers)
         self.assertEqual(args.max_tavily_new, 3)
 
+    def test_full_pilot_skips_heavy_presync_and_requires_pool(self):
+        source = (Path(__file__).resolve().parents[1] / "pipeline_produtos.py").read_text(encoding="utf-8-sig")
+        self.assertIn('args.mode in {"collect", "full"} and args.tavily_pool', source)
+        self.assertIn("TAVILY_POOL_REQUIRED", source)
+        self.assertIn("TAVILY_POOL_NO_AUTHORIZED_BUDGET", source)
+
     def test_interactive_collect_directly_uses_tavily_pool(self):
         from pipeline_produtos import interactive_menu
         responses = iter(["1", "3"])
