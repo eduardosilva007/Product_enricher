@@ -11388,23 +11388,8 @@ def _menu_limit(prompt: str) -> int:
 
 
 def _menu_search_provider() -> str:
-    """Seleção numérica explícita; nunca iniciar coleta com provider inválido."""
-    options = {"1": "tavily", "2": "serper", "3": "brightdata", "4": "scraperapi", "5": "auto"}
-    while True:
-        print("\nAPI DE COLETA / SEARCH")
-        print("1 - TAVILY")
-        print("2 - SERPER")
-        print("3 - BRIGHT DATA")
-        print("4 - SCRAPERAPI (MANUAL / EXPERIMENTAL)")
-        print("5 - AUTOMATICO (TAVILY / BRIGHT DATA / SERPER: ROTACAO ENTRE CONTAS)")
-        raw = input("Selecione [1/2/3/4/5] (ENTER = 5 / AUTOMATICO): ").strip()
-        if not raw:
-            raw = "5"
-        if raw in options:
-            choice = options[raw]
-            print(f"API selecionada: {choice.upper()}")
-            return choice
-        print("Opção inválida. Escolha 1, 2, 3, 4 ou 5.")
+    """Compatibilidade com chamadores antigos: coleta operacional é Tavily-only."""
+    return "tavily"
 
 
 def _menu_llm_provider() -> str:
@@ -11453,24 +11438,12 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     elif op not in {"1","2","3"}:
         raise ValueError("Opcao invalida")
     if op == "1":
-        provider = _menu_search_provider()
-        # Diferente do piloto de classificacao (ENTER=100), coleta em branco
-        # significa SEM LIMITE. A lista exata de requests e confirmada antes
-        # de qualquer chamada; RAW ja consultado nunca entra automaticamente.
-        raw_limit = input("Limite de produtos para coleta (ENTER = todos; 0 buscas para itens ja consultados): ").strip().upper()
-        if raw_limit and raw_limit != "TODOS" and (not raw_limit.isdecimal() or int(raw_limit) <= 0):
-            raise ValueError("Limite de coleta deve ser inteiro positivo ou TODOS/ENTER")
-        limite = int(raw_limit) if raw_limit and raw_limit != "TODOS" else 0
-        argv = ["--mode", "collect"]
-        if provider == "auto":
-            argv += ["--auto-providers"]
-        else:
-            argv += ["--search-provider", provider]
-        if provider in {"scraperapi", "auto"} and not 1 <= limite <= 10:
-            raise ValueError("PILOTO_EXIGE_LIMITE_EXPLICITO_1_A_10")
-        if limite:
-            argv += ["--max-search-new", str(limite)]
-        return parser.parse_args(argv)
+        print("\\nCOLETA: TAVILY (pool de contas autorizadas)")
+        limite = _menu_limit("Limite de SKUs para coleta (1 a 100; obrigatorio): ")
+        if not 1 <= limite <= 100:
+            raise ValueError("TAVILY_POOL_REQUIRES_EXPLICIT_BATCH_1_TO_100")
+        return parser.parse_args(["--mode", "collect", "--search-provider", "tavily",
+                                  "--tavily-pool", "--max-search-new", str(limite)])
     if op == "2":
         limite = _menu_limit("Limite de produtos para piloto (ENTER = todos): ")
         llm = _menu_llm_provider()
@@ -11479,28 +11452,16 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
     if op == "3":
-        provider = _menu_search_provider()
-        limite_search = _menu_limit("Limite de produtos na coleta (ENTER = todos): ")
-        limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
+        print("\\nPROCESSO COMPLETO: TAVILY -> CURADORIA -> CLASSIFICACAO")
+        limite_search = _menu_limit("Limite de SKUs para coleta (1 a 10 no piloto completo): ")
+        limite_class = _menu_limit("Limite de SKUs para classificacao (1 a 10 no piloto completo): ")
         llm = _menu_llm_provider()
-        argv = ["--mode", "full", "--llm-provider", llm]
-        if provider == "auto":
-            argv += ["--auto-providers"]
-        else:
-            argv += ["--search-provider", provider]
-        if provider in {"scraperapi", "auto"}:
-            if not (1 <= limite_search <= 10 and 1 <= limite_class <= 10):
-                raise ValueError("PILOTO_EXIGE_LIMITES_1_A_10")
-            argv += ["--max-api-calls", "15", "--max-tokens", "30000"]
-        low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
-        if low == "S":
-            if provider == "scraperapi":
-                raise ValueError("EXPERIMENTAL_NO_RECOLLECT_OR_REPROCESS")
-            argv += ["--recollect-low-evidence"]
-        if limite_search:
-            argv += ["--max-search-new", str(limite_search)]
-        if limite_class:
-            argv += ["--max-items", str(limite_class)]
+        if not (1 <= limite_search <= 10 and 1 <= limite_class <= 10):
+            raise ValueError("TAVILY_FULL_PILOT_REQUIRES_EXPLICIT_LIMITS_1_TO_10")
+        argv = ["--mode", "full", "--search-provider", "tavily", "--tavily-pool",
+                "--llm-provider", llm, "--max-search-new", str(limite_search),
+                "--max-items", str(limite_class), "--max-api-calls", "15",
+                "--max-tokens", "30000"]
         return parser.parse_args(argv)
     if op == "4":
         limite = _menu_limit("Limite de pendências COM CACHE para reprocessar (ENTER = todas): ")
@@ -12201,7 +12162,9 @@ def main() -> int:
             ".env carregado: %s | CLEF=%s | TAVILY=%s | SERPER=%s | BRIGHTDATA=%s | BRIGHTDATA_ZONE=%s",
             env_info["path"],
             "CONFIGURADA" if bool(os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()) and bool((os.getenv("CLOUDFLARE_API_TOKEN", "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip())) else "AUSENTE",
-            "CONFIGURADA" if bool(os.getenv("TAVILY_API_KEY", "").strip()) else "AUSENTE",
+            ("CONFIGURADA_POOL(" + str(sum(bool(os.getenv(f"TAVILY_API_KEY_{i}", "").strip()) for i in range(1, 21))) + "_CHAVES)"
+             if any(os.getenv(f"TAVILY_API_KEY_{i}", "").strip() for i in range(1, 21))
+             else ("CONFIGURADA" if os.getenv("TAVILY_API_KEY", "").strip() else "AUSENTE")),
             "CONFIGURADA" if bool(os.getenv("SERPER_API_KEY", "").strip()) else "AUSENTE",
             _brightdata_slot_diagnostic()[0],
             _brightdata_slot_diagnostic()[1],
@@ -12348,6 +12311,10 @@ def main() -> int:
             "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
         )
     if args.mode in {"collect", "full"}:
+        if args.auto_providers or (args.search_provider and args.search_provider.casefold() != "tavily"):
+            LOG.error("ONLY_TAVILY_SEARCH_SUPPORTED: provedor alternativo desativado para coleta/full")
+            return 2
+        # CLI legado --search-provider tavily sem pool continua aceito para compatibilidade.
         _enforce_central_search_paths(args, cfg, _resolve_search_provider(args, cfg))
     if args.mode in {"collect", "full", "classify", "recover", "overnight"}:
         central_integrity = audit_committed_classifications(cfg, commit=False)
