@@ -140,7 +140,7 @@ def _baseline_signature(paths: Dict[str, Optional[Path]], rules_hash: str) -> Di
             result["files"][name] = None
             continue
         resolved = Path(path).resolve()
-        if name in {"input", "master", "final"} and not resolved.is_file():
+        if name in {"input", "master", "final", "cache", "config", "taxonomy", "collection_policy"} and not resolved.is_file():
             return {}
         candidates = [resolved]
         if resolved.suffix.lower() in {".sqlite", ".db"}:
