@@ -11524,11 +11524,11 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(argv)
     if op == "3":
         print("\nPROCESSO COMPLETO: TAVILY -> CURADORIA -> CLASSIFICACAO")
-        limite_search = _menu_limit("Limite de SKUs para coleta (1 a 10 no piloto completo): ")
-        limite_class = _menu_limit("Limite de SKUs para classificacao (1 a 10 no piloto completo): ")
+        limite_search = _menu_limit("Quantidade de SKUs do processo completo (1 a 10 nesta versao): ")
+        limite_class = limite_search  # Cohort contract: coleta e classificacao com mesmos SKUs.
         llm = _menu_llm_provider()
-        if not (1 <= limite_search <= 10 and 1 <= limite_class <= 10):
-            raise ValueError("TAVILY_FULL_PILOT_REQUIRES_EXPLICIT_LIMITS_1_TO_10")
+        if not 1 <= limite_search <= 10:
+            raise ValueError("TAVILY_FULL_PILOT_REQUIRES_EXPLICIT_LIMIT_1_TO_10")
         argv = ["--mode", "full", "--search-provider", "tavily", "--tavily-pool",
                 "--llm-provider", llm, "--max-search-new", str(limite_search),
                 "--max-items", str(limite_class), "--max-api-calls", "15",
@@ -12391,6 +12391,9 @@ def main() -> int:
             return 2
         if not 1 <= int(args.max_tavily_new or 0) <= (10 if args.mode == "full" else 100):
             LOG.error("TAVILY_POOL_EXPLICIT_BATCH_REQUIRED")
+            return 2
+        if args.mode == "full" and int(args.max_items or 0) != int(args.max_tavily_new or 0):
+            LOG.error("FULL_COHORT_LIMIT_MISMATCH: classificacao deve cobrir todos os SKUs coletados")
             return 2
         if not [s for s in configured_slots() if s.provider == "tavily"]:
             LOG.error("TAVILY_POOL_NO_AUTHORIZED_BUDGET: nenhuma chave Tavily com LIMIT_N configurado")
