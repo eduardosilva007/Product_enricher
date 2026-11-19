@@ -3921,7 +3921,10 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                             else f"COLLECT_{provider.upper()}_{COLLECTION_LABEL}"
                         ),
                     )
-                if (auto_route or provider in {"openserp", "scraperapi"}) and curated:
+                # FULL must account for every collected SKU, even when Source Sieve
+                # found zero curated sources. The classifier's evidence gates
+                # decide REVIEW/PENDING; never silently drop from the cohort.
+                if (auto_route or provider in {"openserp", "scraperapi"}):
                     experimental_targets.append((brand, model, key))
                 reported_credits = usage.get("reported_credits")
                 product_rows.append({
@@ -4019,7 +4022,12 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         )
         if auto_route or provider in {"openserp", "scraperapi"}:
             cfg["_experimental_collected_targets"] = list(experimental_targets)
-            LOG.info("EXPERIMENTAL CLASSIFICATION SCOPE | ready_targets=%d", len(experimental_targets))
+            ready_count = sum(1 for row in product_rows
+                              if int(row.get("Curated Sources", 0) or 0) > 0)
+            LOG.info("FULL COLLECTION SCOPE | collected_targets=%d | curated_targets=%d | no_curated=%d | all_forwarded_for_outcome=%s",
+                     len(experimental_targets), ready_count,
+                     len(experimental_targets) - ready_count,
+                     "YES" if len(experimental_targets) == len(product_rows) else "NO")
         return completed
     except KeyboardInterrupt:
         _export_collection_quality_report(product_rows, source_rows, query_rows, report_path)
@@ -12492,13 +12500,16 @@ def main() -> int:
         if args.auto_providers or args.tavily_pool or provider == "scraperapi":
             targets = cfg.pop("_experimental_collected_targets", [])
             if not targets:
-                LOG.warning("EXPERIMENTAL FULL: nenhum SKU com evidência curada nesta coleta; "
-                            "RAW preservado no cache central; nenhuma classificação autorizada")
+                LOG.warning("FULL COLLECTION SCOPE: nenhum SKU concluído na coleta; nenhuma classificação iniciada")
                 return 0
-            if len(targets) > int(args.max_items):
-                LOG.warning("EXPERIMENTAL FULL: truncando targets classificados %d para limite=%d", len(targets), args.max_items)
-                targets = targets[:int(args.max_items)]
-            LOG.info("EXPERIMENTAL FULL: classificação restrita aos %d SKUs da coleta atual", len(targets))
+            if len(targets) > int(args.max_items or 0) > 0:
+                raise RuntimeError(
+                    "FULL_COHORT_CLASSIFICATION_LIMIT_MISMATCH: coletados="
+                    f"{len(targets)}, limite_classificacao={args.max_items}. "
+                    "Nao truncar silenciosamente: alinhe limites antes de nova coleta."
+                )
+            LOG.info("FULL CLASSIFICATION SCOPE | collected=%d | cohort=%d | no_evidence_items_receive_review",
+                     len(targets), len(targets))
             run_pipeline(args, cfg, rules, explicit_targets=targets)
         else:
             run_pipeline(args, cfg, rules)
