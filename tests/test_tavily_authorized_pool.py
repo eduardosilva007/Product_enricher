@@ -109,6 +109,43 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
             finally:
                 router.close()
 
+    def test_sha256_baseline_fingerprint_invalidates_on_any_change(self):
+        from pipeline_produtos import (
+            _baseline_signature, _baseline_sync_manifest_check,
+            _baseline_sync_manifest_store,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            names = ("input", "master", "final", "cache", "config", "taxonomy", "collection_policy")
+            paths = {name: root / (name + (".sqlite" if name == "cache" else ".dat")) for name in names}
+            for name, path in paths.items():
+                path.write_bytes(name.encode("ascii"))
+            manifest = root / "state.json"
+            first = _baseline_signature(paths, "rules-v1")
+            self.assertTrue(first)
+            self.assertFalse(_baseline_sync_manifest_check(manifest, first))
+            _baseline_sync_manifest_store(manifest, first)
+            self.assertTrue(_baseline_sync_manifest_check(manifest, first))
+            paths["final"].write_bytes(b"new-manual-BI-value")
+            self.assertFalse(_baseline_sync_manifest_check(
+                manifest, _baseline_signature(paths, "rules-v1")))
+            paths["final"].write_bytes(b"final")
+            paths["cache"].with_name("cache.sqlite-wal").write_bytes(b"new-cache-write")
+            self.assertFalse(_baseline_sync_manifest_check(
+                manifest, _baseline_signature(paths, "rules-v1")))
+            self.assertFalse(_baseline_sync_manifest_check(
+                manifest, _baseline_signature(paths, "rules-v2")))
+
+    def test_fingerprint_fail_closed_without_workbooks(self):
+        from pipeline_produtos import _baseline_signature
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertFalse(_baseline_signature({
+                "input": root / "missing.xlsx",
+                "master": root / "master.xlsx",
+                "final": root / "final.xlsx",
+            }, "rule-hash"))
+
     def test_explicit_new_period_keeps_old_sku_reservations(self):
         from datetime import datetime, timezone
         today_utc = datetime.now(timezone.utc).date().isoformat()
