@@ -22,6 +22,30 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
         self.assertFalse(args.auto_providers)
         self.assertEqual(args.max_tavily_new, 3)
 
+    def test_interactive_collect_directly_uses_tavily_pool(self):
+        from pipeline_produtos import interactive_menu
+        responses = iter(["1", "3"])
+        with patch("builtins.input", side_effect=lambda *_: next(responses)):
+            args = interactive_menu(Path("."))
+        self.assertEqual(args.mode, "collect")
+        self.assertEqual(args.search_provider, "tavily")
+        self.assertTrue(args.tavily_pool)
+        self.assertFalse(args.auto_providers)
+        self.assertEqual(args.max_tavily_new, 3)
+
+    def test_interactive_full_directly_uses_tavily_pool(self):
+        from pipeline_produtos import interactive_menu
+        responses = iter(["3", "3", "3", "3"])
+        with patch("builtins.input", side_effect=lambda *_: next(responses)):
+            args = interactive_menu(Path("."))
+        self.assertEqual(args.mode, "full")
+        self.assertEqual(args.search_provider, "tavily")
+        self.assertTrue(args.tavily_pool)
+        self.assertFalse(args.auto_providers)
+        self.assertEqual(args.max_tavily_new, 3)
+        self.assertEqual(args.max_items, 3)
+        self.assertEqual(args.llm_provider, "local")
+
     def test_twenty_tavily_slots_and_other_providers_can_be_excluded(self):
         env = {f"TAVILY_API_KEY_{i}": f"offline-key-{i}" for i in range(1, 21)}
         env.update({f"TAVILY_LIMIT_{i}": "2" for i in range(1, 21)})
