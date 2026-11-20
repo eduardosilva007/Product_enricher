@@ -208,7 +208,7 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
             for name in ("master", "final"):
                 old[name] = root / f"original_{name}.xlsx"
                 staged[name] = root / f"staged_{name}.xlsx"
-                pd.DataFrame(columns=["Marca", "Modelo"]).to_excel(old[name], index=False)
+                pd.DataFrame(columns=pp.BASELINE_PUBLIC_COLUMNS).to_excel(old[name], index=False)
                 copy2(old[name], staged[name])
             pairs = {
                 pp.business_key("BRAND", "GOOD"): ("BRAND", "GOOD"),
