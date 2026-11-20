@@ -11524,16 +11524,53 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(argv)
     if op == "3":
         print("\nPROCESSO COMPLETO: TAVILY -> CURADORIA -> CLASSIFICACAO")
-        limite_search = _menu_limit("Quantidade de SKUs do processo completo (1 a 10 nesta versao): ")
-        limite_class = limite_search  # Cohort contract: coleta e classificacao com mesmos SKUs.
+        quantidade = _menu_limit("Total de SKUs da campanha (numero positivo): ")
+        if quantidade < 1:
+            raise ValueError("FULL_CAMPAIGN_REQUIRES_POSITIVE_TOTAL")
         llm = _menu_llm_provider()
-        if not 1 <= limite_search <= 10:
-            raise ValueError("TAVILY_FULL_PILOT_REQUIRES_EXPLICIT_LIMIT_1_TO_10")
-        argv = ["--mode", "full", "--search-provider", "tavily", "--tavily-pool",
-                "--llm-provider", llm, "--max-search-new", str(limite_search),
-                "--max-items", str(limite_class), "--max-api-calls", "15",
-                "--max-tokens", "30000"]
-        return parser.parse_args(argv)
+        if quantidade <= 10:
+            # Keep the existing small-cohort FULL route and its classifier choices.
+            return parser.parse_args([
+                "--mode", "full", "--search-provider", "tavily", "--tavily-pool",
+                "--llm-provider", llm, "--max-search-new", str(quantidade),
+                "--max-items", str(quantidade), "--max-api-calls", "15",
+                "--max-tokens", "30000",
+            ])
+        # Large-scale FULL uses the existing resumable campaign engine.
+        # Its per-sublot search limit is independent from the campaign total.
+        if llm != "jev":
+            raise ValueError(
+                "OVERNIGHT_CAMPAIGN_REQUIRES_JEV: para mais de 10 SKUs "
+                "selecione JEV; Clef/local continuam disponiveis no piloto ate 10"
+            )
+        lote = _menu_limit("SKUs por sublote (1 a 20): ")
+        if not 1 <= lote <= 20:
+            raise ValueError("OVERNIGHT_SUBLOT_REQUIRES_1_TO_20")
+        jev_total = _menu_limit("Orcamento TOTAL de chamadas JEV da campanha (positivo): ")
+        token_total = _menu_limit("Orcamento TOTAL de tokens da campanha (positivo): ")
+        if jev_total < 1 or token_total < 1:
+            raise ValueError("OVERNIGHT_CAMPAIGN_REQUIRES_POSITIVE_LLM_BUDGETS")
+        print(
+            f"\\nPREVISAO: campanha={quantidade} SKUs; sublote={lote}; "
+            f"max_search={quantidade}; JEV_total={jev_total}; "
+            f"tokens_total={token_total}. "
+            "Resultados isolados; promocao oficial exige auditoria separada."
+        )
+        confirmed = input(
+            "Para executar chamadas reais de API, digite EXECUTAR (ENTER cancela): "
+        ).strip()
+        if confirmed != "EXECUTAR":
+            raise SystemExit("CAMPANHA_CANCELADA_SEM_CHAMADAS_API")
+        return parser.parse_args([
+            "--mode", "overnight", "--execute-live", "--yes",
+            "--tavily-pool", "--campaign-total", str(quantidade),
+            "--search-budget", str(lote),
+            "--llm-budget", str(min(jev_total, 100)),
+            "--token-budget", str(min(token_total, 200000)),
+            "--campaign-jev-budget", str(jev_total),
+            "--campaign-token-budget", str(token_total),
+            "--campaign-review-before-promotion", "--night-output-only",
+        ])
     if op == "4":
         limite = _menu_limit("Limite de pendências COM CACHE para reprocessar (ENTER = todas): ")
         llm = _menu_llm_provider()
