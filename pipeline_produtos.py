@@ -11543,30 +11543,26 @@ def interactive_menu(base: Path) -> argparse.Namespace:
                 "OVERNIGHT_CAMPAIGN_REQUIRES_JEV: para mais de 10 SKUs "
                 "selecione JEV; Clef/local continuam disponiveis no piloto ate 10"
             )
-        lote = _menu_limit("SKUs por sublote (1 a 20): ")
-        if not 1 <= lote <= 20:
-            raise ValueError("OVERNIGHT_SUBLOT_REQUIRES_1_TO_20")
-        jev_total = _menu_limit("Orcamento TOTAL de chamadas JEV da campanha (positivo): ")
-        token_total = _menu_limit("Orcamento TOTAL de tokens da campanha (positivo): ")
-        if jev_total < 1 or token_total < 1:
-            raise ValueError("OVERNIGHT_CAMPAIGN_REQUIRES_POSITIVE_LLM_BUDGETS")
+        # Operational batching and quota caps are internal implementation details.
+        # A single explicit confirmation shows the maximum authorized envelope.
+        lote = 10
+        jev_total = (quantidade * 3 + 1) // 2
+        token_total = quantidade * 3000
         print(
-            f"\nPREVISAO: campanha={quantidade} SKUs; sublote={lote}; "
-            f"max_search={quantidade}; JEV_total={jev_total}; "
-            f"tokens_total={token_total}. "
-            "Resultados isolados; promocao oficial exige auditoria separada."
+            f"\nCONFIRMACAO: {quantidade} produtos | "
+            f"limites maximos: {quantidade} consultas Tavily, "
+            f"{jev_total} chamadas JEV e {token_total} tokens. "
+            "Execucao com checkpoints; resultados isolados ate revisao."
         )
-        confirmed = input(
-            "Para executar chamadas reais de API, digite EXECUTAR (ENTER cancela): "
-        ).strip()
+        confirmed = input("Iniciar processamento? Digite EXECUTAR (ENTER cancela): ").strip()
         if confirmed != "EXECUTAR":
             raise SystemExit("CAMPANHA_CANCELADA_SEM_CHAMADAS_API")
         return parser.parse_args([
             "--mode", "overnight", "--execute-live", "--yes",
             "--tavily-pool", "--campaign-total", str(quantidade),
             "--search-budget", str(lote),
-            "--llm-budget", str(min(jev_total, 100)),
-            "--token-budget", str(min(token_total, 200000)),
+            "--llm-budget", "15",
+            "--token-budget", "30000",
             "--campaign-jev-budget", str(jev_total),
             "--campaign-token-budget", str(token_total),
             "--campaign-review-before-promotion", "--night-output-only",
