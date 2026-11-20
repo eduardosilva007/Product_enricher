@@ -111,6 +111,15 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
             self.assertEqual(empty["Auto Eligible"], "NÃO")
             self.assertEqual(good["FAMILY"], "DRILL")
 
+    def test_all_no_evidence_exports_valid_empty_workbook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "classification_output.xlsx"
+            pp.export_excel([], output, {"products": 0})
+            frame = pd.read_excel(
+                output, sheet_name="Resultados", keep_default_na=False)
+            self.assertEqual(list(frame.columns), ["Marca", "Modelo"])
+            self.assertEqual(len(frame), 0)
+
     def test_no_evidence_cannot_be_approved_at_promotion(self):
         code = (Path(__file__).resolve().parents[1] /
                 "pipeline_produtos.py").read_text(encoding="utf-8-sig")
