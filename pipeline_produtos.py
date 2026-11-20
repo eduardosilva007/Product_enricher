@@ -9915,6 +9915,10 @@ def export_excel(rows: List[Dict[str, Any]], out_path: Path, summary: Dict[str, 
     import pandas as pd
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
+    if df.empty and not len(df.columns):
+        # An all-no-evidence cohort still needs an auditable, valid Resultados
+        # sheet so that a single empty batch never aborts the campaign.
+        df = pd.DataFrame(columns=["Marca", "Modelo"])
     rev = df[df.get("Review Required", pd.Series(dtype=str)).astype(str).str.upper().eq("SIM")].copy() if not df.empty else pd.DataFrame()
     summ = pd.DataFrame([{"Métrica": k, "Valor": v} for k, v in summary.items()])
     # Never leave a malformed temporary workbook after failed exports.
