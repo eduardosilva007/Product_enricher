@@ -13276,10 +13276,17 @@ def outcome_audit(run,state,isolated):
         missing_existing=["ROW_COUNT_DECREASED"]
     protected_changes=protected_details
     raw_states={}
+    pending_raw_keys=[]
+    raw_state_by_key={}
     with closing(TavilyReadOnlyStore(Path(isolated["files"]["cache"]))) as store:
         for _, row in cohort.iterrows():
-            ev=store.get(safe(row[cohort_b]),safe(row[cohort_m]))
+            brand, model = safe(row[cohort_b]), safe(row[cohort_m])
+            key = business_key(brand, model)
+            ev=store.get(brand,model)
             raw_states[ev.state]=raw_states.get(ev.state,0)+1
+            raw_state_by_key[key]=ev.state
+            if ev.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+                pending_raw_keys.append(key)
     labels=["BASE FINAL INPUT ROW COVERAGE OK","BASE FINAL PROCV COVERAGE OK",
             "BASE FINAL CLASSIFICATION INTEGRITY"]
     log=run/"classification_01.log"
@@ -13321,6 +13328,13 @@ def outcome_audit(run,state,isolated):
                     or not set(result_keys).issubset(cohort_keys)):
                 result_errors.append("RESULT_COHORT_MISMATCH")
             for _, row in results.iterrows():
+                key = business_key(safe(row.get("Marca")), safe(row.get("Modelo")))
+                if raw_state_by_key.get(key) not in {"RAW_OK", "RAW_OK_MERGED"}:
+                    if (safe(row.get("Auto Eligible")).upper() == "SIM"
+                            or _record_is_accepted(row)
+                            or safe(row.get("Category General"))
+                            or safe(row.get("FAMILY"))):
+                        result_errors.append("NO_EVIDENCE_CLASSIFICATION_BLOCKED:" + key)
                 for issue in _overnight_auto_title_identity_errors(row, isolated):
                     result_errors.append(f"{issue}: {safe(row.get('Marca'))}|{safe(row.get('Modelo'))}")
                 resolved = safe(row.get("Resolution State")) == "RESOLVED"
@@ -13332,7 +13346,7 @@ def outcome_audit(run,state,isolated):
                     result_errors.append("FALSE_AUTO_ELIGIBLE")
                     break
     passed=(not missing and not missing_existing and not protected_changes
-            and not protected_originals(state) and useful_raw==len(cohort)
+            and not protected_originals(state)
             and not result_errors and all(log_checks.values()))
     result={"status":"PASS" if passed else "FAIL","cohort":len(cohort),
             "classification_output_only":output_only,
@@ -13342,6 +13356,9 @@ def outcome_audit(run,state,isolated):
             "protected_changes_total":len(protected_changes),
             "protected_changes_by_type":protected_counts,
             "cache_states_after":raw_states,"useful_raw_count":useful_raw,
+            "pending_raw_count":len(pending_raw_keys),
+            "pending_raw_keys":pending_raw_keys,
+            "accounted_cohort_count":useful_raw+len(pending_raw_keys),
             "log_contracts":log_checks,
             "result_integrity_errors":result_errors,
             "original_source_modified":protected_originals(state),
@@ -13853,7 +13870,7 @@ def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, reco
         if key in cache:
             raise RuntimeError("CENTRALIZE_DUPLICATE_RAW:" + key)
         cache[key] = payload
-    if set(cache) != set(pairs):
+    if not set(cache).issubset(set(pairs)):
         raise RuntimeError("CENTRALIZE_RAW_KEYS_DIFFER")
     proposals = {}
     for rec in records:
@@ -13921,7 +13938,7 @@ def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, reco
                 sheet.cell(pos, headers[bc], pair[0])
                 sheet.cell(pos, headers[mc], pair[1])
                 counts["new"] += 1
-            payload = cache[key] or {}
+            payload = cache.get(key) or {}
             coll = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
             sources = list(coll.get("curated_results") or []) + list(payload.get("results") or [])
             reference = next((s for s in sources if isinstance(s, dict) and safe(s.get("title"))), {})
@@ -13946,9 +13963,19 @@ def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, reco
                     "Fonte Referência URL": safe(reference.get("url")),
                     "Título Referência Identity": safe(reference.get("identity")),
                 })
-            if rec is None:
+            if key not in cache:
+                updates.update({
+                    "Status Coleta": "SEM_EVIDENCIA",
+                    "Raw State": "RAW_EMPTY",
+                    "Collection State": "NO_USABLE_EVIDENCE",
+                    "Próxima Ação": "REVISAR_EVIDENCIA_CACHE",
+                    "Motivo": "Pesquisa executada sem evidência utilizável; sem aprovação.",
+                    "Reason Code": "NIGHTLY_NO_USABLE_RAW",
+                })
+            if rec is None or key not in cache:
                 updates.update({"O que é (Tipo)": None, "Alimentação": "UNKNOWN",
-                                "Category General": None, "FAMILY": None})
+                                "Category General": None, "FAMILY": None,
+                                "Título Real": None, "Fonte URL": None})
             else:
                 for col in fields:
                     if col in rec and col not in {"Status", "Revisão B.I"}:
@@ -14053,7 +14080,9 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         cohort_keys = list(batch["cohort_keys"])
         if (batch.get("status") != "AUDIT_PASS" or audit_result.get("status") != "PASS"
                 or report.get("cohort_keys") != cohort_keys
-                or batch.get("raw_ok") != len(cohort_keys)
+                or batch.get("raw_ok") != audit_result.get("useful_raw_count")
+                 or batch.get("pending_raw", 0) != audit_result.get("pending_raw_count", 0)
+                 or audit_result.get("accounted_cohort_count") != len(cohort_keys)
                 or audit_result.get("protected_changes_total") != 0
                 or audit_result.get("original_source_modified")
                 or report.get("stages", {}).get("collection", {}).get("status") != "PASS"
@@ -14076,6 +14105,9 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         if not {"Marca", "Modelo"}.issubset(frame.columns):
             raise RuntimeError("PROMOTION_CLASSIFICATION_COLUMNS_MISSING")
         seen_output = set()
+        pending_keys = set(audit_result.get("pending_raw_keys", []))
+        if not pending_keys.issubset(set(cohort_keys)):
+            raise RuntimeError("PROMOTION_PENDING_KEY_OUTSIDE_COHORT")
         for record in frame.to_dict(orient="records"):
             brand, model = safe(record["Marca"]), safe(record["Modelo"])
             key = business_key(brand, model)
@@ -14086,6 +14118,9 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             if identity_errors:
                 raise RuntimeError("PROMOTION_AUTO_TITLE_IDENTITY_BLOCKED: " + key
                                    + ": " + ",".join(identity_errors))
+            # A no-RAW SKU is pending, NEVER a taxonomy proposal.
+            if key in pending_keys:
+                continue
             # A review proposal stays a proposal, never a human approval.
             record.pop("Revisão B.I", None)
             if safe(record.get("Resolution State")).upper() == "REVIEW_CACHE_EVIDENCE":
@@ -14108,7 +14143,11 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
                 brand, model = key_to_pair[key]
                 raw = cache.get(brand, model)
                 if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
-                    raise RuntimeError(f"PROMOTION_RAW_NOT_OK: {key}: {raw.state}")
+                    if key not in pending_keys:
+                        raise RuntimeError(f"PROMOTION_RAW_STATE_CHANGED: {key}: {raw.state}")
+                    continue
+                if key in pending_keys:
+                    raise RuntimeError(f"PROMOTION_PENDING_RAW_BECAME_VALID: {key}")
                 raw_items.append((brand, model, raw.payload))
     if len(keys) != state.get("audited_products"):
         raise RuntimeError("PROMOTION_COHORT_COUNT_MISMATCH")
@@ -14767,7 +14806,7 @@ def overnight_campaign(args, cfg, rules=None):
         keys = report.get("cohort_keys", [])
         if (quality.get("status") != "PASS"
                 or quality.get("protected_changes_total") != 0
-                or quality.get("useful_raw_count") != len(keys)
+                or quality.get("accounted_cohort_count") != len(keys)
                 or quality.get("original_source_modified")
                 or len(keys) != report.get("cohort_count")
                 or len(keys) != len(set(keys))):
@@ -14784,6 +14823,7 @@ def overnight_campaign(args, cfg, rules=None):
         state["batches"].append({
             "run_dir": str(sublot), "cohort_keys": keys,
             "cohort_count": len(keys), "raw_ok": quality.get("useful_raw_count", 0),
+            "pending_raw": quality.get("pending_raw_count", 0),
             "status": "AUDIT_PASS"})
         state["audited_products"] += len(keys)
         state["active_run"] = ""
