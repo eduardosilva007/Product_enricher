@@ -13957,8 +13957,12 @@ def overnight_campaign(args, cfg, rules=None):
         raise ValueError("Search cap per sublot must be 1..20")
     if getattr(args, "campaign_pause_after_sublots", 0) < 0:
         raise ValueError("campaign-pause-after-sublots must not be negative")
-    if getattr(args, "night_output_only", False) and not getattr(args, "campaign_review_before_promotion", False):
-        raise ValueError("NIGHT_OUTPUT_ONLY_REQUIRES_REVIEW_BEFORE_PROMOTION")
+    if not getattr(args, "campaign_review_before_promotion", False):
+        raise ValueError(
+            "OVERNIGHT_REVIEW_GATE_REQUIRED: run with "
+            "--campaign-review-before-promotion; autonomous collection/classification "
+            "must not auto-promote unreviewed taxonomy"
+        )
     gate(cfg, args)
 
     if args.campaign_resume_dir:
@@ -14122,10 +14126,9 @@ def overnight_campaign(args, cfg, rules=None):
 
     state["status"] = "COMPLETE" if state["audited_products"] == args.campaign_total else "PARTIAL"
     atomic_json(manifest_path, state)
-    if state["status"] == "COMPLETE" and rules is not None and not state.get("review_before_promotion", False):
-        # Legacy behavior: automatically persist fully audited campaigns unless
-        # the user explicitly requested human review before promotion.
-        overnight_promote_campaign(root, cfg, rules)
+    # A completed campaign is durable but always remains isolated.
+    # Explicit --mode overnight-promote is the only canonical write path.
+    # Preserve all audit checkpoints for offline review and controlled promotion.
     print(json.dumps({"campaign": str(manifest_path), "status": state["status"],
                       "audited": state["audited_products"], "target": args.campaign_total,
                       "jev_reserved": state["reserved_jev_calls"],
