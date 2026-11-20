@@ -13485,6 +13485,38 @@ def overnight_run_one(args, cfg, on_run_created=None):
                 if not success:
                     print("Collection stopped. Same cohort may resume; no new input keys allowed.")
                     return 2
+        # A previously failed worker may have exited only because the
+        # strictly bounded per-run JEV/token cap was reached. The original
+        # failure remains in recovery metadata. Salvage the durable partial
+        # workbook ONLY after independent audit; never invoke JEV again.
+        previous_classification = stages.get("classification", {})
+        if (args.resume_dir and isolated.get("_nightly_output_only")
+                and previous_classification.get("status") == "FAIL"
+                and previous_classification.get("attempts") == 1
+                and previous_classification.get("exit_code") == 1):
+            prior_log = run / safe(previous_classification.get("log"))
+            prior_text = (prior_log.read_text(encoding="utf-8", errors="replace")
+                          if prior_log.is_file() else "")
+            cap_failure = ("RECOVERY_BATCH_PAUSED: CLEF_LOCAL_TOKEN_CAP:" in prior_text
+                           or "RECOVERY_BATCH_PAUSED: CLEF_RUN_CAP:" in prior_text)
+            if (cap_failure and "NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK" in prior_text
+                    and Path(isolated["files"]["output"]).is_file()):
+                if not outcome_audit(run, state, isolated):
+                    raise RuntimeError("NIGHT_BUDGET_PAUSE_RECOVERY_AUDIT_FAILED")
+                previous_classification["recovery"] = {
+                    "mode": "OFFLINE_BOUNDED_BUDGET_PARTIAL_AUDIT",
+                    "original_status": "FAIL",
+                    "original_exit_code": 1,
+                    "jev_calls": 0,
+                    "original_log": safe(previous_classification.get("log")),
+                }
+                previous_classification["status"] = "PASS"
+                atomic_json(run / "run_report.json", state)
+                LOG.warning(
+                    "NIGHT_BUDGET_PAUSE_RECOVERED_OFFLINE | "
+                    "no_search_or_jev=YES | pending_classification=%s",
+                    state["quality_audit"]["pending_classification_count"],
+                )
         if stages.get("classification",{}).get("status")!="PASS":
             if stages.get("classification",{}).get("attempts",0)>0:
                 raise RuntimeError(
