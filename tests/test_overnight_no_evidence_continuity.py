@@ -118,7 +118,31 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
         self.assertIn("if output_only and budget_pause:", code)
         self.assertIn("OFFLINE_BOUNDED_BUDGET_PARTIAL_AUDIT", code)
         self.assertIn('raise RuntimeError("RECOVERY_BATCH_PAUSED: " + paused_reason)', code)
-        self.assertIn('raise RuntimeError("JEV_INCOMPLETE_REQUIRES_AUDIT:', code)
+        self.assertIn('"JEV_INCOMPLETE_REQUIRES_AUDIT: automatic classification resume disabled;', code)
+        self.assertIn('if stages.get("classification",{}).get("attempts",0)>0:', code)
+
+    def test_promotion_quarantines_identity_and_budget_pending(self):
+        import ast
+        code = (Path(__file__).resolve().parents[1] /
+                "pipeline_produtos.py").read_text(encoding="utf-8-sig")
+        tree = ast.parse(code)
+        promotion = next(node for node in tree.body
+                         if isinstance(node, ast.FunctionDef)
+                         and node.name == "overnight_promote_campaign")
+        source = ast.get_source_segment(code, promotion)
+        self.assertIn(
+            'pending_classification_keys = set(', source)
+        self.assertIn(
+            'quarantined_keys = pending_keys | identity_review_keys | pending_classification_keys',
+            source)
+        self.assertLess(source.index('pending_keys = set('),
+                        source.index('isolated_databases.append(('))
+        self.assertLess(source.index('identity_review_keys = set('),
+                        source.index('isolated_databases.append(('))
+        self.assertIn('set(cohort_keys) - quarantined_keys', source)
+        self.assertIn('if key in quarantined_keys:', source)
+        self.assertLess(source.index('if key in quarantined_keys:'),
+                        source.index('identity_errors = _overnight_auto_title_identity_errors('))
 
     def test_title_identity_mismatch_is_quarantined_not_campaign_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:
