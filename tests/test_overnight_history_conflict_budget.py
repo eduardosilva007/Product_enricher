@@ -146,7 +146,10 @@ class OvernightHistoricalReservationConflictTests(unittest.TestCase):
             before = production.read_bytes()
             buffer = io.StringIO()
             with patch.object(pp, "OUT", history), \
-                 patch.object(pp, "source_paths", return_value={"classification_db": production}), \
+                 patch.object(pp, "source_paths", return_value={
+                     "input": root / "input.xlsx", "cache": root / "cache.sqlite",
+                     "master": root / "master.xlsx", "final": root / "final.xlsx",
+                     "classification_db": production}), \
                  patch.object(pp, "overnight_audit", return_value=audit), \
                  redirect_stdout(buffer):
                 result = pp.overnight_campaign(args, {})
