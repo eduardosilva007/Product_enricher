@@ -81,7 +81,7 @@ DEFAULT_STRUCTURAL_EDGE_DECORATOR_REGEXES = (
 STRUCTURAL_CORE_MIN_COMPACT_CHARS = 6
 STRUCTURAL_CORE_MAX_EDGE_DECORATORS = 2
 MAX_COLLECTION_REQUESTS_PER_PRODUCT = 1
-ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata", "scraperapi", "openserp"}
+ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata", "scraperapi"}
 
 LOG = logging.getLogger("pipeline_v3")
 
@@ -126,6 +126,62 @@ def file_hash(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _baseline_signature(paths: Dict[str, Optional[Path]], rules_hash: str) -> Dict[str, Any]:
+    """Content-based signature; missing dependencies or mutable SQLite state fail closed.
+
+    This is intentionally not a shortcut for first-time data reconciliation.
+    All relevant files, including live SQLite WAL, are hashed before a warm skip.
+    """
+    result: Dict[str, Any] = {"version": 1, "rules_hash": rules_hash, "files": {}}
+    for name, path in sorted(paths.items()):
+        if path is None:
+            result["files"][name] = None
+            continue
+        resolved = Path(path).resolve()
+        if name in {"input", "master", "final", "cache", "config", "taxonomy", "collection_policy"} and not resolved.is_file():
+            return {}
+        candidates = [resolved]
+        if resolved.suffix.lower() in {".sqlite", ".db"}:
+            candidates += [Path(str(resolved) + "-wal"), Path(str(resolved) + "-journal")]
+        file_parts = []
+        for p in candidates:
+            if p.is_file():
+                stat_before = p.stat()
+                digest = file_hash(p)
+                stat_after = p.stat()
+                if (stat_before.st_size, stat_before.st_mtime_ns) != (stat_after.st_size, stat_after.st_mtime_ns):
+                    return {}
+                file_parts.append({"name": p.name, "sha256": digest, "size": stat_after.st_size})
+            else:
+                file_parts.append({"name": p.name, "absent": True})
+        result["files"][name] = {"path": str(resolved), "parts": file_parts}
+    return result
+
+
+def _baseline_sync_manifest_check(manifest: Path, signature: Dict[str, Any]) -> bool:
+    if not signature or not manifest.is_file():
+        return False
+    try:
+        record = json.loads(manifest.read_text(encoding="utf-8"))
+        return (isinstance(record, dict) and record.get("status") == "VERIFIED"
+                and record.get("signature") == signature)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _baseline_sync_manifest_store(manifest: Path, signature: Dict[str, Any]) -> None:
+    if not signature:
+        return
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    temp = manifest.with_name(manifest.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        temp.write_text(json.dumps({"status": "VERIFIED", "signature": signature},
+                                   ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        os.replace(temp, manifest)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def strip_accents(text: str) -> str:
@@ -3604,7 +3660,12 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     policy_errors = validate_collection_cost_policy(cfg)
     if policy_errors:
         raise CollectionCostPolicyError(" | ".join(policy_errors))
-    auto_route = bool(getattr(args, "auto_providers", False))
+    tavily_pool = bool(getattr(args, "tavily_pool", False))
+    if tavily_pool and (bool(getattr(args, "auto_providers", False)) or provider != "tavily"):
+        raise ValueError("TAVILY_POOL_REQUIRES_EXCLUSIVE_TAVILY: use --search-provider tavily sem --auto-providers")
+    if tavily_pool and not 1 <= int(args.max_tavily_new or 0) <= 100:
+        raise ValueError("TAVILY_POOL_REQUIRES_EXPLICIT_BATCH_1_TO_100")
+    auto_route = bool(getattr(args, "auto_providers", False) or tavily_pool)
     if auto_route and getattr(args, "mode", "collect") == "full":
         if not 1 <= int(args.max_tavily_new or 0) <= 10:
             raise ValueError("AUTO_ROUTE_PILOT_SEARCH_CAP_REQUIRED: --max-search-new 1..10")
@@ -3623,7 +3684,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     pre_report = Path(args.precollection_output or cfg.get("files", {}).get("precollection_report", "Pre_Coleta_R9_6.xlsx"))
     report_path = Path(cfg.get("files", {}).get("collection_report", "Coleta_Search_R9_6.xlsx"))
     if auto_route:
-        report_path = pre_report.with_name("Coleta_Argentina_Piloto.xlsx")
+        report_path = pre_report.with_name("Coleta_Tavily_Pool.xlsx" if tavily_pool else "Coleta_Argentina_Piloto.xlsx")
 
     files_cfg = cfg.get("files", {}) or {}
     master = Path(args.master or files_cfg.get("master", "")) if (args.master or files_cfg.get("master")) else None
@@ -3661,7 +3722,9 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
             business_key(safe(c.get("brand")), safe(c.get("model")))
             for c in cohorts if isinstance(c, dict)
         }
-    recovered_quota = recover_confirmed_serper_quota_reservations(
+    # The Tavily-only pilot is strictly read-only with respect to historical
+    # Serper reservations: separate forensic audit is required for release.
+    recovered_quota = 0 if tavily_pool else recover_confirmed_serper_quota_reservations(
         db_path, plan, max_releases=int(args.max_tavily_new or 0),
         allowed_keys=artifact_keys,
     )
@@ -3736,8 +3799,11 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                  len(cohorts), len(eligible), len(selected))
     candidates = [(r.brand_original, r.model_original, r.raw_state) for r in plan.candidates]
     slots = configured_slots() if auto_route and candidates else []
+    if tavily_pool:
+        slots = [slot for slot in slots if slot.provider == "tavily"]
+        LOG.info("TAVILY POOL PREFLIGHT | configured_authorized_slots=%d | batch=%d | other_providers=DISABLED", len(slots), len(candidates))
     if auto_route and candidates and not slots:
-        raise RuntimeError("AUTO_PROVIDERS: configure ao menos um *_LIMIT_1 positivo e credencial no .env")
+        raise RuntimeError("TAVILY_POOL_NO_AUTHORIZED_BUDGET: configure TAVILY_API_KEY_1 e TAVILY_LIMIT_1 positivos, com contas autorizadas" if tavily_pool else "AUTO_PROVIDERS: configure ao menos um *_LIMIT_1 positivo e credencial no .env")
 
     print()
     print("=" * 86)
@@ -3855,7 +3921,10 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                             else f"COLLECT_{provider.upper()}_{COLLECTION_LABEL}"
                         ),
                     )
-                if (auto_route or provider in {"openserp", "scraperapi"}) and curated:
+                # FULL must account for every collected SKU, even when Source Sieve
+                # found zero curated sources. The classifier's evidence gates
+                # decide REVIEW/PENDING; never silently drop from the cohort.
+                if (auto_route or provider in {"openserp", "scraperapi"}):
                     experimental_targets.append((brand, model, key))
                 reported_credits = usage.get("reported_credits")
                 product_rows.append({
@@ -3916,6 +3985,10 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                 })
                 if router and active_slot and (exc.code.endswith("_LIMIT") or exc.code.endswith("_AUTH") or exc.code.endswith("_SCHEMA")):
                     router.disable(active_slot.account, exc.code)
+                    if tavily_pool:
+                        LOG.error("TAVILY POOL PAUSADO | conta=%s | motivo=%s | sem trocar de conta apos bloqueio do provedor", active_slot.account, exc.code)
+                        completed = False
+                        break
                     LOG.warning("ROUTER | conta desabilitada=%s; segue no próximo SKU", active_slot.account)
                     continue
                 LOG.error("%s. Coleta pausada; tudo salvo até aqui permanece persistido.", exc)
@@ -3949,7 +4022,12 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
         )
         if auto_route or provider in {"openserp", "scraperapi"}:
             cfg["_experimental_collected_targets"] = list(experimental_targets)
-            LOG.info("EXPERIMENTAL CLASSIFICATION SCOPE | ready_targets=%d", len(experimental_targets))
+            ready_count = sum(1 for row in product_rows
+                              if int(row.get("Curated Sources", 0) or 0) > 0)
+            LOG.info("FULL COLLECTION SCOPE | collected_targets=%d | curated_targets=%d | no_curated=%d | all_forwarded_for_outcome=%s",
+                     len(experimental_targets), ready_count,
+                     len(experimental_targets) - ready_count,
+                     "YES" if len(experimental_targets) == len(product_rows) else "NO")
         return completed
     except KeyboardInterrupt:
         _export_collection_quality_report(product_rows, source_rows, query_rows, report_path)
@@ -10473,6 +10551,7 @@ def run_pipeline(
             raise RuntimeError("OUTPUT_ONLY_INVALID_COHORT_STATE")
 
     baseline_pre_stats: Dict[str, int] = {}
+    t_baseline_pre = time.perf_counter()
     if args.mode in {"classify", "full", "recover"}:
         backup_root = Path(cfg.get("files", {}).get("baseline_backup_dir", "Backups_Baseline"))
         backup_folder = _backup_baseline_files(master_path, final_path, backup_root)
@@ -10540,7 +10619,10 @@ def run_pipeline(
             "SIM" if baseline_pre_stats.get("pre_reconciled") else "NÃO",
         )
 
+    LOG.info("PERF STAGE | baseline_pre_reconciliation=%.2fs", time.perf_counter() - t_baseline_pre)
+    t_baseline_inventory = time.perf_counter()
     baseline_inventory = load_baseline_inventory(master_path, final_path)
+    LOG.info("PERF STAGE | baseline_inventory=%.2fs", time.perf_counter() - t_baseline_inventory)
     # Em Cache Recovery, explicit_targets é um conjunto deliberadamente autorizado
     # a substituir AUTO_APROVADO técnico antigo. HARD LOCK humano continua sendo
     # revalidado separadamente e nunca é vencido por esta lista.
@@ -10862,6 +10944,7 @@ def run_pipeline(
                          "canonical_promotion=BLOCKED")
             else:
                 try:
+                    t_final_excel = time.perf_counter()
                     baseline_stats = persist_baseline_excels(
                         rows=rows,
                         master_path=master_path,
@@ -10873,6 +10956,8 @@ def run_pipeline(
                         cache_path=cache_path,
                         cfg=cfg,
                     )
+                    LOG.info("PERF STAGE | baseline_write_and_audit=%.2fs | rows=%d",
+                             time.perf_counter() - t_final_excel, len(rows))
                     if baseline_stats:
                         post_inv = load_baseline_inventory(master_path, final_path)
                         final_cohort_accepted = len(
@@ -11301,7 +11386,7 @@ def validate_all(rules: Rules, cfg: Dict[str, Any], cache_override: str = "") ->
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Pipeline de Classificação de Produtos v4 Clef")
-    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "final-lookup-index", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup"], default="validate")
+    p.add_argument("--mode", choices=["validate", "inventory", "collect", "curate", "classify", "full", "recover", "repair", "evidence-export", "sync-input", "overnight", "overnight-centralize", "audit-central-cache", "final-lookup-index", "overnight-promote", "overnight-reconcile-failed", "overnight-recover-20", "promote-isolated-ten", "final-schema-cleanup", "tavily-pool-doctor"], default="validate")
     p.add_argument("--config", default="pipeline_config.json")
     p.add_argument("--rules", default="regras_negocio.json")
     p.add_argument("--collection-policy", default="")
@@ -11325,11 +11410,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-stale-auto", action="store_true", help="Recuperar tambem autoaprovados antigos.")
     p.add_argument("--recovery-ledger", default="", help="Arquivo de chaves ja tentadas pela recuperacao, para execucao sequencial em lotes.")
     p.add_argument("--max-tavily-new", "--max-search-new", dest="max_tavily_new", type=int, default=0)
-    p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata", "scraperapi", "openserp"], default="")
-    p.add_argument("--openserp-artifact", default="", help="Artefato OpenSERP staging local; nenhuma nova Search")
-    p.add_argument("--openserp-auto", action="store_true", help="Selecionar pelo planner oficial e pesquisar via GitHub Actions antes da coleta central")
+    p.add_argument("--search-provider", choices=["tavily", "serper", "brightdata", "scraperapi"], default="")
     p.add_argument("--recollect-empty", action="store_true")
     p.add_argument("--auto-providers", action="store_true", help="Rotação entre contas/provedores apenas para SKUs distintos")
+    p.add_argument("--tavily-pool", action="store_true", help="Coleta somente Tavily, distribuida entre chaves com orçamento explicitamente autorizado; sem retry de SKU")
     p.add_argument("--recollect-low-evidence", action="store_true")
     p.add_argument("--curate-all-cache", action="store_true", help="No modo curate, ignora o arquivo de entrada e percorre todo o cache")
     p.add_argument("--force-curate", action="store_true", help="Reavaliar a curadoria atual sem repetir Search; preserva historico do SQLite.")
@@ -11375,24 +11459,8 @@ def _menu_limit(prompt: str) -> int:
 
 
 def _menu_search_provider() -> str:
-    """Seleção numérica explícita; nunca iniciar coleta com provider inválido."""
-    options = {"1": "tavily", "2": "serper", "3": "brightdata", "4": "scraperapi", "5": "openserp", "6": "auto"}
-    while True:
-        print("\nAPI DE COLETA / SEARCH")
-        print("1 - TAVILY")
-        print("2 - SERPER")
-        print("3 - BRIGHT DATA")
-        print("4 - SCRAPERAPI (MANUAL / EXPERIMENTAL)")
-        print("5 - OPENSERP (BUSCA EM LOTES VIA GITHUB ACTIONS — SEM SERVICO LOCAL)")
-        print("6 - AUTOMATICO (TAVILY / BRIGHT DATA / SERPER: ROTACAO ENTRE CONTAS)")
-        raw = input("Selecione [1/2/3/4/5/6] (ENTER = 6 / AUTOMATICO): ").strip()
-        if not raw:
-            raw = "6"
-        if raw in options:
-            choice = options[raw]
-            print(f"API selecionada: {choice.upper()}")
-            return choice
-        print("Opção inválida. Escolha 1, 2, 3, 4, 5 ou 6.")
+    """Compatibilidade com chamadores antigos: coleta operacional é Tavily-only."""
+    return "tavily"
 
 
 def _menu_llm_provider() -> str:
@@ -11441,28 +11509,12 @@ def interactive_menu(base: Path) -> argparse.Namespace:
     elif op not in {"1","2","3"}:
         raise ValueError("Opcao invalida")
     if op == "1":
-        provider = _menu_search_provider()
-        # Diferente do piloto de classificacao (ENTER=100), coleta em branco
-        # significa SEM LIMITE. A lista exata de requests e confirmada antes
-        # de qualquer chamada; RAW ja consultado nunca entra automaticamente.
-        raw_limit = input("Limite de produtos para coleta (ENTER = todos; 0 buscas para itens ja consultados): ").strip().upper()
-        if raw_limit and raw_limit != "TODOS" and (not raw_limit.isdecimal() or int(raw_limit) <= 0):
-            raise ValueError("Limite de coleta deve ser inteiro positivo ou TODOS/ENTER")
-        limite = int(raw_limit) if raw_limit and raw_limit != "TODOS" else 0
-        argv = ["--mode", "collect"]
-        if provider == "auto":
-            argv += ["--auto-providers"]
-        else:
-            argv += ["--search-provider", provider]
-        if provider == "openserp":
-            argv += ["--openserp-auto", "--yes"]
-        if provider in {"scraperapi", "auto"} and not 1 <= limite <= 10:
-            raise ValueError("PILOTO_EXIGE_LIMITE_EXPLICITO_1_A_10")
-        if provider == "openserp" and limite < 1:
-            raise ValueError("OPENSERP_CAMPANHA_EXIGE_TOTAL_EXPLICITO")
-        if limite:
-            argv += ["--max-search-new", str(limite)]
-        return parser.parse_args(argv)
+        print("\nCOLETA: TAVILY (pool de contas autorizadas)")
+        limite = _menu_limit("Limite de SKUs para coleta (1 a 100; obrigatorio): ")
+        if not 1 <= limite <= 100:
+            raise ValueError("TAVILY_POOL_REQUIRES_EXPLICIT_BATCH_1_TO_100")
+        return parser.parse_args(["--mode", "collect", "--search-provider", "tavily",
+                                  "--tavily-pool", "--max-search-new", str(limite)])
     if op == "2":
         limite = _menu_limit("Limite de produtos para piloto (ENTER = todos): ")
         llm = _menu_llm_provider()
@@ -11471,34 +11523,16 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             argv += ["--max-items", str(limite)]
         return parser.parse_args(argv)
     if op == "3":
-        provider = _menu_search_provider()
-        limite_search = _menu_limit("Limite de produtos na coleta (ENTER = todos): ")
-        limite_class = _menu_limit("Limite de produtos na classificação (ENTER = todos): ")
+        print("\nPROCESSO COMPLETO: TAVILY -> CURADORIA -> CLASSIFICACAO")
+        limite_search = _menu_limit("Quantidade de SKUs do processo completo (1 a 10 nesta versao): ")
+        limite_class = limite_search  # Cohort contract: coleta e classificacao com mesmos SKUs.
         llm = _menu_llm_provider()
-        argv = ["--mode", "full", "--llm-provider", llm]
-        if provider == "auto":
-            argv += ["--auto-providers"]
-        else:
-            argv += ["--search-provider", provider]
-        if provider == "openserp":
-            argv += ["--openserp-auto", "--yes"]
-        if provider in {"scraperapi", "auto"}:
-            if not (1 <= limite_search <= 10 and 1 <= limite_class <= 10):
-                raise ValueError("PILOTO_EXIGE_LIMITES_1_A_10")
-            argv += ["--max-api-calls", "15", "--max-tokens", "30000"]
-        if provider == "openserp":
-            if limite_search < 1 or limite_class < limite_search:
-                raise ValueError("OPENSERP_FULL_EXIGE_CLASS_LIMIT_GE_SEARCH_TOTAL")
-            argv += ["--max-api-calls", "15", "--max-tokens", "30000"]
-        low = input("Recoletar também RAW existente com evidência target fraca? (S/N): ").strip().upper()
-        if low == "S":
-            if provider in {"openserp", "scraperapi"}:
-                raise ValueError("EXPERIMENTAL_NO_RECOLLECT_OR_REPROCESS")
-            argv += ["--recollect-low-evidence"]
-        if limite_search:
-            argv += ["--max-search-new", str(limite_search)]
-        if limite_class:
-            argv += ["--max-items", str(limite_class)]
+        if not 1 <= limite_search <= 10:
+            raise ValueError("TAVILY_FULL_PILOT_REQUIRES_EXPLICIT_LIMIT_1_TO_10")
+        argv = ["--mode", "full", "--search-provider", "tavily", "--tavily-pool",
+                "--llm-provider", llm, "--max-search-new", str(limite_search),
+                "--max-items", str(limite_class), "--max-api-calls", "15",
+                "--max-tokens", "30000"]
         return parser.parse_args(argv)
     if op == "4":
         limite = _menu_limit("Limite de pendências COM CACHE para reprocessar (ENTER = todas): ")
@@ -12109,224 +12143,64 @@ def _brightdata_slot_diagnostic() -> Tuple[str, str]:
     return configured, zone_status
 
 
-def _prepare_openserp_automatic_batch(args, cfg):
-    """Transport evidence for the official collection flow, not a second collector.
-
-    Selection delegates to the existing precollection planner, human locks,
-    cache and durable attempt reservations. No SQLite writes here: the normal
-    collect_products() performs reservations, curation and central persistence.
-    """
-    import csv
-    import subprocess
-    import hashlib
-    from contextlib import closing
-
-    if safe(getattr(args, "openserp_artifact", "")):
-        raise ValueError("OPENSERP_AUTO_REJECTS_MANUAL_ARTIFACT")
-    limit = int(getattr(args, "max_tavily_new", 0) or 0)
-    if not 1 <= limit <= 10:
-        raise ValueError("OPENSERP_AUTOMATIC_PILOT_LIMIT_REQUIRED_1_TO_10")
-
-    files = cfg["files"]
-    root = Path(__file__).resolve().parent
-    input_path = root / files["input"]
-    cache_path = root / files["cache"]
-    db_path = root / files["classification_db"]
-    protected = load_baseline_inventory(root / files["master"], root / files["final"])["processed"]
-    existing = set()
-    if db_path.is_file():
-        with closing(sqlite3.connect(db_path, timeout=30)) as conn:
-            table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='collection_attempt_reservations'"
-            ).fetchone()
-            if table:
-                existing = {r[0] for r in conn.execute(
-                    "SELECT business_key FROM collection_attempt_reservations"
-                )}
-    # Retain the current pilot policy: only NEW missing evidence, no forced
-    # RAW_EMPTY or weak-evidence recollection and no human-locked SKUs.
-    plan = build_precollection_plan(
-        input_path=input_path, cache_path=cache_path,
-        report_path=root / files.get("precollection_report", "Pre_Coleta.xlsx"),
-        recollect_empty=False, recollect_low_evidence=False,
-        cfg=cfg, max_tavily_new=limit, preserve_keys=protected,
-        exclude_attempted_keys=existing,
-    )
-    selected = list(plan.candidates)
-    if not selected:
-        LOG.info("OPENSERP AUTO | 0 SKUs elegíveis no precollection planner")
-        return False
-    keys = [(r.brand_original, r.model_original) for r in selected]
-    digest = hashlib.sha256(
-        json.dumps(keys, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()[:20]
-    # The campaign directory is a resumable transport checkpoint, not a
-    # second cache. Do not overwrite any prior artifact or campaign state.
-    campaign = root / ".runtime_cache" / "openserp" / digest
-    campaign.mkdir(parents=True, exist_ok=True)
-    manifest = campaign / "input_manifest.csv"
-    if not manifest.exists():
-        with manifest.open("w", encoding="utf-8", newline="") as stream:
-            writer = csv.writer(stream)
-            writer.writerow(("brand", "model"))
-            writer.writerows(keys)
-    else:
-        with manifest.open(encoding="utf-8", newline="") as stream:
-            rows = list(csv.DictReader(stream))
-        if [(row["brand"], row["model"]) for row in rows] != keys:
-            raise RuntimeError("OPENSERP_CAMPAIGN_MANIFEST_DRIFT")
-    transport = campaign / "transport"
-    cmd = [sys.executable, str(root / "openserp_campaign.py"),
-           "--manifest", str(manifest),
-           "--campaign-dir", str(transport),
-           "--batch-size", str(len(selected)),
-           "--engine", "google", "--execute-live"]
-    LOG.info("OPENSERP AUTO | seleção pelo planner oficial=%d | lote=%s",
-             len(selected), digest)
-    subprocess.run(cmd, cwd=root, check=True)
-    staging = transport / "batch_0000" / "openserp_staging.json"
-    if not staging.is_file():
-        raise RuntimeError("OPENSERP_STAGING_NOT_RETURNED")
-    cfg["_openserp_artifact_path"] = str(staging.resolve())
-    return True
-
-
-def _run_openserp_batched_campaign(args: argparse.Namespace) -> int:
-    """Run N SKUs through sequential <=10-SKU official collector executions.
-
-    Each child executes the unchanged validated collection -> official SQLite
-    persistence -> baseline synchronization flow. No second collector/database.
-    Abort on child failure or missing progress, never launch duplicate searches.
-    """
-    import subprocess
-    import math
-    from contextlib import closing
-
-    total = int(args.max_tavily_new or 0)
-    if total <= 10 or not args.openserp_auto or args.search_provider != "openserp":
-        raise ValueError("OPENSERP_BATCHED_CAMPAIGN_INVALID_ARGUMENTS")
-    if args.mode not in {"collect", "full"}:
-        raise ValueError("OPENSERP_BATCHED_CAMPAIGN_INVALID_MODE")
-    if args.mode == "full" and int(args.max_items or 0) < total:
-        raise ValueError("OPENSERP_FULL_EXIGE_CLASS_LIMIT_GE_SEARCH_TOTAL")
-
-    parser = build_parser()
-    # Serialize the actual parsed Namespace instead of reconstructing only a
-    # subset of CLI flags; preserves configured input/cache/db/LLM and budgets.
-    def child_argv(batch_size: int) -> List[str]:
-        override = vars(args).copy()
-        override["max_tavily_new"] = batch_size
-        if args.mode == "full":
-            override["max_items"] = batch_size
-        tokens: List[str] = []
-        for action in parser._actions:
-            if not action.option_strings or action.dest == "help":
-                continue
-            val = override.get(action.dest)
-            if isinstance(action, argparse._StoreTrueAction):
-                if val:
-                    tokens.append(action.option_strings[0])
-            elif isinstance(action, argparse._StoreFalseAction):
-                if val is False:
-                    tokens.append(action.option_strings[0])
-            elif isinstance(action, argparse._AppendAction):
-                for item in val or []:
-                    tokens.extend([action.option_strings[0], str(item)])
-            elif val not in (None, "", 0) and val != action.default:
-                tokens.extend([action.option_strings[0], str(val)])
-        return tokens
-
-    cfg = read_json(Path(args.config))
-    db_path = Path(args.db or cfg["files"]["classification_db"])
-    cache_path = Path(args.cache or cfg["files"]["cache"])
-    if not db_path.is_absolute():
-        db_path = Path(__file__).resolve().parent / db_path
-    if not cache_path.is_absolute():
-        cache_path = Path(__file__).resolve().parent / cache_path
-
-    def progress() -> Tuple[int, int]:
-        reservations = 0
-        cached = 0
-        if db_path.is_file():
-            with closing(sqlite3.connect(
-                f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True
-            )) as cx:
-                if cx.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
-                              "AND name='collection_attempt_reservations'").fetchone():
-                    reservations = cx.execute(
-                        "SELECT COUNT(*) FROM collection_attempt_reservations"
-                    ).fetchone()[0]
-        if cache_path.is_file():
-            with closing(sqlite3.connect(
-                f"file:{cache_path.resolve().as_posix()}?mode=ro", uri=True
-            )) as cx:
-                if cx.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
-                              "AND name='tavily_cache'").fetchone():
-                    cached = cx.execute("SELECT COUNT(*) FROM tavily_cache").fetchone()[0]
-        return reservations, cached
-
-    print(f"OPENSERP CAMPANHA | total solicitado={total} SKU(s) "
-          f"| lotes maximos={math.ceil(total / 10)} | ate 10 SKUs por lote "
-          "| ate 1 Search por SKU | cache central unico", flush=True)
-    completed = 0
-    for batch_no in range(1, math.ceil(total / 10) + 1):
-        size = min(10, total - completed)
-        before = progress()
-        print(f"OPENSERP LOTE {batch_no}/{math.ceil(total / 10)} "
-              f"| solicitados={size} | progresso={completed}/{total}", flush=True)
-        proc = subprocess.run(
-            [sys.executable, str(Path(__file__).resolve()), *child_argv(size)],
-            cwd=Path(__file__).resolve().parent,
-            check=False,
-        )
-        if proc.returncode != 0:
-            print(f"OPENSERP CAMPANHA PAUSADA | lote={batch_no} "
-                  f"| retorno={proc.returncode} | confirme cache e ledger; sem retry",
-                  flush=True)
-            return proc.returncode
-        after = progress()
-        delta_reservations = after[0] - before[0]
-        delta_cached = after[1] - before[1]
-        if delta_reservations < 0 or delta_cached < 0:
-            raise RuntimeError("OPENSERP_CAMPANHA_CENTRAL_COUNTER_REGRESSION")
-        # A reserved SKU without a central RAW row is a failed persistence,
-        # not a completed campaign item. Pause before launching another batch.
-        if delta_reservations > delta_cached:
-            print(f"OPENSERP CAMPANHA PAUSADA | CACHE_NOT_CENTRALIZED "
-                  f"| reservas_novas={delta_reservations} | cache_novos={delta_cached} "
-                  "| recuperar artifact antes de prosseguir", flush=True)
-            return 3
-        advanced = delta_cached
-        if advanced == 0:
-            print(f"OPENSERP CAMPANHA ENCERRADA | sem novos SKUs elegiveis "
-                  f"| lotes concluídos={batch_no - 1} | progresso={completed}/{total}",
-                  flush=True)
-            return 0
-        completed += min(size, advanced)
-        print(f"OPENSERP LOTE FINALIZADO | lote={batch_no} "
-              f"| reservas_novas={delta_reservations} "
-              f"| cache_novos={delta_cached} | progresso={completed}/{total}",
-              flush=True)
-    print(f"OPENSERP CAMPANHA FINAL | processados_ou_reservados={completed}/{total}",
-          flush=True)
+def tavily_pool_doctor(db_path: Path) -> int:
+    """Read-only preflight for authorized Tavily slots and durable attempt budgets."""
+    slots = [slot for slot in configured_slots() if slot.provider == "tavily"]
+    if not slots:
+        LOG.error("TAVILY_POOL_NO_AUTHORIZED_BUDGET | configure key and explicit positive limit")
+        return 2
+    import contextlib
+    counts = {}
+    disabled = {}
+    if db_path.exists():
+        try:
+            with contextlib.closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+                tables = {row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                if "collection_attempt_reservations" in tables:
+                    counts = dict(conn.execute(
+                        "SELECT account,COUNT(*) FROM collection_attempt_reservations GROUP BY account"))
+                if "collection_disabled_accounts" in tables:
+                    disabled = dict(conn.execute(
+                        "SELECT account,reason FROM collection_disabled_accounts"))
+        except sqlite3.Error as exc:
+            LOG.error("TAVILY_POOL_LEDGER_UNREADABLE | %s", type(exc).__name__)
+            return 2
+    print("TAVILY POOL DOCTOR | read_only=True | network_requests=0 | keys_hidden=True")
+    print("NOTE: budget windows reflect local reservations, not provider-confirmed credits")
+    total_available = 0
+    for slot in slots:
+        historic = int(counts.get(slot.account, 0))
+        used = historic
+        if slot.budget_since and db_path.exists():
+            try:
+                with contextlib.closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+                    used = int(conn.execute(
+                        "SELECT COUNT(*) FROM collection_attempt_reservations WHERE account=? AND reserved_at>=?",
+                        (slot.account, slot.budget_since),
+                    ).fetchone()[0]) if "collection_attempt_reservations" in tables else 0
+            except sqlite3.Error as exc:
+                LOG.error("TAVILY_POOL_PERIOD_LEDGER_UNREADABLE | %s", type(exc).__name__)
+                return 2
+        status = "DISABLED:" + disabled[slot.account] if slot.account in disabled else "READY"
+        available = max(0, slot.limit - used) if status == "READY" else 0
+        total_available += available
+        print(f"{slot.account} | historic_reserved={historic} | period_since={slot.budget_since or 'ALL_HISTORY'} | period_reserved={used} | budget={slot.limit} | remaining_at_account={available} | group={slot.group} | {status}")
+    print(f"ACCOUNT_SLOTS={len(slots)} | SUM_OF_PER_ACCOUNT_REMAINING={total_available} | shared_billing_groups_may_lower_capacity=True")
     return 0
 
 
 def main() -> int:
     base = Path(__file__).resolve().parent
     args = interactive_menu(base) if len(sys.argv) == 1 else build_parser().parse_args()
-    if (args.mode in {"collect", "full"} and args.openserp_auto
-            and args.search_provider == "openserp"
-            and int(args.max_tavily_new or 0) > 10):
-        return _run_openserp_batched_campaign(args)
     setup_logging(args.verbose)
     os.chdir(base)
     cfg_path = (base / args.config).resolve() if not Path(args.config).is_absolute() else Path(args.config)
     rules_path = (base / args.rules).resolve() if not Path(args.rules).is_absolute() else Path(args.rules)
     env_info = load_env_file(base / ".env")
     cfg = read_json(cfg_path)
-    if safe(getattr(args, "openserp_artifact", "")):
-        cfg["_openserp_artifact_path"] = str(Path(args.openserp_artifact).resolve())
+    if args.mode == "tavily-pool-doctor":
+        return tavily_pool_doctor(Path(args.db or cfg.get("files", {}).get("classification_db", "pipeline_v3.sqlite")))
     collection_policy_name = args.collection_policy or safe((cfg.get("files", {}) or {}).get("collection_policy")) or "collection_quality_policy.json"
     collection_policy_path = (base / collection_policy_name).resolve() if not Path(collection_policy_name).is_absolute() else Path(collection_policy_name)
     collection_policy = read_json(collection_policy_path)
@@ -12359,7 +12233,9 @@ def main() -> int:
             ".env carregado: %s | CLEF=%s | TAVILY=%s | SERPER=%s | BRIGHTDATA=%s | BRIGHTDATA_ZONE=%s",
             env_info["path"],
             "CONFIGURADA" if bool(os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()) and bool((os.getenv("CLOUDFLARE_API_TOKEN", "").strip() or os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip())) else "AUSENTE",
-            "CONFIGURADA" if bool(os.getenv("TAVILY_API_KEY", "").strip()) else "AUSENTE",
+            ("CONFIGURADA_POOL(" + str(sum(bool(os.getenv(f"TAVILY_API_KEY_{i}", "").strip()) for i in range(1, 21))) + "_CHAVES)"
+             if any(os.getenv(f"TAVILY_API_KEY_{i}", "").strip() for i in range(1, 21))
+             else ("CONFIGURADA" if os.getenv("TAVILY_API_KEY", "").strip() else "AUSENTE")),
             "CONFIGURADA" if bool(os.getenv("SERPER_API_KEY", "").strip()) else "AUSENTE",
             _brightdata_slot_diagnostic()[0],
             _brightdata_slot_diagnostic()[1],
@@ -12506,8 +12382,25 @@ def main() -> int:
             "preserve_clef_classification=True | weak_stage1_identity_recollect=False | joint_repair=True | review_last_resort=True"
         )
     if args.mode in {"collect", "full"}:
-        _enforce_central_search_paths(args, cfg, _resolve_search_provider(args, cfg))
+        if args.auto_providers or (args.search_provider and args.search_provider.casefold() != "tavily"):
+            LOG.error("ONLY_TAVILY_SEARCH_SUPPORTED: provedor alternativo desativado para coleta/full")
+            return 2
+        # Reject legacy single-key routing before any costly workbook reconciliation.
+        if not args.tavily_pool:
+            LOG.error("TAVILY_POOL_REQUIRED: execute --search-provider tavily --tavily-pool --max-search-new N")
+            return 2
+        if not 1 <= int(args.max_tavily_new or 0) <= (10 if args.mode == "full" else 100):
+            LOG.error("TAVILY_POOL_EXPLICIT_BATCH_REQUIRED")
+            return 2
+        if args.mode == "full" and int(args.max_items or 0) != int(args.max_tavily_new or 0):
+            LOG.error("FULL_COHORT_LIMIT_MISMATCH: classificacao deve cobrir todos os SKUs coletados")
+            return 2
+        if not [s for s in configured_slots() if s.provider == "tavily"]:
+            LOG.error("TAVILY_POOL_NO_AUTHORIZED_BUDGET: nenhuma chave Tavily com LIMIT_N configurado")
+            return 2
+        _enforce_central_search_paths(args, cfg, "tavily")
     if args.mode in {"collect", "full", "classify", "recover", "overnight"}:
+        t_integrity = time.perf_counter()
         central_integrity = audit_committed_classifications(cfg, commit=False)
         if central_integrity["status"] != "ALIGNED":
             LOG.error(
@@ -12516,6 +12409,7 @@ def main() -> int:
                 json.dumps(central_integrity, ensure_ascii=False))
             return 2
         pending_cache = _night_pending_centralization()
+        LOG.info("PERF STAGE | central_integrity+pending_campaigns=%.2fs", time.perf_counter() - t_integrity)
         if pending_cache:
             LOG.error(
                 "CACHE CENTRAL PENDENTE: %d campanha(s) COMPLETE ainda isolada(s). "
@@ -12524,44 +12418,49 @@ def main() -> int:
             return 2
     # A existência do SKU nas bases finais não depende de Search nem de classificação.
     # Executa uma única sincronização segura antes de coletar/classificar.
-    # OpenSERP auto/collect uses the same protected baseline inventory and
-    # central precollection planner. The pre-sync previously rewrote both
-    # 34k-row Excel workbooks BEFORE even downloading the already completed
-    # GitHub artifact; the official post-collect sync still runs once after
-    # the evidence cache is persisted. Full/classification retains pre-sync.
-    openserp_collect_auto = (
-        args.mode == "collect"
-        and _resolve_search_provider(args, cfg) == "openserp"
-        and bool(getattr(args, "openserp_auto", False))
-    )
-    if args.mode in {"collect", "full", "sync-input"} and not (args.mode == "collect" and args.auto_providers) and not openserp_collect_auto:
+    if args.mode in {"collect", "full", "sync-input"} and not (args.mode in {"collect", "full"} and args.tavily_pool or args.mode == "collect" and args.auto_providers):
+        t_sync = time.perf_counter()
         files_cfg = cfg.get("files", {}) or {}
         input_sync = Path(args.input or files_cfg.get("input", "Base de Produtos.xlsx"))
         master_sync = Path(files_cfg.get("master", "Consolidado Base de Produtos Enriquecida.xlsx"))
         final_sync = Path(files_cfg.get("final", "Base Final Produtos Enriquecida.xlsx"))
-        if not input_sync.exists():
-            LOG.error("Sincronização não iniciada: Base de entrada ausente: %s", input_sync)
-            return 2
-        try:
-            _backup_baseline_files(
-                master_sync, final_sync,
-                Path(files_cfg.get("baseline_backup_dir", "Backups_Baseline")),
-            )
-            sync_stats = persist_baseline_excels(
-                rows=[], master_path=master_sync, final_path=final_sync,
-                input_path=input_sync, rules=rules,
-                cache_path=Path(args.cache or files_cfg.get("cache", "cache_tavily.sqlite")),
-                cfg=cfg,
-            )
-            LOG.info("INPUT BASELINE SYNC OK | inserted=%s | final_rows=%s",
-                     sync_stats.get("input_registered", 0), sync_stats.get("final_rows", 0))
-        except Exception as exc:
-            LOG.error("INPUT BASELINE SYNC FAILED; interrompendo para preservar os dados: %s", exc)
-            return 2
+        cache_sync = Path(args.cache or files_cfg.get("cache", "cache_tavily.sqlite"))
+        # Fast path restricted to explicit sync-input, and only after a previous
+        # successful full reconciliation. A missing/changed file always reruns.
+        signature_paths = {
+            "input": input_sync, "master": master_sync, "final": final_sync,
+            "cache": cache_sync, "config": cfg_path, "taxonomy": rules_path,
+            "collection_policy": collection_policy_path,
+        }
+        manifest = base / ".runtime_cache" / "baseline_sync_verified_v1.json"
+        signature_before = (_baseline_signature(signature_paths, rules.hash)
+                            if args.mode == "sync-input" else {})
+        if args.mode == "sync-input" and _baseline_sync_manifest_check(manifest, signature_before):
+            LOG.info("BASELINE FINGERPRINT MATCH | no Excel rewrite | sha256 verified | elapsed=%.2fs",
+                     time.perf_counter() - t_sync)
+        else:
+            if not input_sync.exists():
+                LOG.error("Sincronização não iniciada: Base de entrada ausente: %s", input_sync)
+                return 2
+            try:
+                _backup_baseline_files(
+                    master_sync, final_sync,
+                    Path(files_cfg.get("baseline_backup_dir", "Backups_Baseline")),
+                )
+                sync_stats = persist_baseline_excels(
+                    rows=[], master_path=master_sync, final_path=final_sync,
+                    input_path=input_sync, rules=rules, cache_path=cache_sync, cfg=cfg,
+                )
+                LOG.info("INPUT BASELINE SYNC OK | inserted=%s | final_rows=%s | elapsed=%.2fs",
+                         sync_stats.get("input_registered", 0), sync_stats.get("final_rows", 0),
+                         time.perf_counter() - t_sync)
+                if args.mode == "sync-input":
+                    signature_after = _baseline_signature(signature_paths, rules.hash)
+                    _baseline_sync_manifest_store(manifest, signature_after)
+            except Exception as exc:
+                LOG.error("INPUT BASELINE SYNC FAILED; interrompendo para preservar os dados: %s", exc)
+                return 2
 
-    if args.mode in {"collect", "full"} and _resolve_search_provider(args, cfg) == "openserp" and args.openserp_auto:
-        if not _prepare_openserp_automatic_batch(args, cfg):
-            return 0
     if args.mode == "sync-input":
         return 0
     if args.mode == "inventory":
@@ -12569,10 +12468,10 @@ def main() -> int:
         return 0
     if args.mode == "collect":
         provider = _resolve_search_provider(args, cfg)
-        if not args.auto_providers:
+        if not (args.auto_providers or args.tavily_pool):
             _provider_credentials(provider, cfg)
         completed = collect_products(args, cfg, rules)
-        if completed and not args.auto_providers:
+        if completed and not (args.auto_providers or args.tavily_pool):
             files_cfg = cfg.get("files", {}) or {}
             persist_baseline_excels(
                 rows=[],
@@ -12595,22 +12494,25 @@ def main() -> int:
         return 0
     if args.mode == "full":
         provider = _resolve_search_provider(args, cfg)
-        if not args.auto_providers:
+        if not (args.auto_providers or args.tavily_pool):
             _provider_credentials(provider, cfg)
         completed = collect_products(args, cfg, rules)
         if not completed:
             LOG.warning("PROCESSO COMPLETO interrompido após a coleta. Classificação não iniciada.")
             return 3
-        if args.auto_providers or provider in {"openserp", "scraperapi"}:
+        if args.auto_providers or args.tavily_pool or provider == "scraperapi":
             targets = cfg.pop("_experimental_collected_targets", [])
             if not targets:
-                LOG.warning("EXPERIMENTAL FULL: nenhum SKU com evidência curada nesta coleta; "
-                            "RAW preservado no cache central; nenhuma classificação autorizada")
+                LOG.warning("FULL COLLECTION SCOPE: nenhum SKU concluído na coleta; nenhuma classificação iniciada")
                 return 0
-            if len(targets) > int(args.max_items):
-                LOG.warning("EXPERIMENTAL FULL: truncando targets classificados %d para limite=%d", len(targets), args.max_items)
-                targets = targets[:int(args.max_items)]
-            LOG.info("EXPERIMENTAL FULL: classificação restrita aos %d SKUs da coleta atual", len(targets))
+            if len(targets) > int(args.max_items or 0) > 0:
+                raise RuntimeError(
+                    "FULL_COHORT_CLASSIFICATION_LIMIT_MISMATCH: coletados="
+                    f"{len(targets)}, limite_classificacao={args.max_items}. "
+                    "Nao truncar silenciosamente: alinhe limites antes de nova coleta."
+                )
+            LOG.info("FULL CLASSIFICATION SCOPE | collected=%d | cohort=%d | no_evidence_items_receive_review",
+                     len(targets), len(targets))
             run_pipeline(args, cfg, rules, explicit_targets=targets)
         else:
             run_pipeline(args, cfg, rules)
@@ -12627,11 +12529,12 @@ class Slot:
     zone_env: str
     limit: int
     group: str
+    budget_since: str = ""  # explicit YYYY-MM-DD UTC; legacy empty counts all history
 
 def configured_slots() -> list[Slot]:
     slots = []
     for provider, prefix in (("tavily","TAVILY"),("brightdata","BRIGHTDATA"),("serper","SERPER")):
-        for n in (1, 2, 3, 4):
+        for n in (range(1, 21) if provider == "tavily" else range(1, 5)):
             suffix = f"_{n}"
             key_env = f"{prefix}_API_KEY{suffix}"
             if n == 1 and not os.getenv(key_env):
@@ -12654,7 +12557,19 @@ def configured_slots() -> list[Slot]:
             if provider == "brightdata" and not os.getenv(zone_env):
                 continue
             group = os.getenv(f"{prefix}_BILLING_GROUP{suffix}", f"{provider}:{n}")
-            slots.append(Slot(provider, f"{provider}:{n}", key_env,zone_env,limit,group))
+            budget_since = os.getenv(f"{prefix}_BUDGET_SINCE{suffix}", "").strip()
+            if budget_since:
+                # An explicit reset requires an independently verified billing period.
+                # SQLite reserved_at is UTC; never guess renewal based on local time.
+                try:
+                    from datetime import date as _budget_date
+                    from datetime import datetime as _budget_datetime, timezone as _budget_timezone
+                    parsed_period = _budget_date.fromisoformat(budget_since)
+                    if parsed_period.isoformat() != budget_since or parsed_period > _budget_datetime.now(_budget_timezone.utc).date():
+                        raise ValueError("future or non-canonical date")
+                except ValueError as exc:
+                    raise ValueError(f"Invalid budget date for {prefix}_BUDGET_SINCE{suffix}: expected YYYY-MM-DD") from exc
+            slots.append(Slot(provider, f"{provider}:{n}", key_env,zone_env,limit,group,budget_since))
     return slots
 
 class DurableRouter:
@@ -12662,6 +12577,7 @@ class DurableRouter:
         if not slots:
             raise ValueError("No accounts with positive explicitly configured budget")
         group_limits = {}
+        group_periods = {}
         accounts = set()
         for slot in slots:
             if slot.account in accounts:
@@ -12672,6 +12588,9 @@ class DurableRouter:
             prior = group_limits.setdefault(slot.group, slot.limit)
             if prior != slot.limit:
                 raise ValueError(f"Conflicting limits for billing group {slot.group}")
+            period = group_periods.setdefault(slot.group, slot.budget_since)
+            if period != slot.budget_since:
+                raise ValueError(f"Conflicting budget periods for billing group {slot.group}")
         self.conn = sqlite3.connect(path, timeout=30)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
@@ -12689,7 +12608,11 @@ class DurableRouter:
         for slot in self.slots:
             if self.conn.execute("SELECT 1 FROM collection_disabled_accounts WHERE account=?", (slot.account,)).fetchone():
                 continue
-            used = self.conn.execute("SELECT COUNT(*) FROM collection_attempt_reservations WHERE account=?", (slot.account,)).fetchone()[0]
+            used = self.conn.execute(
+                "SELECT COUNT(*) FROM collection_attempt_reservations WHERE account=?" +
+                (" AND reserved_at>=?" if slot.budget_since else ""),
+                ((slot.account, slot.budget_since) if slot.budget_since else (slot.account,)),
+            ).fetchone()[0]
             if used >= slot.limit:
                 continue
             # A shared billing group requires *the same total cap* configured on each key.
@@ -12697,8 +12620,9 @@ class DurableRouter:
             group_limit = group_slots[0].limit
             group_used = self.conn.execute(
                 "SELECT COUNT(*) FROM collection_attempt_reservations WHERE account IN (" +
-                ",".join("?" for _ in group_slots) + ")",
-                [s.account for s in group_slots]).fetchone()[0]
+                ",".join("?" for _ in group_slots) + ")" +
+                (" AND reserved_at>=?" if slot.budget_since else ""),
+                [s.account for s in group_slots] + ([slot.budget_since] if slot.budget_since else [])).fetchone()[0]
             if group_used >= group_limit:
                 continue
             return slot
