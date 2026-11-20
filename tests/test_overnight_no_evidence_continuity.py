@@ -99,6 +99,8 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
                     return self
                 def __exit__(self, *args):
                     return False
+                def close(self):
+                    pass
                 def get(self, brand, model):
                     return SimpleNamespace(state="RAW_OK")
             state = {"stages": {"classification": {"log": "classification_01.log"}}}
