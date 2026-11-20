@@ -13343,8 +13343,17 @@ def outcome_audit(run,state,isolated):
                            for _, row in results.iterrows()]
             # Output-only classification can finish with pending SKUs after a
             # strictly bounded JEV/token cap. Missing proposals are never accepted.
+            # Include interrupted API records even when they appear in XLSX.
+            # Presence in output is not proof of a completed classification.
+            unfinished_rows = {
+                business_key(safe(row.get("Marca")), safe(row.get("Modelo")))
+                for _, row in results.iterrows()
+                if (safe(row.get("Stage")).upper() == "API_PAUSED"
+                    or safe(row.get("Resolution State")).upper() == "API_PAUSED")
+            }
             missing_classification_keys = sorted(
-                cohort_keys - set(result_keys) - set(pending_raw_keys))
+                (cohort_keys - set(result_keys) - set(pending_raw_keys))
+                | (unfinished_rows - set(pending_raw_keys)))
             # A prior accepted campaign can have fewer classification rows
             # than collected SKUs (e.g. 40 of 50). Missing output is not an
             # automatic approval; reject duplicates/foreign SKUs and audit the
@@ -13358,6 +13367,8 @@ def outcome_audit(run,state,isolated):
                     # Never accept or promote a proposal without RAW. Mark it
                     # pending at promotion regardless of model output; one
                     # unreliable SKU must not stop the entire campaign.
+                    continue
+                if key in unfinished_rows:
                     continue
                 identity_issues = _overnight_auto_title_identity_errors(row, isolated)
                 if identity_issues:
