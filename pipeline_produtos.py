@@ -9915,6 +9915,10 @@ def export_excel(rows: List[Dict[str, Any]], out_path: Path, summary: Dict[str, 
     import pandas as pd
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
+    if df.empty and not len(df.columns):
+        # An all-no-evidence cohort still needs an auditable, valid Resultados
+        # sheet so that a single empty batch never aborts the campaign.
+        df = pd.DataFrame(columns=["Marca", "Modelo"])
     rev = df[df.get("Review Required", pd.Series(dtype=str)).astype(str).str.upper().eq("SIM")].copy() if not df.empty else pd.DataFrame()
     summ = pd.DataFrame([{"Métrica": k, "Valor": v} for k, v in summary.items()])
     # Never leave a malformed temporary workbook after failed exports.
@@ -11069,7 +11073,22 @@ def run_pipeline(
             # Um cap de API ou pausa operacional pode deixar o lote incompleto.
             # Nao gravar todas as chaves no ledger de retomada nessa situacao.
             if paused_reason:
-                raise RuntimeError("RECOVERY_BATCH_PAUSED: " + paused_reason)
+                # Overnight output-only campaigns have a fixed per-sublot budget.
+                # A local budget cap is an accounted partial classification,
+                # NOT permission to restart JEV or to exceed that budget.
+                # The output workbook/checkpoints were already persisted above;
+                # the independent overnight audit will mark missing proposals
+                # as pending, never approved, and the campaign can advance.
+                budget_pause = paused_reason.startswith((
+                    "CLEF_LOCAL_TOKEN_CAP:", "CLEF_RUN_CAP:"))
+                if output_only and budget_pause:
+                    LOG.warning(
+                        "NIGHT_CLASSIFICATION_BUDGET_PENDING | reason=%s | "
+                        "no_extra_jev_calls=YES | incomplete_skus=PENDING_REVIEW",
+                        paused_reason,
+                    )
+                else:
+                    raise RuntimeError("RECOVERY_BATCH_PAUSED: " + paused_reason)
 
         except KeyboardInterrupt:
             if output_only:
@@ -11524,16 +11543,50 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(argv)
     if op == "3":
         print("\nPROCESSO COMPLETO: TAVILY -> CURADORIA -> CLASSIFICACAO")
-        limite_search = _menu_limit("Quantidade de SKUs do processo completo (1 a 10 nesta versao): ")
-        limite_class = limite_search  # Cohort contract: coleta e classificacao com mesmos SKUs.
+        quantidade = _menu_limit("Total de SKUs da campanha (numero positivo): ")
+        if quantidade < 1:
+            raise ValueError("FULL_CAMPAIGN_REQUIRES_POSITIVE_TOTAL")
         llm = _menu_llm_provider()
-        if not 1 <= limite_search <= 10:
-            raise ValueError("TAVILY_FULL_PILOT_REQUIRES_EXPLICIT_LIMIT_1_TO_10")
-        argv = ["--mode", "full", "--search-provider", "tavily", "--tavily-pool",
-                "--llm-provider", llm, "--max-search-new", str(limite_search),
-                "--max-items", str(limite_class), "--max-api-calls", "15",
-                "--max-tokens", "30000"]
-        return parser.parse_args(argv)
+        if quantidade <= 10:
+            # Keep the existing small-cohort FULL route and its classifier choices.
+            return parser.parse_args([
+                "--mode", "full", "--search-provider", "tavily", "--tavily-pool",
+                "--llm-provider", llm, "--max-search-new", str(quantidade),
+                "--max-items", str(quantidade), "--max-api-calls", "15",
+                "--max-tokens", "30000",
+            ])
+        # Large-scale FULL uses the existing resumable campaign engine.
+        # Its per-sublot search limit is independent from the campaign total.
+        if llm != "jev":
+            raise ValueError(
+                "OVERNIGHT_CAMPAIGN_REQUIRES_JEV: para mais de 10 SKUs "
+                "selecione JEV; Clef/local continuam disponiveis no piloto ate 10"
+            )
+        # Operational batching and quota caps are internal implementation details.
+        # A single explicit confirmation shows the maximum authorized envelope.
+        lote = 10
+        jev_total = (quantidade * 3 + 1) // 2
+        token_total = quantidade * 3000
+        print(
+            f"\nCONFIRMACAO: {quantidade} produtos | "
+            f"limites maximos: {quantidade} consultas Tavily, "
+            f"{jev_total} chamadas JEV e {token_total} tokens. "
+            "Execucao com checkpoints; resultados isolados ate revisao."
+        )
+        confirmed = input("Iniciar processamento? Digite EXECUTAR (ENTER cancela): ").strip()
+        if confirmed != "EXECUTAR":
+            raise SystemExit("CAMPANHA_CANCELADA_SEM_CHAMADAS_API")
+        return parser.parse_args([
+            "--mode", "overnight", "--execute-live", "--yes",
+            "--tavily-pool", "--campaign-total", str(quantidade),
+            "--search-budget", str(lote),
+            "--llm-budget", "15",
+            "--token-budget", "30000",
+            "--campaign-jev-budget", str(jev_total),
+            "--campaign-token-budget", str(token_total),
+            "--campaign-review-before-promotion", "--night-output-only",
+            "--night-include-raw-missing",
+        ])
     if op == "4":
         limite = _menu_limit("Limite de pendências COM CACHE para reprocessar (ENTER = todas): ")
         llm = _menu_llm_provider()
@@ -12599,6 +12652,13 @@ class DurableRouter:
         self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
             account TEXT PRIMARY KEY, reason TEXT NOT NULL,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        # A single SKU can have historical reservations on multiple accounts.
+        # The real SKU remains unique in the primary ledger, while distinct
+        # historical account exposures count against their own budgets.
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservation_exposures (
+            business_key TEXT NOT NULL, account TEXT NOT NULL, provider TEXT NOT NULL,
+            reserved_at TEXT NOT NULL,
+            PRIMARY KEY (business_key, account, provider))""")
         self.conn.commit()
         self.slots=slots
 
@@ -12613,16 +12673,36 @@ class DurableRouter:
                 (" AND reserved_at>=?" if slot.budget_since else ""),
                 ((slot.account, slot.budget_since) if slot.budget_since else (slot.account,)),
             ).fetchone()[0]
+            used += self.conn.execute(
+                "SELECT COUNT(*) FROM collection_attempt_reservation_exposures e "
+                "WHERE e.account=?"
+                + (" AND e.reserved_at>=?" if slot.budget_since else "")
+                + " AND NOT EXISTS (SELECT 1 FROM collection_attempt_reservations m "
+                  "WHERE m.business_key=e.business_key AND m.account=e.account "
+                  "AND m.provider=e.provider)",
+                ((slot.account, slot.budget_since) if slot.budget_since else (slot.account,)),
+            ).fetchone()[0]
             if used >= slot.limit:
                 continue
             # A shared billing group requires *the same total cap* configured on each key.
             group_slots = [s for s in self.slots if s.group == slot.group]
             group_limit = group_slots[0].limit
+            group_accounts = [s.account for s in group_slots]
+            placeholders = ",".join("?" for _ in group_slots)
+            period_filter = " AND reserved_at>=?" if slot.budget_since else ""
+            group_parameters = group_accounts + ([slot.budget_since] if slot.budget_since else [])
             group_used = self.conn.execute(
-                "SELECT COUNT(*) FROM collection_attempt_reservations WHERE account IN (" +
-                ",".join("?" for _ in group_slots) + ")" +
-                (" AND reserved_at>=?" if slot.budget_since else ""),
-                [s.account for s in group_slots] + ([slot.budget_since] if slot.budget_since else [])).fetchone()[0]
+                "SELECT COUNT(*) FROM collection_attempt_reservations "
+                "WHERE account IN (" + placeholders + ")" + period_filter,
+                group_parameters).fetchone()[0]
+            group_used += self.conn.execute(
+                "SELECT COUNT(*) FROM collection_attempt_reservation_exposures e "
+                "WHERE e.account IN (" + placeholders + ")"
+                + (" AND e.reserved_at>=?" if slot.budget_since else "")
+                + " AND NOT EXISTS (SELECT 1 FROM collection_attempt_reservations m "
+                  "WHERE m.business_key=e.business_key AND m.account=e.account "
+                  "AND m.provider=e.provider)",
+                group_parameters).fetchone()[0]
             if group_used >= group_limit:
                 continue
             return slot
@@ -12909,44 +12989,40 @@ def gate(cfg,args):
         raise ValueError("Local semantic offline mode required")
     load_env_file(ROOT/".env")
     slots=[slot for slot in configured_slots() if slot.provider!="serper"]
-    if not slots:raise ValueError("No Tavily/Bright Data account with explicit positive budget; Serper quota-error retry forbidden")
+    if getattr(args, "tavily_pool", False):
+        slots=[slot for slot in slots if slot.provider=="tavily"]
+    if not slots:raise ValueError("No authorized search account with explicit positive budget for overnight campaign")
     jev=cfg.get("jev",{})
     key=jev.get("api_key_env") or "TYPESAFE_API_KEY"
     if not os.getenv(key):raise ValueError(f"JEV credential not configured: {key}")
 
 def import_prior_reservations(destination: Path, history_root: Path = OUT) -> dict:
-    """Seed the NEW isolated SQLite with earlier real reservation attempts.
+    """Reconcile prior paid attempts without rewriting existing reservations.
 
-    Every sampled key from a previously-started pilot must exist in its
-    SQLite ledger, including errors/ambiguous requests. Missing or corrupt
-    history blocks further collection instead of silently resetting quota.
-    Never writes to old ledgers or the production SQLite.
+    Historical snapshots may attribute one SKU to different accounts. Keep the
+    actual SKU reserved ONCE and account for EACH distinct account exposure.
+    Never reissue an attempted SKU and never mint budget by hiding conflicts.
     """
     reports = sorted(history_root.glob("*/run_report.json"))
     expected = set()
-    actual = {}
+    observed = {}  # SKU -> (account, provider) -> most recent historical UTC time
     disabled_accounts = {}
     overlap_keys = set()
-    scanned_runs = 0
+    audited_runs = 0
     LOG.info("OVERNIGHT HISTORY | scanning %d past run reports (read-only)", len(reports))
     for report_path in reports:
         state = json.loads(report_path.read_text(encoding="utf-8"))
         if not state.get("stages", {}).get("collection", {}).get("attempts", 0):
             continue
         cohort = state.get("cohort_keys", [])
-        if len(cohort) != len(set(cohort)) or not cohort:
+        if not cohort or len(cohort) != len(set(cohort)):
             raise RuntimeError(f"Invalid earlier campaign cohort: {report_path}")
-        # Multiple historical pilots can refer to the SAME SKU. Do not
-        # abort simply because cohorts overlap. Accept only identical
-        # account/provider reservations; a conflict still aborts below.
         overlap_keys.update(expected.intersection(cohort))
         expected.update(cohort)
-        scanned_runs += 1
-        if scanned_runs % 10 == 0:
-            LOG.info(
-                "OVERNIGHT HISTORY | audited_runs=%d historical_keys=%d duplicates=%d",
-                scanned_runs, len(expected), len(overlap_keys),
-            )
+        audited_runs += 1
+        if audited_runs % 10 == 0:
+            LOG.info("OVERNIGHT HISTORY | audited_runs=%d historical_keys=%d duplicates=%d",
+                     audited_runs, len(expected), len(overlap_keys))
         config_path = report_path.parent / "isolated_config.json"
         previous_config = json.loads(config_path.read_text(encoding="utf-8"))
         ledger_path = Path(previous_config["files"]["classification_db"])
@@ -12954,66 +13030,97 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
             raise RuntimeError(f"Missing previous reservation ledger: {ledger_path}")
         with closing(sqlite3.connect(ledger_path.resolve().as_uri()+"?mode=ro", uri=True)) as source:
             rows = source.execute(
-                "SELECT business_key, account, provider FROM collection_attempt_reservations"
-            ).fetchall()
+                "SELECT business_key,account,provider,reserved_at "
+                "FROM collection_attempt_reservations").fetchall()
+            has_exposures = source.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='collection_attempt_reservation_exposures'").fetchone()
+            exposures = (source.execute(
+                "SELECT business_key,account,provider,reserved_at "
+                "FROM collection_attempt_reservation_exposures").fetchall()
+                if has_exposures else [])
             has_disabled = source.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='collection_disabled_accounts'"
-            ).fetchone()
+                "AND name='collection_disabled_accounts'").fetchone()
             if has_disabled:
                 for account, reason in source.execute(
-                    "SELECT account, reason FROM collection_disabled_accounts"
-                ):
+                    "SELECT account,reason FROM collection_disabled_accounts"):
                     disabled_accounts[account] = reason
-        reserved_here = {key for key, account, provider in rows}
+        reserved_here = {key for key, _account, _provider, _time in rows}
         if not set(cohort).issubset(reserved_here):
             missing = sorted(set(cohort) - reserved_here)
             raise RuntimeError(
                 f"Unaccounted previous collection attempts: {report_path}; "
-                f"missing_count={len(missing)} first={missing[:5]}"
-            )
-        for key, account, provider in rows:
-            if key in actual and actual[key] != (account, provider):
-                raise RuntimeError(f"Conflicting historical reservation for SKU: {key}")
-            actual[key] = (account, provider)
-    # Existing production snapshot rows are also attempts; avoid silent
-    # account rewrites and count all reservations across previous pilots.
+                f"missing_count={len(missing)} first={missing[:5]}")
+        for key, account, provider, reserved_at in rows + exposures:
+            if not key or not account or not provider or not reserved_at:
+                raise RuntimeError(f"INVALID_HISTORICAL_RESERVATION:{report_path}")
+            pair = (account, provider)
+            pairs = observed.setdefault(key, {})
+            pairs[pair] = max(pairs.get(pair, ""), str(reserved_at))
+    conflicts = set()
+    additional_exposures = 0
     with closing(sqlite3.connect(destination)) as conn:
-        conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
-            business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
-            provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        for key, (account, provider) in actual.items():
-            prior = conn.execute(
-                "SELECT account, provider FROM collection_attempt_reservations WHERE business_key=?",
-                (key,),
-            ).fetchone()
-            if prior and prior != (account, provider):
-                raise RuntimeError(f"Conflicting production/historical reservation: {key}")
-            if not prior:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
+                business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
+                provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservation_exposures (
+                business_key TEXT NOT NULL, account TEXT NOT NULL, provider TEXT NOT NULL,
+                reserved_at TEXT NOT NULL,
+                PRIMARY KEY(business_key,account,provider))""")
+            for key, pairs in observed.items():
+                primary = conn.execute(
+                    "SELECT account,provider FROM collection_attempt_reservations "
+                    "WHERE business_key=?", (key,)).fetchone()
+                if primary is None:
+                    (account, provider), moment = next(iter(sorted(pairs.items())))
+                    conn.execute(
+                        "INSERT INTO collection_attempt_reservations "
+                        "(business_key,account,provider,reserved_at) VALUES (?,?,?,?)",
+                        (key, account, provider, moment))
+                    primary = (account, provider)
+                if len(pairs) > 1 or any(pair != primary for pair in pairs):
+                    conflicts.add(key)
+                for (account, provider), moment in pairs.items():
+                    if (account, provider) == primary:
+                        continue
+                    conn.execute(
+                        "INSERT INTO collection_attempt_reservation_exposures "
+                        "(business_key,account,provider,reserved_at) VALUES (?,?,?,?) "
+                        "ON CONFLICT(business_key,account,provider) DO UPDATE SET "
+                        "reserved_at=MAX(reserved_at,excluded.reserved_at)",
+                        (key,account,provider,moment))
+                    additional_exposures += 1
+            conn.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
+                account TEXT PRIMARY KEY, reason TEXT NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            for account, reason in disabled_accounts.items():
                 conn.execute(
-                    "INSERT INTO collection_attempt_reservations(business_key, account, provider) VALUES (?, ?, ?)",
-                    (key, account, provider),
-                )
-        conn.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
-            account TEXT PRIMARY KEY, reason TEXT NOT NULL,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        for account, reason in disabled_accounts.items():
-            conn.execute(
-                "INSERT INTO collection_disabled_accounts(account, reason) VALUES (?, ?) "
-                "ON CONFLICT(account) DO UPDATE SET reason=excluded.reason",
-                (account, reason))
-        conn.commit()
-    LOG.info(
-        "OVERNIGHT HISTORY OK | reports=%d audited_runs=%d unique_keys=%d "
-        "duplicate_keys=%d reservations=%d disabled_accounts=%d",
-        len(reports), scanned_runs, len(expected), len(overlap_keys),
-        len(actual), len(disabled_accounts),
-    )
-    return {"historical_cohort_keys": len(expected),
-            "historical_reservation_keys": len(actual),
-            "historical_overlapping_keys": len(overlap_keys),
-            "historical_runs_scanned": scanned_runs,
-            "historical_disabled_accounts": len(disabled_accounts)}
+                    "INSERT INTO collection_disabled_accounts(account,reason) VALUES (?,?) "
+                    "ON CONFLICT(account) DO UPDATE SET reason=excluded.reason",
+                    (account,reason))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    LOG.warning(
+        "OVERNIGHT HISTORY RECONCILED | reports=%d audited=%d unique_keys=%d "
+        "overlap=%d conflicting_skus=%d additional_account_exposures=%d "
+        "blocked_requeries=YES",
+        len(reports), audited_runs, len(observed), len(overlap_keys),
+        len(conflicts), additional_exposures)
+    return {
+        "historical_cohort_keys": len(expected),
+        "historical_reservation_keys": len(observed),
+        "historical_overlapping_keys": len(overlap_keys),
+        "historical_runs_scanned": audited_runs,
+        "historical_disabled_accounts": len(disabled_accounts),
+        "historical_account_conflicts": len(conflicts),
+        "historical_extra_account_exposures": additional_exposures,
+        "conflict_sku_examples": sorted(conflicts)[:20],
+    }
 
 
 def create_run(cfg,args):
@@ -13150,6 +13257,24 @@ def run_stage(run,state,label,cmd,timeout):
     print(f"[NIGHT] {label}: {item['status']} (attempt {item['attempts']})",flush=True)
     return item["status"]=="PASS"
 
+def _overnight_auto_title_identity_errors(record, cfg):
+    """Fail closed on automatic acceptance without SKU-specific title evidence."""
+    auto = safe(record.get("Auto Eligible")).strip().upper() == "SIM"
+    auto = auto or _record_is_accepted(record)
+    if not auto:
+        return []
+    model = safe(record.get("Modelo"))
+    title = safe(record.get("Título Real"))
+    if not model or not title:
+        return ["AUTO_TITLE_MISSING_TARGET_OR_EVIDENCE"]
+    # No ALT_ID, decimal revision, or partial slash component can count as
+    # exact evidence for an automatically accepted product.
+    exact_pattern = _model_exact_pattern(compact(model))
+    normalized_title = strip_accents(unquote(title)).casefold()
+    return ([] if exact_pattern.search(normalized_title)
+            else ["AUTO_TITLE_IDENTITY_MISMATCH"])
+
+
 def outcome_audit(run,state,isolated):
     """Independent post-run checks. No promotion/approval happens here."""
     import pandas as pd
@@ -13170,10 +13295,17 @@ def outcome_audit(run,state,isolated):
         missing_existing=["ROW_COUNT_DECREASED"]
     protected_changes=protected_details
     raw_states={}
+    pending_raw_keys=[]
+    raw_state_by_key={}
     with closing(TavilyReadOnlyStore(Path(isolated["files"]["cache"]))) as store:
         for _, row in cohort.iterrows():
-            ev=store.get(safe(row[cohort_b]),safe(row[cohort_m]))
+            brand, model = safe(row[cohort_b]), safe(row[cohort_m])
+            key = business_key(brand, model)
+            ev=store.get(brand,model)
             raw_states[ev.state]=raw_states.get(ev.state,0)+1
+            raw_state_by_key[key]=ev.state
+            if ev.state not in {"RAW_OK", "RAW_OK_MERGED"}:
+                pending_raw_keys.append(key)
     labels=["BASE FINAL INPUT ROW COVERAGE OK","BASE FINAL PROCV COVERAGE OK",
             "BASE FINAL CLASSIFICATION INTEGRITY"]
     log=run/"classification_01.log"
@@ -13197,6 +13329,8 @@ def outcome_audit(run,state,isolated):
     # entry and the appearance of success messages in a log.
     output_path = Path(isolated["files"]["output"])
     result_errors = []
+    identity_review_keys = []
+    missing_classification_keys = []
     if not output_path.is_file():
         result_errors.append("RESULT_FILE_MISSING")
     else:
@@ -13207,6 +13341,19 @@ def outcome_audit(run,state,isolated):
         else:
             result_keys = [business_key(safe(row["Marca"]), safe(row["Modelo"]))
                            for _, row in results.iterrows()]
+            # Output-only classification can finish with pending SKUs after a
+            # strictly bounded JEV/token cap. Missing proposals are never accepted.
+            # Include interrupted API records even when they appear in XLSX.
+            # Presence in output is not proof of a completed classification.
+            unfinished_rows = {
+                business_key(safe(row.get("Marca")), safe(row.get("Modelo")))
+                for _, row in results.iterrows()
+                if (safe(row.get("Stage")).upper() == "API_PAUSED"
+                    or safe(row.get("Resolution State")).upper() == "API_PAUSED")
+            }
+            missing_classification_keys = sorted(
+                (cohort_keys - set(result_keys) - set(pending_raw_keys))
+                | (unfinished_rows - set(pending_raw_keys)))
             # A prior accepted campaign can have fewer classification rows
             # than collected SKUs (e.g. 40 of 50). Missing output is not an
             # automatic approval; reject duplicates/foreign SKUs and audit the
@@ -13215,6 +13362,20 @@ def outcome_audit(run,state,isolated):
                     or not set(result_keys).issubset(cohort_keys)):
                 result_errors.append("RESULT_COHORT_MISMATCH")
             for _, row in results.iterrows():
+                key = business_key(safe(row.get("Marca")), safe(row.get("Modelo")))
+                if raw_state_by_key.get(key) not in {"RAW_OK", "RAW_OK_MERGED"}:
+                    # Never accept or promote a proposal without RAW. Mark it
+                    # pending at promotion regardless of model output; one
+                    # unreliable SKU must not stop the entire campaign.
+                    continue
+                if key in unfinished_rows:
+                    continue
+                identity_issues = _overnight_auto_title_identity_errors(row, isolated)
+                if identity_issues:
+                    # Downgrade this SKU to review at promotion. Never accept
+                    # its model proposal, but never block other independent SKUs.
+                    identity_review_keys.append(key)
+                    continue
                 resolved = safe(row.get("Resolution State")) == "RESOLVED"
                 eligible = safe(row.get("Auto Eligible")).upper() == "SIM"
                 needs_review = safe(row.get("Review Required")).upper() == "SIM"
@@ -13224,7 +13385,7 @@ def outcome_audit(run,state,isolated):
                     result_errors.append("FALSE_AUTO_ELIGIBLE")
                     break
     passed=(not missing and not missing_existing and not protected_changes
-            and not protected_originals(state) and useful_raw==len(cohort)
+            and not protected_originals(state)
             and not result_errors and all(log_checks.values()))
     result={"status":"PASS" if passed else "FAIL","cohort":len(cohort),
             "classification_output_only":output_only,
@@ -13234,6 +13395,16 @@ def outcome_audit(run,state,isolated):
             "protected_changes_total":len(protected_changes),
             "protected_changes_by_type":protected_counts,
             "cache_states_after":raw_states,"useful_raw_count":useful_raw,
+            "pending_raw_count":len(pending_raw_keys),
+            "pending_raw_keys":pending_raw_keys,
+            "pending_reason":"NO_USABLE_RAW_EVIDENCE",
+            "identity_review_keys":sorted(set(identity_review_keys)),
+            "identity_review_count":len(set(identity_review_keys)),
+            "pending_classification_count":len(missing_classification_keys),
+            "pending_classification_keys":missing_classification_keys,
+            "classification_budget_paused":
+                "NIGHT_CLASSIFICATION_BUDGET_PENDING" in logtext,
+            "accounted_cohort_count":useful_raw+len(pending_raw_keys),
             "log_contracts":log_checks,
             "result_integrity_errors":result_errors,
             "original_source_modified":protected_originals(state),
@@ -13306,11 +13477,13 @@ def overnight_run_one(args, cfg, on_run_created=None):
           "--master",isolated["files"]["master"],"--final",isolated["files"]["final"],
           "--db",isolated["files"]["classification_db"],"--yes"]
     stages=state["stages"]
+    collection_args = (["--mode","collect","--search-provider","tavily","--tavily-pool",
+                        "--recollect-empty"] if getattr(args, "tavily_pool", False)
+                       else ["--mode","collect","--auto-providers","--recollect-empty"])
+    collection_args += ["--max-search-new",str(state["budget"]["search"])]
     try:
         if stages.get("collection",{}).get("status")!="PASS":
-            success=run_stage(run,state,"collection",base+[
-                "--mode","collect","--auto-providers","--recollect-empty",
-                "--max-search-new",str(state["budget"]["search"])],
+            success=run_stage(run,state,"collection",base+collection_args,
                 args.timeout_minutes)
             if not success:
                 # Recover only unexpected worker termination/timeout. Do not
@@ -13318,13 +13491,43 @@ def overnight_run_one(args, cfg, on_run_created=None):
                 last=state["stages"]["collection"]
                 if last.get("exit_code") not in (2,3) and last["status"] in ("FAIL","TIMEOUT"):
                     print("[NIGHT] Worker interrupted. One automatic restart with SAME SQLite reservation ledger.",flush=True)
-                    success=run_stage(run,state,"collection",base+[
-                        "--mode","collect","--auto-providers","--recollect-empty",
-                        "--max-search-new",str(state["budget"]["search"])],
+                    success=run_stage(run,state,"collection",base+collection_args,
                         args.timeout_minutes)
                 if not success:
                     print("Collection stopped. Same cohort may resume; no new input keys allowed.")
                     return 2
+        # A previously failed worker may have exited only because the
+        # strictly bounded per-run JEV/token cap was reached. The original
+        # failure remains in recovery metadata. Salvage the durable partial
+        # workbook ONLY after independent audit; never invoke JEV again.
+        previous_classification = stages.get("classification", {})
+        if (args.resume_dir and isolated.get("_nightly_output_only")
+                and previous_classification.get("status") == "FAIL"
+                and previous_classification.get("attempts") == 1
+                and previous_classification.get("exit_code") == 1):
+            prior_log = run / safe(previous_classification.get("log"))
+            prior_text = (prior_log.read_text(encoding="utf-8", errors="replace")
+                          if prior_log.is_file() else "")
+            cap_failure = ("RECOVERY_BATCH_PAUSED: CLEF_LOCAL_TOKEN_CAP:" in prior_text
+                           or "RECOVERY_BATCH_PAUSED: CLEF_RUN_CAP:" in prior_text)
+            if (cap_failure and "NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK" in prior_text
+                    and Path(isolated["files"]["output"]).is_file()):
+                if not outcome_audit(run, state, isolated):
+                    raise RuntimeError("NIGHT_BUDGET_PAUSE_RECOVERY_AUDIT_FAILED")
+                previous_classification["recovery"] = {
+                    "mode": "OFFLINE_BOUNDED_BUDGET_PARTIAL_AUDIT",
+                    "original_status": "FAIL",
+                    "original_exit_code": 1,
+                    "jev_calls": 0,
+                    "original_log": safe(previous_classification.get("log")),
+                }
+                previous_classification["status"] = "PASS"
+                atomic_json(run / "run_report.json", state)
+                LOG.warning(
+                    "NIGHT_BUDGET_PAUSE_RECOVERED_OFFLINE | "
+                    "no_search_or_jev=YES | pending_classification=%s",
+                    state["quality_audit"]["pending_classification_count"],
+                )
         if stages.get("classification",{}).get("status")!="PASS":
             if stages.get("classification",{}).get("attempts",0)>0:
                 raise RuntimeError(
@@ -13745,7 +13948,7 @@ def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, reco
         if key in cache:
             raise RuntimeError("CENTRALIZE_DUPLICATE_RAW:" + key)
         cache[key] = payload
-    if set(cache) != set(pairs):
+    if not set(cache).issubset(set(pairs)):
         raise RuntimeError("CENTRALIZE_RAW_KEYS_DIFFER")
     proposals = {}
     for rec in records:
@@ -13813,7 +14016,7 @@ def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, reco
                 sheet.cell(pos, headers[bc], pair[0])
                 sheet.cell(pos, headers[mc], pair[1])
                 counts["new"] += 1
-            payload = cache[key] or {}
+            payload = cache.get(key) or {}
             coll = payload.get("_collection") if isinstance(payload.get("_collection"), dict) else {}
             sources = list(coll.get("curated_results") or []) + list(payload.get("results") or [])
             reference = next((s for s in sources if isinstance(s, dict) and safe(s.get("title"))), {})
@@ -13838,9 +14041,19 @@ def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, reco
                     "Fonte Referência URL": safe(reference.get("url")),
                     "Título Referência Identity": safe(reference.get("identity")),
                 })
-            if rec is None:
+            if key not in cache:
+                updates.update({
+                    "Status Coleta": "SEM_EVIDENCIA",
+                    "Raw State": "RAW_EMPTY",
+                    "Collection State": "NO_USABLE_EVIDENCE",
+                    "Próxima Ação": "REVISAR_EVIDENCIA_CACHE",
+                    "Motivo": "Pesquisa executada sem evidência utilizável; sem aprovação.",
+                    "Reason Code": "NIGHTLY_NO_USABLE_RAW",
+                })
+            if rec is None or key not in cache:
                 updates.update({"O que é (Tipo)": None, "Alimentação": "UNKNOWN",
-                                "Category General": None, "FAMILY": None})
+                                "Category General": None, "FAMILY": None,
+                                "Título Real": None, "Fonte URL": None})
             else:
                 for col in fields:
                     if col in rec and col not in {"Status", "Revisão B.I"}:
@@ -13945,7 +14158,9 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         cohort_keys = list(batch["cohort_keys"])
         if (batch.get("status") != "AUDIT_PASS" or audit_result.get("status") != "PASS"
                 or report.get("cohort_keys") != cohort_keys
-                or batch.get("raw_ok") != len(cohort_keys)
+                or batch.get("raw_ok") != audit_result.get("useful_raw_count")
+                 or batch.get("pending_raw", 0) != audit_result.get("pending_raw_count", 0)
+                 or audit_result.get("accounted_cohort_count") != len(cohort_keys)
                 or audit_result.get("protected_changes_total") != 0
                 or audit_result.get("original_source_modified")
                 or report.get("stages", {}).get("collection", {}).get("status") != "PASS"
@@ -13959,7 +14174,17 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         prior_db = Path(isolated["files"]["classification_db"])
         if not prior_db.is_file():
             raise RuntimeError(f"PROMOTION_CLASSIFICATION_DB_MISSING: {prior_db}")
-        isolated_databases.append((prior_db, set(cohort_keys)))
+        pending_keys = set(audit_result.get("pending_raw_keys", []))
+        identity_review_keys = set(audit_result.get("identity_review_keys", []))
+        pending_classification_keys = set(
+            audit_result.get("pending_classification_keys", []))
+        quarantined_keys = pending_keys | identity_review_keys | pending_classification_keys
+        if not quarantined_keys.issubset(set(cohort_keys)):
+            raise RuntimeError("PROMOTION_REVIEW_KEY_OUTSIDE_COHORT")
+        # Exclude all unfinished/rejected classification checkpoints, including
+        # budget-paused SKUs. Search reservations are still imported separately.
+        isolated_databases.append((
+            prior_db, set(cohort_keys), set(cohort_keys) - quarantined_keys))
         output = Path(isolated["files"]["output"])
         if not output.is_file():
             raise RuntimeError(f"PROMOTION_CLASSIFICATION_FILE_MISSING: {output}")
@@ -13974,6 +14199,14 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             if key not in cohort_keys or key in seen_output:
                 raise RuntimeError(f"PROMOTION_UNEXPECTED_OR_DUPLICATE_RESULT: {key}")
             seen_output.add(key)
+            # Do not re-evaluate an already quarantined bad title as an
+            # approval attempt. The audit lists the exact reviewed key.
+            if key in quarantined_keys:
+                continue
+            identity_errors = _overnight_auto_title_identity_errors(record, cfg)
+            if identity_errors:
+                raise RuntimeError("PROMOTION_AUTO_TITLE_IDENTITY_BLOCKED: " + key
+                                   + ": " + ",".join(identity_errors))
             # A review proposal stays a proposal, never a human approval.
             record.pop("Revisão B.I", None)
             if safe(record.get("Resolution State")).upper() == "REVIEW_CACHE_EVIDENCE":
@@ -13996,7 +14229,11 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
                 brand, model = key_to_pair[key]
                 raw = cache.get(brand, model)
                 if raw.state not in {"RAW_OK", "RAW_OK_MERGED"}:
-                    raise RuntimeError(f"PROMOTION_RAW_NOT_OK: {key}: {raw.state}")
+                    if key not in pending_keys:
+                        raise RuntimeError(f"PROMOTION_RAW_STATE_CHANGED: {key}: {raw.state}")
+                    continue
+                if key in pending_keys:
+                    raise RuntimeError(f"PROMOTION_PENDING_RAW_BECAME_VALID: {key}")
                 raw_items.append((brand, model, raw.payload))
     if len(keys) != state.get("audited_products"):
         raise RuntimeError("PROMOTION_COHORT_COUNT_MISMATCH")
@@ -14066,7 +14303,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             target_db.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
                 business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
                 provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            for previous_db, cohort_set in isolated_databases:
+            for previous_db, cohort_set, grounded_keys in isolated_databases:
                 with closing(sqlite3.connect(previous_db.resolve().as_uri()+"?mode=ro",
                                              uri=True)) as source_db:
                     for table, fields, pk in (
@@ -14081,7 +14318,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
                         placeholders = ",".join("?" for _ in fields)
                         for values in source_db.execute(f"SELECT {columns} FROM {table}"):
                             rec = dict(zip(fields, values))
-                            if rec["business_key"] not in cohort_set:
+                            if rec["business_key"] not in grounded_keys:
                                 continue
                             prior = target_db.execute(
                                 f"SELECT {columns} FROM {table} WHERE {pk}=?",
@@ -14488,8 +14725,33 @@ def overnight_campaign(args, cfg, rules=None):
             raise ValueError("Resuming a live campaign requires --execute-live")
         paths = source_paths(cfg)
         report = overnight_audit(paths["input"], paths["cache"], paths["master"], paths["final"])
-        print(json.dumps({"mode": "AUDIT_ONLY_NO_APIS", "candidates": len(report["candidate_rows"]),
-                          "prior_errors": len(report["error_rows"]),
+        prior = prior_attempts_in_database(paths["classification_db"])
+        if OUT.is_dir():
+            for old_report in OUT.glob("*/run_report.json"):
+                state_old = json.loads(old_report.read_text(encoding="utf-8"))
+                if state_old.get("stages", {}).get("collection", {}).get("attempts", 0):
+                    prior.update(state_old.get("cohort_keys", []))
+        eligible, selection = select_overnight_eligible(
+            report, prior,
+            include_raw_missing=bool(getattr(args, "night_include_raw_missing", False)),
+            allow_serper_quota_error=bool(args.allow_prior_serper_quota_error),
+            allow_previous_errors=bool(getattr(args, "night_allow_previous_errors", False)),
+        )
+        # The live path imports all historical pilot reservations. Preflight
+        # must exercise the exact same import against a throwaway SQLite copy,
+        # rather than signal OK and then fail during the paid campaign.
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory(prefix="overnight_history_preflight_") as tmp_dir:
+            preflight_db = Path(tmp_dir) / "reservations.sqlite"
+            if not paths["classification_db"].is_file():
+                raise RuntimeError("PREFLIGHT_PRODUCTION_RESERVATION_LEDGER_MISSING")
+            snapshot(paths["classification_db"], preflight_db)
+            historical = import_prior_reservations(preflight_db, OUT)
+        print(json.dumps({"mode": "AUDIT_ONLY_NO_APIS",
+                          "eligible": len(eligible), "selection": selection,
+                          "historical_reservations": historical,
+                          "raw_empty_candidates": len(report["candidate_rows"]),
+                          "raw_missing_input": len(report.get("missing_rows", [])),
                           "search_calls": 0}, ensure_ascii=False, indent=2))
         return 0
     if args.resume_dir and (args.campaign_total or args.campaign_resume_dir):
@@ -14504,8 +14766,8 @@ def overnight_campaign(args, cfg, rules=None):
         raise ValueError("Search cap per sublot must be 1..20")
     if getattr(args, "campaign_pause_after_sublots", 0) < 0:
         raise ValueError("campaign-pause-after-sublots must not be negative")
-    if getattr(args, "night_output_only", False) and not getattr(args, "campaign_review_before_promotion", False):
-        raise ValueError("NIGHT_OUTPUT_ONLY_REQUIRES_REVIEW_BEFORE_PROMOTION")
+    if not getattr(args, "campaign_review_before_promotion", False):
+        raise ValueError("OVERNIGHT_REVIEW_GATE_REQUIRED: use --campaign-review-before-promotion")
     gate(cfg, args)
 
     if args.campaign_resume_dir:
@@ -14530,6 +14792,8 @@ def overnight_campaign(args, cfg, rules=None):
             raise ValueError("Resume must preserve raw-missing authorization")
         if state.get("night_allow_previous_errors", False) != bool(getattr(args, "night_allow_previous_errors", False)):
             raise ValueError("Resume must preserve previous-error retry authorization")
+        if state.get("tavily_pool", False) != bool(getattr(args, "tavily_pool", False)):
+            raise ValueError("Resume must preserve Tavily-pool provider routing")
     else:
         root = OUT / "campaigns" / (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8])
@@ -14545,6 +14809,7 @@ def overnight_campaign(args, cfg, rules=None):
                  "night_output_only": bool(getattr(args, "night_output_only", False)),
                  "night_include_raw_missing": bool(getattr(args, "night_include_raw_missing", False)),
                  "night_allow_previous_errors": bool(getattr(args, "night_allow_previous_errors", False)),
+                 "tavily_pool": bool(getattr(args, "tavily_pool", False)),
                  "reserved_jev_calls": 0, "reserved_tokens": 0,
                  "audited_products": 0, "batches": [], "active_run": "",
                  "pending_run_creation": False}
@@ -14597,6 +14862,18 @@ def overnight_campaign(args, cfg, rules=None):
 
         try:
             result = overnight_run_one(subargs, cfg, on_run_created=created)
+        except RuntimeError as exc:
+            if str(exc).startswith("NO_ELIGIBLE_UNATTEMPTED_PRODUCTS:"):
+                state["status"] = "NO_ELIGIBLE"
+                state["reason"] = str(exc)
+                state["pending_run_creation"] = False
+                atomic_json(manifest_path, state)
+                LOG.error("CAMPANHA SEM PRODUTOS ELEGIVEIS | %s", exc)
+                return 2
+            state["status"] = "BLOCKED"
+            state["reason"] = f"{type(exc).__name__}: {exc}"
+            atomic_json(manifest_path, state)
+            raise
         except Exception as exc:
             state["status"] = "BLOCKED"
             state["reason"] = f"{type(exc).__name__}: {exc}"
@@ -14615,7 +14892,7 @@ def overnight_campaign(args, cfg, rules=None):
         keys = report.get("cohort_keys", [])
         if (quality.get("status") != "PASS"
                 or quality.get("protected_changes_total") != 0
-                or quality.get("useful_raw_count") != len(keys)
+                or quality.get("accounted_cohort_count") != len(keys)
                 or quality.get("original_source_modified")
                 or len(keys) != report.get("cohort_count")
                 or len(keys) != len(set(keys))):
@@ -14632,6 +14909,9 @@ def overnight_campaign(args, cfg, rules=None):
         state["batches"].append({
             "run_dir": str(sublot), "cohort_keys": keys,
             "cohort_count": len(keys), "raw_ok": quality.get("useful_raw_count", 0),
+            "pending_raw": quality.get("pending_raw_count", 0),
+            "pending_classification": quality.get("pending_classification_count", 0),
+            "classification_budget_paused": quality.get("classification_budget_paused", False),
             "status": "AUDIT_PASS"})
         state["audited_products"] += len(keys)
         state["active_run"] = ""
@@ -14669,10 +14949,7 @@ def overnight_campaign(args, cfg, rules=None):
 
     state["status"] = "COMPLETE" if state["audited_products"] == args.campaign_total else "PARTIAL"
     atomic_json(manifest_path, state)
-    if state["status"] == "COMPLETE" and rules is not None and not state.get("review_before_promotion", False):
-        # Legacy behavior: automatically persist fully audited campaigns unless
-        # the user explicitly requested human review before promotion.
-        overnight_promote_campaign(root, cfg, rules)
+    # Never auto-promote. A separate explicit promotion is required after review.
     print(json.dumps({"campaign": str(manifest_path), "status": state["status"],
                       "audited": state["audited_products"], "target": args.campaign_total,
                       "jev_reserved": state["reserved_jev_calls"],

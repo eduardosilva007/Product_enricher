@@ -61,6 +61,71 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
         self.assertEqual(args.max_items, 3)
         self.assertEqual(args.llm_provider, "local")
 
+    def test_interactive_full_large_uses_internal_sublots_and_limits(self):
+        from pipeline_produtos import interactive_menu
+        responses = iter(["3", "50", "1", "EXECUTAR"])
+        with patch("builtins.input", side_effect=lambda *_: next(responses)):
+            args = interactive_menu(Path("."))
+        self.assertEqual(args.mode, "overnight")
+        self.assertTrue(args.execute_live)
+        self.assertTrue(args.tavily_pool)
+        self.assertEqual(args.campaign_total, 50)
+        self.assertEqual(args.search_budget, 10)
+        self.assertEqual(args.llm_budget, 15)
+        self.assertEqual(args.token_budget, 30000)
+        self.assertEqual(args.campaign_jev_budget, 75)
+        self.assertEqual(args.campaign_token_budget, 150000)
+        self.assertTrue(args.campaign_review_before_promotion)
+        self.assertTrue(args.night_output_only)
+        self.assertTrue(args.night_include_raw_missing)
+
+    def test_interactive_full_large_requires_explicit_live_confirmation(self):
+        from pipeline_produtos import interactive_menu
+        responses = iter(["3", "50", "1", ""])
+        with patch("builtins.input", side_effect=lambda *_: next(responses)):
+            with self.assertRaises(SystemExit):
+                interactive_menu(Path("."))
+
+    def test_interactive_full_large_rejects_non_jev_unattended(self):
+        from pipeline_produtos import interactive_menu
+        responses = iter(["3", "50", "3"])
+        with patch("builtins.input", side_effect=lambda *_: next(responses)):
+            with self.assertRaisesRegex(ValueError, "OVERNIGHT_CAMPAIGN_REQUIRES_JEV"):
+                interactive_menu(Path("."))
+
+    def test_interactive_full_large_500_uses_same_internal_policy(self):
+        from pipeline_produtos import interactive_menu
+        responses = iter(["3", "500", "1", "EXECUTAR"])
+        with patch("builtins.input", side_effect=lambda *_: next(responses)):
+            args = interactive_menu(Path("."))
+        self.assertEqual(args.campaign_total, 500)
+        self.assertEqual(args.search_budget, 10)
+        self.assertEqual(args.campaign_jev_budget, 750)
+        self.assertEqual(args.campaign_token_budget, 1500000)
+        self.assertTrue(args.night_include_raw_missing)
+
+    def test_missing_raw_only_selected_when_explicitly_enabled(self):
+        from pipeline_produtos import select_overnight_eligible
+        audit = {"candidate_rows": [], "error_rows": [], "missing_rows": [
+            {"business_key": "NEW-1", "brand": "A", "model": "B"},
+            {"business_key": "HISTORICAL", "brand": "A", "model": "C"},
+        ]}
+        eligible_default, _ = select_overnight_eligible(audit, {"HISTORICAL"})
+        self.assertEqual(eligible_default, [])
+        eligible_menu, summary = select_overnight_eligible(
+            audit, {"HISTORICAL"}, include_raw_missing=True
+        )
+        self.assertEqual([row["business_key"] for row in eligible_menu], ["NEW-1"])
+        self.assertEqual(summary["raw_missing_new_previous_campaign"], 1)
+        self.assertEqual(summary["raw_missing_new_selected"], 1)
+
+    def test_overnight_dry_run_reports_eligible_not_only_raw_empty(self):
+        source = (Path(__file__).resolve().parents[1] / "pipeline_produtos.py").read_text(
+            encoding="utf-8-sig"
+        )
+        self.assertIn('"eligible": len(eligible)', source)
+        self.assertIn('"raw_missing_input": len(report.get("missing_rows", []))', source)
+
     def test_twenty_tavily_slots_and_other_providers_can_be_excluded(self):
         env = {f"TAVILY_API_KEY_{i}": f"offline-key-{i}" for i in range(1, 21)}
         env.update({f"TAVILY_LIMIT_{i}": "2" for i in range(1, 21)})
