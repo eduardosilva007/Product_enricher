@@ -252,7 +252,8 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
     def test_no_evidence_cannot_be_approved_at_promotion(self):
         code = (Path(__file__).resolve().parents[1] /
                 "pipeline_produtos.py").read_text(encoding="utf-8-sig")
-        self.assertIn("if key in pending_keys or key in identity_review_keys:", code)
+        self.assertIn("if key in quarantined_keys:", code)
+        self.assertIn("quarantined_keys = pending_keys | identity_review_keys | pending_classification_keys", code)
         self.assertIn('raise RuntimeError("PROMOTION_REVIEW_KEY_OUTSIDE_COHORT")', code)
         self.assertIn('"Reason Code": "NIGHTLY_NO_USABLE_RAW"', code)
         self.assertIn('"pending_raw": quality.get("pending_raw_count", 0)', code)
