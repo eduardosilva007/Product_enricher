@@ -81,6 +81,10 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
                 "Marca": "BRAND", "Modelo": "MODEL-0",
                 "Resolution State": "REVIEW", "Auto Eligible": "NÃO",
                 "Review Required": "SIM",
+            }, {
+                "Marca": "BRAND", "Modelo": "MODEL-1",
+                "Stage": "API_PAUSED", "Resolution State": "API_PAUSED",
+                "Auto Eligible": "NÃO", "Review Required": "SIM",
             }]).to_excel(root / "output.xlsx", index=False, sheet_name="Resultados")
             (root / "classification_01.log").write_text(
                 "NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK\\n"
@@ -110,6 +114,8 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
             self.assertEqual(quality["pending_classification_count"], 9)
             self.assertTrue(quality["classification_budget_paused"])
             self.assertEqual(len(quality["pending_classification_keys"]), 9)
+            self.assertIn(pp.business_key("BRAND", "MODEL-1"),
+                          quality["pending_classification_keys"])
             self.assertEqual(quality["result_integrity_errors"], [])
 
     def test_budget_cap_continuation_is_scoped_to_isolated_mode(self):
