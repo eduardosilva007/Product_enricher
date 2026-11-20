@@ -77,6 +77,7 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
         self.assertEqual(args.campaign_token_budget, 150000)
         self.assertTrue(args.campaign_review_before_promotion)
         self.assertTrue(args.night_output_only)
+        self.assertTrue(args.night_include_raw_missing)
 
     def test_interactive_full_large_requires_explicit_live_confirmation(self):
         from pipeline_produtos import interactive_menu
@@ -101,6 +102,29 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
         self.assertEqual(args.search_budget, 10)
         self.assertEqual(args.campaign_jev_budget, 750)
         self.assertEqual(args.campaign_token_budget, 1500000)
+        self.assertTrue(args.night_include_raw_missing)
+
+    def test_missing_raw_only_selected_when_explicitly_enabled(self):
+        from pipeline_produtos import select_overnight_eligible
+        audit = {"candidate_rows": [], "error_rows": [], "missing_rows": [
+            {"business_key": "NEW-1", "brand": "A", "model": "B"},
+            {"business_key": "HISTORICAL", "brand": "A", "model": "C"},
+        ]}
+        eligible_default, _ = select_overnight_eligible(audit, {"HISTORICAL"})
+        self.assertEqual(eligible_default, [])
+        eligible_menu, summary = select_overnight_eligible(
+            audit, {"HISTORICAL"}, include_raw_missing=True
+        )
+        self.assertEqual([row["business_key"] for row in eligible_menu], ["NEW-1"])
+        self.assertEqual(summary["raw_missing_new_previous_campaign"], 1)
+        self.assertEqual(summary["raw_missing_new_selected"], 1)
+
+    def test_overnight_dry_run_reports_eligible_not_only_raw_empty(self):
+        source = (Path(__file__).resolve().parents[1] / "pipeline_produtos.py").read_text(
+            encoding="utf-8-sig"
+        )
+        self.assertIn('"eligible": len(eligible)', source)
+        self.assertIn('"raw_missing_input": len(report.get("missing_rows", []))', source)
 
     def test_twenty_tavily_slots_and_other_providers_can_be_excluded(self):
         env = {f"TAVILY_API_KEY_{i}": f"offline-key-{i}" for i in range(1, 21)}
