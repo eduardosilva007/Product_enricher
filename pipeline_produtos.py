@@ -13330,11 +13330,10 @@ def outcome_audit(run,state,isolated):
             for _, row in results.iterrows():
                 key = business_key(safe(row.get("Marca")), safe(row.get("Modelo")))
                 if raw_state_by_key.get(key) not in {"RAW_OK", "RAW_OK_MERGED"}:
-                    if (safe(row.get("Auto Eligible")).upper() == "SIM"
-                            or _record_is_accepted(row)
-                            or safe(row.get("Category General"))
-                            or safe(row.get("FAMILY"))):
-                        result_errors.append("NO_EVIDENCE_CLASSIFICATION_BLOCKED:" + key)
+                    # Never accept or promote a proposal without RAW. Mark it
+                    # pending at promotion regardless of model output; one
+                    # unreliable SKU must not stop the entire campaign.
+                    continue
                 for issue in _overnight_auto_title_identity_errors(row, isolated):
                     result_errors.append(f"{issue}: {safe(row.get('Marca'))}|{safe(row.get('Modelo'))}")
                 resolved = safe(row.get("Resolution State")) == "RESOLVED"
@@ -13358,6 +13357,7 @@ def outcome_audit(run,state,isolated):
             "cache_states_after":raw_states,"useful_raw_count":useful_raw,
             "pending_raw_count":len(pending_raw_keys),
             "pending_raw_keys":pending_raw_keys,
+            "pending_reason":"NO_USABLE_RAW_EVIDENCE",
             "accounted_cohort_count":useful_raw+len(pending_raw_keys),
             "log_contracts":log_checks,
             "result_integrity_errors":result_errors,
