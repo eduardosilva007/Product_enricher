@@ -13314,6 +13314,7 @@ def outcome_audit(run,state,isolated):
     # entry and the appearance of success messages in a log.
     output_path = Path(isolated["files"]["output"])
     result_errors = []
+    identity_review_keys = []
     if not output_path.is_file():
         result_errors.append("RESULT_FILE_MISSING")
     else:
@@ -13338,8 +13339,12 @@ def outcome_audit(run,state,isolated):
                     # pending at promotion regardless of model output; one
                     # unreliable SKU must not stop the entire campaign.
                     continue
-                for issue in _overnight_auto_title_identity_errors(row, isolated):
-                    result_errors.append(f"{issue}: {safe(row.get('Marca'))}|{safe(row.get('Modelo'))}")
+                identity_issues = _overnight_auto_title_identity_errors(row, isolated)
+                if identity_issues:
+                    # Downgrade this SKU to review at promotion. Never accept
+                    # its model proposal, but never block other independent SKUs.
+                    identity_review_keys.append(key)
+                    continue
                 resolved = safe(row.get("Resolution State")) == "RESOLVED"
                 eligible = safe(row.get("Auto Eligible")).upper() == "SIM"
                 needs_review = safe(row.get("Review Required")).upper() == "SIM"
@@ -13362,6 +13367,8 @@ def outcome_audit(run,state,isolated):
             "pending_raw_count":len(pending_raw_keys),
             "pending_raw_keys":pending_raw_keys,
             "pending_reason":"NO_USABLE_RAW_EVIDENCE",
+            "identity_review_keys":sorted(set(identity_review_keys)),
+            "identity_review_count":len(set(identity_review_keys)),
             "accounted_cohort_count":useful_raw+len(pending_raw_keys),
             "log_contracts":log_checks,
             "result_integrity_errors":result_errors,
@@ -14100,7 +14107,8 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         prior_db = Path(isolated["files"]["classification_db"])
         if not prior_db.is_file():
             raise RuntimeError(f"PROMOTION_CLASSIFICATION_DB_MISSING: {prior_db}")
-        isolated_databases.append((prior_db, set(cohort_keys), set(cohort_keys) - pending_keys))
+        isolated_databases.append((prior_db, set(cohort_keys),
+                                   set(cohort_keys) - pending_keys - identity_review_keys))
         output = Path(isolated["files"]["output"])
         if not output.is_file():
             raise RuntimeError(f"PROMOTION_CLASSIFICATION_FILE_MISSING: {output}")
@@ -14110,8 +14118,9 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             raise RuntimeError("PROMOTION_CLASSIFICATION_COLUMNS_MISSING")
         seen_output = set()
         pending_keys = set(audit_result.get("pending_raw_keys", []))
-        if not pending_keys.issubset(set(cohort_keys)):
-            raise RuntimeError("PROMOTION_PENDING_KEY_OUTSIDE_COHORT")
+        identity_review_keys = set(audit_result.get("identity_review_keys", []))
+        if not (pending_keys | identity_review_keys).issubset(set(cohort_keys)):
+            raise RuntimeError("PROMOTION_REVIEW_KEY_OUTSIDE_COHORT")
         for record in frame.to_dict(orient="records"):
             brand, model = safe(record["Marca"]), safe(record["Modelo"])
             key = business_key(brand, model)
@@ -14123,7 +14132,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
                 raise RuntimeError("PROMOTION_AUTO_TITLE_IDENTITY_BLOCKED: " + key
                                    + ": " + ",".join(identity_errors))
             # A no-RAW SKU is pending, NEVER a taxonomy proposal.
-            if key in pending_keys:
+            if key in pending_keys or key in identity_review_keys:
                 continue
             # A review proposal stays a proposal, never a human approval.
             record.pop("Revisão B.I", None)
