@@ -12909,7 +12909,9 @@ def gate(cfg,args):
         raise ValueError("Local semantic offline mode required")
     load_env_file(ROOT/".env")
     slots=[slot for slot in configured_slots() if slot.provider!="serper"]
-    if not slots:raise ValueError("No Tavily/Bright Data account with explicit positive budget; Serper quota-error retry forbidden")
+    if getattr(args, "tavily_pool", False):
+        slots=[slot for slot in slots if slot.provider=="tavily"]
+    if not slots:raise ValueError("No authorized search account with explicit positive budget for overnight campaign")
     jev=cfg.get("jev",{})
     key=jev.get("api_key_env") or "TYPESAFE_API_KEY"
     if not os.getenv(key):raise ValueError(f"JEV credential not configured: {key}")
@@ -13150,6 +13152,21 @@ def run_stage(run,state,label,cmd,timeout):
     print(f"[NIGHT] {label}: {item['status']} (attempt {item['attempts']})",flush=True)
     return item["status"]=="PASS"
 
+def _overnight_auto_title_identity_errors(record, cfg):
+    """Fail closed on automatic acceptance without SKU-specific title evidence."""
+    auto = safe(record.get("Auto Eligible")).strip().upper() == "SIM"
+    auto = auto or _record_is_accepted(record)
+    if not auto:
+        return []
+    model = safe(record.get("Modelo"))
+    title = safe(record.get("Título Real"))
+    if not model or not title:
+        return ["AUTO_TITLE_MISSING_TARGET_OR_EVIDENCE"]
+    suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
+    match, _ = _model_match_in_field(model, title, suffixes)
+    return [] if match else ["AUTO_TITLE_IDENTITY_MISMATCH"]
+
+
 def outcome_audit(run,state,isolated):
     """Independent post-run checks. No promotion/approval happens here."""
     import pandas as pd
@@ -13215,6 +13232,8 @@ def outcome_audit(run,state,isolated):
                     or not set(result_keys).issubset(cohort_keys)):
                 result_errors.append("RESULT_COHORT_MISMATCH")
             for _, row in results.iterrows():
+                for issue in _overnight_auto_title_identity_errors(row, isolated):
+                    result_errors.append(f"{issue}: {safe(row.get('Marca'))}|{safe(row.get('Modelo'))}")
                 resolved = safe(row.get("Resolution State")) == "RESOLVED"
                 eligible = safe(row.get("Auto Eligible")).upper() == "SIM"
                 needs_review = safe(row.get("Review Required")).upper() == "SIM"
@@ -13306,11 +13325,13 @@ def overnight_run_one(args, cfg, on_run_created=None):
           "--master",isolated["files"]["master"],"--final",isolated["files"]["final"],
           "--db",isolated["files"]["classification_db"],"--yes"]
     stages=state["stages"]
+    collection_args = (["--mode","collect","--search-provider","tavily","--tavily-pool",
+                        "--recollect-empty"] if getattr(args, "tavily_pool", False)
+                       else ["--mode","collect","--auto-providers","--recollect-empty"])
+    collection_args += ["--max-search-new",str(state["budget"]["search"])]
     try:
         if stages.get("collection",{}).get("status")!="PASS":
-            success=run_stage(run,state,"collection",base+[
-                "--mode","collect","--auto-providers","--recollect-empty",
-                "--max-search-new",str(state["budget"]["search"])],
+            success=run_stage(run,state,"collection",base+collection_args,
                 args.timeout_minutes)
             if not success:
                 # Recover only unexpected worker termination/timeout. Do not
@@ -13318,9 +13339,7 @@ def overnight_run_one(args, cfg, on_run_created=None):
                 last=state["stages"]["collection"]
                 if last.get("exit_code") not in (2,3) and last["status"] in ("FAIL","TIMEOUT"):
                     print("[NIGHT] Worker interrupted. One automatic restart with SAME SQLite reservation ledger.",flush=True)
-                    success=run_stage(run,state,"collection",base+[
-                        "--mode","collect","--auto-providers","--recollect-empty",
-                        "--max-search-new",str(state["budget"]["search"])],
+                    success=run_stage(run,state,"collection",base+collection_args,
                         args.timeout_minutes)
                 if not success:
                     print("Collection stopped. Same cohort may resume; no new input keys allowed.")
@@ -13974,6 +13993,10 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             if key not in cohort_keys or key in seen_output:
                 raise RuntimeError(f"PROMOTION_UNEXPECTED_OR_DUPLICATE_RESULT: {key}")
             seen_output.add(key)
+            identity_errors = _overnight_auto_title_identity_errors(record, cfg)
+            if identity_errors:
+                raise RuntimeError("PROMOTION_AUTO_TITLE_IDENTITY_BLOCKED: " + key
+                                   + ": " + ",".join(identity_errors))
             # A review proposal stays a proposal, never a human approval.
             record.pop("Revisão B.I", None)
             if safe(record.get("Resolution State")).upper() == "REVIEW_CACHE_EVIDENCE":
@@ -14504,8 +14527,8 @@ def overnight_campaign(args, cfg, rules=None):
         raise ValueError("Search cap per sublot must be 1..20")
     if getattr(args, "campaign_pause_after_sublots", 0) < 0:
         raise ValueError("campaign-pause-after-sublots must not be negative")
-    if getattr(args, "night_output_only", False) and not getattr(args, "campaign_review_before_promotion", False):
-        raise ValueError("NIGHT_OUTPUT_ONLY_REQUIRES_REVIEW_BEFORE_PROMOTION")
+    if not getattr(args, "campaign_review_before_promotion", False):
+        raise ValueError("OVERNIGHT_REVIEW_GATE_REQUIRED: use --campaign-review-before-promotion")
     gate(cfg, args)
 
     if args.campaign_resume_dir:
@@ -14530,6 +14553,8 @@ def overnight_campaign(args, cfg, rules=None):
             raise ValueError("Resume must preserve raw-missing authorization")
         if state.get("night_allow_previous_errors", False) != bool(getattr(args, "night_allow_previous_errors", False)):
             raise ValueError("Resume must preserve previous-error retry authorization")
+        if state.get("tavily_pool", False) != bool(getattr(args, "tavily_pool", False)):
+            raise ValueError("Resume must preserve Tavily-pool provider routing")
     else:
         root = OUT / "campaigns" / (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8])
@@ -14545,6 +14570,7 @@ def overnight_campaign(args, cfg, rules=None):
                  "night_output_only": bool(getattr(args, "night_output_only", False)),
                  "night_include_raw_missing": bool(getattr(args, "night_include_raw_missing", False)),
                  "night_allow_previous_errors": bool(getattr(args, "night_allow_previous_errors", False)),
+                 "tavily_pool": bool(getattr(args, "tavily_pool", False)),
                  "reserved_jev_calls": 0, "reserved_tokens": 0,
                  "audited_products": 0, "batches": [], "active_run": "",
                  "pending_run_creation": False}
@@ -14669,10 +14695,7 @@ def overnight_campaign(args, cfg, rules=None):
 
     state["status"] = "COMPLETE" if state["audited_products"] == args.campaign_total else "PARTIAL"
     atomic_json(manifest_path, state)
-    if state["status"] == "COMPLETE" and rules is not None and not state.get("review_before_promotion", False):
-        # Legacy behavior: automatically persist fully audited campaigns unless
-        # the user explicitly requested human review before promotion.
-        overnight_promote_campaign(root, cfg, rules)
+    # Never auto-promote. A separate explicit promotion is required after review.
     print(json.dumps({"campaign": str(manifest_path), "status": state["status"],
                       "audited": state["audited_products"], "target": args.campaign_total,
                       "jev_reserved": state["reserved_jev_calls"],
