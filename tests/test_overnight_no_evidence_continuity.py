@@ -70,6 +70,47 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
             self.assertEqual(quality["pending_raw_keys"], [pp.business_key("BRAND", "MODEL-9")])
             self.assertEqual(quality["result_integrity_errors"], [])
 
+    def test_canonical_staging_keeps_no_raw_sku_pending(self):
+        from shutil import copy2
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = {}
+            staged = {}
+            for name in ("master", "final"):
+                old[name] = root / f"original_{name}.xlsx"
+                staged[name] = root / f"staged_{name}.xlsx"
+                pd.DataFrame(columns=["Marca", "Modelo"]).to_excel(old[name], index=False)
+                copy2(old[name], staged[name])
+            pairs = {
+                pp.business_key("BRAND", "GOOD"): ("BRAND", "GOOD"),
+                pp.business_key("BRAND", "EMPTY"): ("BRAND", "EMPTY"),
+            }
+            originals = {
+                name: {"path": str(old[name])} for name in ("master", "final")
+            }
+            record = {"Marca": "BRAND", "Modelo": "GOOD",
+                      "Category General": "OTHERS", "FAMILY": "DRILL",
+                      "Resolution State": "RESOLVED"}
+            with patch.object(pp, "_stage_only_business_columns_in_final",
+                              return_value=len(pp.BASELINE_PUBLIC_COLUMNS)), \
+                 patch.object(pp, "_write_final_sku_index_to_stage",
+                              return_value={"status": "TEST"}):
+                pp._night_stage_output_only_canonical(
+                    originals, staged, pairs,
+                    [("BRAND", "GOOD", {"results": []})],
+                    [record],
+                    SimpleNamespace(version="tests", hash="tests"))
+            master = pd.read_excel(staged["master"], keep_default_na=False)
+            empty = master.loc[master["Modelo"] == "EMPTY"].iloc[0]
+            good = master.loc[master["Modelo"] == "GOOD"].iloc[0]
+            self.assertEqual(empty["Status Processamento"], "PENDENTE")
+            self.assertEqual(empty["Status Coleta"], "SEM_EVIDENCIA")
+            self.assertEqual(empty["Reason Code"], "NIGHTLY_NO_USABLE_RAW")
+            self.assertEqual(empty["Category General"], "")
+            self.assertEqual(empty["FAMILY"], "")
+            self.assertEqual(empty["Auto Eligible"], "NÃO")
+            self.assertEqual(good["FAMILY"], "DRILL")
+
     def test_no_evidence_cannot_be_approved_at_promotion(self):
         code = (Path(__file__).resolve().parents[1] /
                 "pipeline_produtos.py").read_text(encoding="utf-8-sig")
