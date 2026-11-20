@@ -11073,7 +11073,22 @@ def run_pipeline(
             # Um cap de API ou pausa operacional pode deixar o lote incompleto.
             # Nao gravar todas as chaves no ledger de retomada nessa situacao.
             if paused_reason:
-                raise RuntimeError("RECOVERY_BATCH_PAUSED: " + paused_reason)
+                # Overnight output-only campaigns have a fixed per-sublot budget.
+                # A local budget cap is an accounted partial classification,
+                # NOT permission to restart JEV or to exceed that budget.
+                # The output workbook/checkpoints were already persisted above;
+                # the independent overnight audit will mark missing proposals
+                # as pending, never approved, and the campaign can advance.
+                budget_pause = paused_reason.startswith((
+                    "CLEF_LOCAL_TOKEN_CAP:", "CLEF_RUN_CAP:"))
+                if output_only and budget_pause:
+                    LOG.warning(
+                        "NIGHT_CLASSIFICATION_BUDGET_PENDING | reason=%s | "
+                        "no_extra_jev_calls=YES | incomplete_skus=PENDING_REVIEW",
+                        paused_reason,
+                    )
+                else:
+                    raise RuntimeError("RECOVERY_BATCH_PAUSED: " + paused_reason)
 
         except KeyboardInterrupt:
             if output_only:
@@ -13315,6 +13330,7 @@ def outcome_audit(run,state,isolated):
     output_path = Path(isolated["files"]["output"])
     result_errors = []
     identity_review_keys = []
+    missing_classification_keys = []
     if not output_path.is_file():
         result_errors.append("RESULT_FILE_MISSING")
     else:
@@ -13325,6 +13341,10 @@ def outcome_audit(run,state,isolated):
         else:
             result_keys = [business_key(safe(row["Marca"]), safe(row["Modelo"]))
                            for _, row in results.iterrows()]
+            # Output-only classification can finish with pending SKUs after a
+            # strictly bounded JEV/token cap. Missing proposals are never accepted.
+            missing_classification_keys = sorted(
+                cohort_keys - set(result_keys) - set(pending_raw_keys))
             # A prior accepted campaign can have fewer classification rows
             # than collected SKUs (e.g. 40 of 50). Missing output is not an
             # automatic approval; reject duplicates/foreign SKUs and audit the
@@ -13369,6 +13389,10 @@ def outcome_audit(run,state,isolated):
             "pending_reason":"NO_USABLE_RAW_EVIDENCE",
             "identity_review_keys":sorted(set(identity_review_keys)),
             "identity_review_count":len(set(identity_review_keys)),
+            "pending_classification_count":len(missing_classification_keys),
+            "pending_classification_keys":missing_classification_keys,
+            "classification_budget_paused":
+                "NIGHT_CLASSIFICATION_BUDGET_PENDING" in logtext,
             "accounted_cohort_count":useful_raw+len(pending_raw_keys),
             "log_contracts":log_checks,
             "result_integrity_errors":result_errors,
@@ -14837,6 +14861,8 @@ def overnight_campaign(args, cfg, rules=None):
             "run_dir": str(sublot), "cohort_keys": keys,
             "cohort_count": len(keys), "raw_ok": quality.get("useful_raw_count", 0),
             "pending_raw": quality.get("pending_raw_count", 0),
+            "pending_classification": quality.get("pending_classification_count", 0),
+            "classification_budget_paused": quality.get("classification_budget_paused", False),
             "status": "AUDIT_PASS"})
         state["audited_products"] += len(keys)
         state["active_run"] = ""
