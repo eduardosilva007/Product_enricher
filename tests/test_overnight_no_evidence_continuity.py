@@ -220,18 +220,17 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
             record = {"Marca": "BRAND", "Modelo": "GOOD",
                       "Category General": "OTHERS", "FAMILY": "DRILL",
                       "Resolution State": "RESOLVED"}
-            with patch.object(pp, "_stage_only_business_columns_in_final",
-                              return_value=len(pp.BASELINE_PUBLIC_COLUMNS)), \
-                 patch.object(pp, "_write_final_sku_index_to_stage",
+            with patch.object(pp, "_write_final_sku_index_to_stage",
                               return_value={"status": "TEST"}):
                 pp._night_stage_output_only_canonical(
                     originals, staged, pairs,
                     [("BRAND", "GOOD", {"results": []})],
                     [record],
                     SimpleNamespace(version="tests", hash="tests"))
-            master = pd.read_excel(staged["master"], keep_default_na=False)
-            empty = master.loc[master["Modelo"] == "EMPTY"].iloc[0]
-            good = master.loc[master["Modelo"] == "GOOD"].iloc[0]
+            self.assertEqual(staged["master"].read_bytes(), old["master"].read_bytes())
+            final = pd.read_excel(staged["final"], keep_default_na=False)
+            empty = final.loc[final["Modelo"] == "EMPTY"].iloc[0]
+            good = final.loc[final["Modelo"] == "GOOD"].iloc[0]
             self.assertEqual(empty["Status Processamento"], "PENDENTE")
             self.assertEqual(empty["Status Coleta"], "SEM_EVIDENCIA")
             self.assertEqual(empty["Reason Code"], "NIGHTLY_NO_USABLE_RAW")
