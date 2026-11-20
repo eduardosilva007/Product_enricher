@@ -14163,8 +14163,17 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         prior_db = Path(isolated["files"]["classification_db"])
         if not prior_db.is_file():
             raise RuntimeError(f"PROMOTION_CLASSIFICATION_DB_MISSING: {prior_db}")
-        isolated_databases.append((prior_db, set(cohort_keys),
-                                   set(cohort_keys) - pending_keys - identity_review_keys))
+        pending_keys = set(audit_result.get("pending_raw_keys", []))
+        identity_review_keys = set(audit_result.get("identity_review_keys", []))
+        pending_classification_keys = set(
+            audit_result.get("pending_classification_keys", []))
+        quarantined_keys = pending_keys | identity_review_keys | pending_classification_keys
+        if not quarantined_keys.issubset(set(cohort_keys)):
+            raise RuntimeError("PROMOTION_REVIEW_KEY_OUTSIDE_COHORT")
+        # Exclude all unfinished/rejected classification checkpoints, including
+        # budget-paused SKUs. Search reservations are still imported separately.
+        isolated_databases.append((
+            prior_db, set(cohort_keys), set(cohort_keys) - quarantined_keys))
         output = Path(isolated["files"]["output"])
         if not output.is_file():
             raise RuntimeError(f"PROMOTION_CLASSIFICATION_FILE_MISSING: {output}")
@@ -14173,23 +14182,20 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         if not {"Marca", "Modelo"}.issubset(frame.columns):
             raise RuntimeError("PROMOTION_CLASSIFICATION_COLUMNS_MISSING")
         seen_output = set()
-        pending_keys = set(audit_result.get("pending_raw_keys", []))
-        identity_review_keys = set(audit_result.get("identity_review_keys", []))
-        if not (pending_keys | identity_review_keys).issubset(set(cohort_keys)):
-            raise RuntimeError("PROMOTION_REVIEW_KEY_OUTSIDE_COHORT")
         for record in frame.to_dict(orient="records"):
             brand, model = safe(record["Marca"]), safe(record["Modelo"])
             key = business_key(brand, model)
             if key not in cohort_keys or key in seen_output:
                 raise RuntimeError(f"PROMOTION_UNEXPECTED_OR_DUPLICATE_RESULT: {key}")
             seen_output.add(key)
+            # Do not re-evaluate an already quarantined bad title as an
+            # approval attempt. The audit lists the exact reviewed key.
+            if key in quarantined_keys:
+                continue
             identity_errors = _overnight_auto_title_identity_errors(record, cfg)
             if identity_errors:
                 raise RuntimeError("PROMOTION_AUTO_TITLE_IDENTITY_BLOCKED: " + key
                                    + ": " + ",".join(identity_errors))
-            # A no-RAW SKU is pending, NEVER a taxonomy proposal.
-            if key in pending_keys or key in identity_review_keys:
-                continue
             # A review proposal stays a proposal, never a human approval.
             record.pop("Revisão B.I", None)
             if safe(record.get("Resolution State")).upper() == "REVIEW_CACHE_EVIDENCE":
