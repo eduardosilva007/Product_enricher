@@ -70,6 +70,56 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
             self.assertEqual(quality["pending_raw_keys"], [pp.business_key("BRAND", "MODEL-9")])
             self.assertEqual(quality["result_integrity_errors"], [])
 
+    def test_partial_classification_from_budget_cap_is_audited_with_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pairs = [("BRAND", f"MODEL-{i}") for i in range(10)]
+            for name in ("input", "final"):
+                pd.DataFrame(pairs, columns=["Marca", "Modelo"]).to_excel(
+                    root / f"{name}.xlsx", index=False)
+            pd.DataFrame([{
+                "Marca": "BRAND", "Modelo": "MODEL-0",
+                "Resolution State": "REVIEW", "Auto Eligible": "NÃO",
+                "Review Required": "SIM",
+            }]).to_excel(root / "output.xlsx", index=False, sheet_name="Resultados")
+            (root / "classification_01.log").write_text(
+                "NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK\\n"
+                "NIGHT_CLASSIFICATION_BUDGET_PENDING | reason=CLEF_LOCAL_TOKEN_CAP:",
+                encoding="utf-8")
+            class FakeStore:
+                def __init__(self, path):
+                    pass
+                def close(self):
+                    pass
+                def get(self, brand, model):
+                    return SimpleNamespace(state="RAW_OK")
+            state = {"stages": {"classification": {"log": "classification_01.log"}}}
+            isolated = {"files": {
+                "input": str(root / "input.xlsx"),
+                "final": str(root / "final.xlsx"),
+                "output": str(root / "output.xlsx"),
+                "cache": str(root / "cache.sqlite"),
+            }, "_nightly_output_only": True}
+            with patch.object(pp, "TavilyReadOnlyStore", FakeStore), \\
+                 patch.object(pp, "overnight_examine", return_value=([], {}, 10, 10)), \\
+                 patch.object(pp, "protected_originals", return_value=[]):
+                self.assertTrue(pp.outcome_audit(root, state, isolated))
+            quality = json.loads((root / "quality_audit.json").read_text(encoding="utf-8"))
+            self.assertEqual(quality["status"], "PASS")
+            self.assertEqual(quality["useful_raw_count"], 10)
+            self.assertEqual(quality["pending_classification_count"], 9)
+            self.assertTrue(quality["classification_budget_paused"])
+            self.assertEqual(len(quality["pending_classification_keys"]), 9)
+            self.assertEqual(quality["result_integrity_errors"], [])
+
+    def test_budget_cap_continuation_is_scoped_to_isolated_mode(self):
+        code = (Path(__file__).resolve().parents[1] /
+                "pipeline_produtos.py").read_text(encoding="utf-8-sig")
+        self.assertIn("if output_only and budget_pause:", code)
+        self.assertIn("OFFLINE_BOUNDED_BUDGET_PARTIAL_AUDIT", code)
+        self.assertIn('raise RuntimeError("RECOVERY_BATCH_PAUSED: " + paused_reason)', code)
+        self.assertIn('raise RuntimeError("JEV_INCOMPLETE_REQUIRES_AUDIT:', code)
+
     def test_title_identity_mismatch_is_quarantined_not_campaign_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
