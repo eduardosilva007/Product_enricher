@@ -52,6 +52,17 @@ class OvernightKSBIdentityGateTests(unittest.TestCase):
             _overnight_auto_title_identity_errors(row, CONFIG),
         )
 
+    def test_partial_slash_identifier_is_not_exact_sku(self):
+        row = candidate("MTC A32/5A", "KSB MTC A32/7C multistage pump")
+        self.assertEqual(
+            _overnight_auto_title_identity_errors(row, CONFIG),
+            ["AUTO_TITLE_IDENTITY_MISMATCH"],
+        )
+
+    def test_full_upa_identifier_can_pass_title_identity(self):
+        row = candidate("UPA 250/150/03GB", "KSB UPA 250/150/03GB pump")
+        self.assertEqual(_overnight_auto_title_identity_errors(row, CONFIG), [])
+
     def test_missing_title_is_not_approved(self):
         row = candidate("MTC A32/5A", "")
         self.assertEqual(
