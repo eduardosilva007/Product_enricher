@@ -12570,6 +12570,28 @@ def run_stage(run,state,label,cmd,timeout):
     print(f"[NIGHT] {label}: {item['status']} (attempt {item['attempts']})",flush=True)
     return item["status"]=="PASS"
 
+def _overnight_auto_title_identity_errors(record, cfg):
+    """Fail closed on auto-eligible rows without SKU-specific title evidence.
+
+    This is an independent audit of the title actually exported, not an
+    approval based on a search-result score, category, or model inference.
+    Reviewed/manual proposals remain eligible for human inspection.
+    """
+    auto = safe(record.get("Auto Eligible")).strip().upper() == "SIM"
+    auto = auto or _record_is_accepted(record)
+    if not auto:
+        return []
+    model = safe(record.get("Modelo"))
+    title = safe(record.get("Título Real"))
+    if not model or not title:
+        return ["AUTO_TITLE_MISSING_TARGET_OR_EVIDENCE"]
+    suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
+    match, _ = _model_match_in_field(model, title, suffixes)
+    if not match:
+        return ["AUTO_TITLE_IDENTITY_MISMATCH"]
+    return []
+
+
 def outcome_audit(run,state,isolated):
     """Independent post-run checks. No promotion/approval happens here."""
     import pandas as pd
@@ -12635,6 +12657,10 @@ def outcome_audit(run,state,isolated):
                     or not set(result_keys).issubset(cohort_keys)):
                 result_errors.append("RESULT_COHORT_MISMATCH")
             for _, row in results.iterrows():
+                for issue in _overnight_auto_title_identity_errors(row, isolated):
+                    result_errors.append(
+                        f"{issue}: {safe(row.get('Marca'))}|{safe(row.get('Modelo'))}"
+                    )
                 resolved = safe(row.get("Resolution State")) == "RESOLVED"
                 eligible = safe(row.get("Auto Eligible")).upper() == "SIM"
                 needs_review = safe(row.get("Review Required")).upper() == "SIM"
@@ -13394,6 +13420,13 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             if key not in cohort_keys or key in seen_output:
                 raise RuntimeError(f"PROMOTION_UNEXPECTED_OR_DUPLICATE_RESULT: {key}")
             seen_output.add(key)
+            # No canonical promotion may bypass the exact same title gate.
+            title_issues = _overnight_auto_title_identity_errors(record, cfg)
+            if title_issues:
+                raise RuntimeError(
+                    "PROMOTION_AUTO_TITLE_IDENTITY_BLOCKED: "
+                    + key + ": " + ",".join(title_issues)
+                )
             # A review proposal stays a proposal, never a human approval.
             record.pop("Revisão B.I", None)
             if safe(record.get("Resolution State")).upper() == "REVIEW_CACHE_EVIDENCE":
