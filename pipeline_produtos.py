@@ -11551,7 +11551,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         if jev_total < 1 or token_total < 1:
             raise ValueError("OVERNIGHT_CAMPAIGN_REQUIRES_POSITIVE_LLM_BUDGETS")
         print(
-            f"\\nPREVISAO: campanha={quantidade} SKUs; sublote={lote}; "
+            f"\nPREVISAO: campanha={quantidade} SKUs; sublote={lote}; "
             f"max_search={quantidade}; JEV_total={jev_total}; "
             f"tokens_total={token_total}. "
             "Resultados isolados; promocao oficial exige auditoria separada."
