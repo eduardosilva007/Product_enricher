@@ -14674,6 +14674,18 @@ def overnight_campaign(args, cfg, rules=None):
 
         try:
             result = overnight_run_one(subargs, cfg, on_run_created=created)
+        except RuntimeError as exc:
+            if str(exc).startswith("NO_ELIGIBLE_UNATTEMPTED_PRODUCTS:"):
+                state["status"] = "NO_ELIGIBLE"
+                state["reason"] = str(exc)
+                state["pending_run_creation"] = False
+                atomic_json(manifest_path, state)
+                LOG.error("CAMPANHA SEM PRODUTOS ELEGIVEIS | %s", exc)
+                return 2
+            state["status"] = "BLOCKED"
+            state["reason"] = f"{type(exc).__name__}: {exc}"
+            atomic_json(manifest_path, state)
+            raise
         except Exception as exc:
             state["status"] = "BLOCKED"
             state["reason"] = f"{type(exc).__name__}: {exc}"
