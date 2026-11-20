@@ -11566,6 +11566,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             "--campaign-jev-budget", str(jev_total),
             "--campaign-token-budget", str(token_total),
             "--campaign-review-before-promotion", "--night-output-only",
+            "--night-include-raw-missing",
         ])
     if op == "4":
         limite = _menu_limit("Limite de pendências COM CACHE para reprocessar (ENTER = todas): ")
@@ -14547,8 +14548,22 @@ def overnight_campaign(args, cfg, rules=None):
             raise ValueError("Resuming a live campaign requires --execute-live")
         paths = source_paths(cfg)
         report = overnight_audit(paths["input"], paths["cache"], paths["master"], paths["final"])
-        print(json.dumps({"mode": "AUDIT_ONLY_NO_APIS", "candidates": len(report["candidate_rows"]),
-                          "prior_errors": len(report["error_rows"]),
+        prior = prior_attempts_in_database(paths["classification_db"])
+        if OUT.is_dir():
+            for old_report in OUT.glob("*/run_report.json"):
+                state_old = json.loads(old_report.read_text(encoding="utf-8"))
+                if state_old.get("stages", {}).get("collection", {}).get("attempts", 0):
+                    prior.update(state_old.get("cohort_keys", []))
+        eligible, selection = select_overnight_eligible(
+            report, prior,
+            include_raw_missing=bool(getattr(args, "night_include_raw_missing", False)),
+            allow_serper_quota_error=bool(args.allow_prior_serper_quota_error),
+            allow_previous_errors=bool(getattr(args, "night_allow_previous_errors", False)),
+        )
+        print(json.dumps({"mode": "AUDIT_ONLY_NO_APIS",
+                          "eligible": len(eligible), "selection": selection,
+                          "raw_empty_candidates": len(report["candidate_rows"]),
+                          "raw_missing_input": len(report.get("missing_rows", [])),
                           "search_calls": 0}, ensure_ascii=False, indent=2))
         return 0
     if args.resume_dir and (args.campaign_total or args.campaign_resume_dir):
