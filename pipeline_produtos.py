@@ -13162,9 +13162,12 @@ def _overnight_auto_title_identity_errors(record, cfg):
     title = safe(record.get("Título Real"))
     if not model or not title:
         return ["AUTO_TITLE_MISSING_TARGET_OR_EVIDENCE"]
-    suffixes = (cfg.get("identity", {}) or {}).get("regional_suffixes", []) or []
-    match, _ = _model_match_in_field(model, title, suffixes)
-    return [] if match else ["AUTO_TITLE_IDENTITY_MISMATCH"]
+    # No ALT_ID, decimal revision, or partial slash component can count as
+    # exact evidence for an automatically accepted product.
+    exact_pattern = _model_exact_pattern(compact(model))
+    normalized_title = strip_accents(unquote(title)).casefold()
+    return ([] if exact_pattern.search(normalized_title)
+            else ["AUTO_TITLE_IDENTITY_MISMATCH"])
 
 
 def outcome_audit(run,state,isolated):
