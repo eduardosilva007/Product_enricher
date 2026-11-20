@@ -14612,8 +14612,19 @@ def overnight_campaign(args, cfg, rules=None):
             allow_serper_quota_error=bool(args.allow_prior_serper_quota_error),
             allow_previous_errors=bool(getattr(args, "night_allow_previous_errors", False)),
         )
+        # The live path imports all historical pilot reservations. Preflight
+        # must exercise the exact same import against a throwaway SQLite copy,
+        # rather than signal OK and then fail during the paid campaign.
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory(prefix="overnight_history_preflight_") as tmp_dir:
+            preflight_db = Path(tmp_dir) / "reservations.sqlite"
+            if not paths["classification_db"].is_file():
+                raise RuntimeError("PREFLIGHT_PRODUCTION_RESERVATION_LEDGER_MISSING")
+            snapshot(paths["classification_db"], preflight_db)
+            historical = import_prior_reservations(preflight_db, OUT)
         print(json.dumps({"mode": "AUDIT_ONLY_NO_APIS",
                           "eligible": len(eligible), "selection": selection,
+                          "historical_reservations": historical,
                           "raw_empty_candidates": len(report["candidate_rows"]),
                           "raw_missing_input": len(report.get("missing_rows", [])),
                           "search_calls": 0}, ensure_ascii=False, indent=2))
