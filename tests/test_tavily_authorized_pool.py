@@ -61,6 +61,44 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
         self.assertEqual(args.max_items, 3)
         self.assertEqual(args.llm_provider, "local")
 
+    def test_interactive_full_large_uses_cumulative_overnight_campaign(self):
+        from pipeline_produtos import interactive_menu
+        # Menu 3, 50 products, JEV, 10 per sublot, 50 JEV calls,
+        # 100000 tokens, explicit permission to make live API calls.
+        responses = iter(["3", "50", "1", "10", "50", "100000", "EXECUTAR"])
+        with patch("builtins.input", side_effect=lambda *_: next(responses)):
+            args = interactive_menu(Path("."))
+        self.assertEqual(args.mode, "overnight")
+        self.assertTrue(args.execute_live)
+        self.assertTrue(args.tavily_pool)
+        self.assertEqual(args.campaign_total, 50)
+        self.assertEqual(args.search_budget, 10)
+        self.assertEqual(args.campaign_jev_budget, 50)
+        self.assertEqual(args.campaign_token_budget, 100000)
+        self.assertTrue(args.campaign_review_before_promotion)
+        self.assertTrue(args.night_output_only)
+
+    def test_interactive_full_large_requires_explicit_live_confirmation(self):
+        from pipeline_produtos import interactive_menu
+        responses = iter(["3", "50", "1", "10", "50", "100000", ""])
+        with patch("builtins.input", side_effect=lambda *_: next(responses)):
+            with self.assertRaises(SystemExit):
+                interactive_menu(Path("."))
+
+    def test_interactive_full_large_rejects_non_jev_unattended(self):
+        from pipeline_produtos import interactive_menu
+        responses = iter(["3", "50", "3"])
+        with patch("builtins.input", side_effect=lambda *_: next(responses)):
+            with self.assertRaisesRegex(ValueError, "OVERNIGHT_CAMPAIGN_REQUIRES_JEV"):
+                interactive_menu(Path("."))
+
+    def test_interactive_full_large_limits_sublot_not_campaign_total(self):
+        from pipeline_produtos import interactive_menu
+        responses = iter(["3", "500", "1", "25"])
+        with patch("builtins.input", side_effect=lambda *_: next(responses)):
+            with self.assertRaisesRegex(ValueError, "OVERNIGHT_SUBLOT_REQUIRES_1_TO_20"):
+                interactive_menu(Path("."))
+
     def test_twenty_tavily_slots_and_other_providers_can_be_excluded(self):
         env = {f"TAVILY_API_KEY_{i}": f"offline-key-{i}" for i in range(1, 21)}
         env.update({f"TAVILY_LIMIT_{i}": "2" for i in range(1, 21)})
