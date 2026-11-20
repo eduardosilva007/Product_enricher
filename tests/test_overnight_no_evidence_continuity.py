@@ -70,6 +70,53 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
             self.assertEqual(quality["pending_raw_keys"], [pp.business_key("BRAND", "MODEL-9")])
             self.assertEqual(quality["result_integrity_errors"], [])
 
+    def test_title_identity_mismatch_is_quarantined_not_campaign_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pairs = [("LAIBRIL", "DC_1000/E")] + [
+                ("BRAND", f"MODEL-{i}") for i in range(9)]
+            input_file = root / "input.xlsx"
+            final_file = root / "final.xlsx"
+            output_file = root / "output.xlsx"
+            pd.DataFrame(pairs, columns=["Marca", "Modelo"]).to_excel(
+                input_file, index=False)
+            pd.DataFrame(pairs, columns=["Marca", "Modelo"]).to_excel(
+                final_file, index=False)
+            pd.DataFrame([{
+                "Marca": "LAIBRIL", "Modelo": "DC_1000/E",
+                "Título Real": "Different product model 111",
+                "O que é (Tipo)": "DRILL", "Category General": "OTHERS",
+                "FAMILY": "DRILL", "Resolution State": "RESOLVED",
+                "Auto Eligible": "SIM", "Review Required": "NÃO",
+                "Classification Identity": "STRONG",
+            }]).to_excel(output_file, index=False, sheet_name="Resultados")
+            (root / "classification_01.log").write_text(
+                "NIGHT_CLASSIFICATION_OUTPUT_ONLY_OK", encoding="utf-8")
+            class FakeStore:
+                def __init__(self, path):
+                    pass
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    return False
+                def get(self, brand, model):
+                    return SimpleNamespace(state="RAW_OK")
+            state = {"stages": {"classification": {"log": "classification_01.log"}}}
+            isolated = {"files": {
+                "input": str(input_file), "final": str(final_file),
+                "output": str(output_file), "cache": str(root / "cache.sqlite"),
+            }, "_nightly_output_only": True}
+            with patch.object(pp, "TavilyReadOnlyStore", FakeStore), \
+                 patch.object(pp, "overnight_examine", return_value=([], {}, 10, 10)), \
+                 patch.object(pp, "protected_originals", return_value=[]):
+                self.assertTrue(pp.outcome_audit(root, state, isolated))
+            quality = json.loads((root / "quality_audit.json").read_text(encoding="utf-8"))
+            self.assertEqual(quality["useful_raw_count"], 10)
+            self.assertEqual(quality["identity_review_count"], 1)
+            self.assertEqual(quality["identity_review_keys"],
+                             [pp.business_key("LAIBRIL", "DC_1000/E")])
+            self.assertEqual(quality["result_integrity_errors"], [])
+
     def test_canonical_staging_keeps_no_raw_sku_pending(self):
         from shutil import copy2
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,8 +170,8 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
     def test_no_evidence_cannot_be_approved_at_promotion(self):
         code = (Path(__file__).resolve().parents[1] /
                 "pipeline_produtos.py").read_text(encoding="utf-8-sig")
-        self.assertIn("if key in pending_keys:", code)
-        self.assertIn('raise RuntimeError("PROMOTION_PENDING_KEY_OUTSIDE_COHORT")', code)
+        self.assertIn("if key in pending_keys or key in identity_review_keys:", code)
+        self.assertIn('raise RuntimeError("PROMOTION_REVIEW_KEY_OUTSIDE_COHORT")', code)
         self.assertIn('"Reason Code": "NIGHTLY_NO_USABLE_RAW"', code)
         self.assertIn('"pending_raw": quality.get("pending_raw_count", 0)', code)
 
