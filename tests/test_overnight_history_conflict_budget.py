@@ -3,6 +3,10 @@
 Reproduces the failure involving dca|ajet15 without network or production files.
 """
 import json
+import io
+from contextlib import redirect_stdout
+from types import SimpleNamespace
+from unittest.mock import patch
 import sqlite3
 import tempfile
 import unittest
@@ -120,6 +124,38 @@ class OvernightHistoricalReservationConflictTests(unittest.TestCase):
                 self.assertEqual(conn.execute(
                     "SELECT COUNT(*) FROM collection_attempt_reservation_exposures "
                     "WHERE business_key='dca|ajet15'").fetchone()[0], 1)
+
+    def test_nonlive_preflight_runs_same_import_and_preserves_production(self):
+        import pipeline_produtos as pp
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            production = root / "production.sqlite"
+            make_ledger(production, [("dca|ajet15", "tavily:1", "tavily")])
+            history = root / "runs"
+            history.mkdir()
+            make_history(history, "run_01", [("dca|ajet15", "tavily:2", "tavily")])
+            args = SimpleNamespace(
+                execute_live=False, campaign_resume_dir="", resume_dir="",
+                night_include_raw_missing=True, allow_prior_serper_quota_error=False,
+                night_allow_previous_errors=False,
+            )
+            audit = {
+                "candidate_rows": [], "error_rows": [],
+                "missing_rows": [{"business_key": "new-sku", "brand": "A", "model": "B"}],
+            }
+            before = production.read_bytes()
+            buffer = io.StringIO()
+            with patch.object(pp, "OUT", history), \
+                 patch.object(pp, "source_paths", return_value={"classification_db": production}), \
+                 patch.object(pp, "overnight_audit", return_value=audit), \
+                 redirect_stdout(buffer):
+                result = pp.overnight_campaign(args, {})
+            self.assertEqual(result, 0)
+            output = json.loads(buffer.getvalue())
+            self.assertEqual(output["eligible"], 1)
+            self.assertEqual(output["historical_reservations"]["historical_account_conflicts"], 1)
+            self.assertEqual(output["search_calls"], 0)
+            self.assertEqual(before, production.read_bytes())
 
     def test_missing_prior_ledger_blocks_before_new_collection(self):
         with tempfile.TemporaryDirectory() as tmp:
