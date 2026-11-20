@@ -14096,7 +14096,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         prior_db = Path(isolated["files"]["classification_db"])
         if not prior_db.is_file():
             raise RuntimeError(f"PROMOTION_CLASSIFICATION_DB_MISSING: {prior_db}")
-        isolated_databases.append((prior_db, set(cohort_keys)))
+        isolated_databases.append((prior_db, set(cohort_keys), set(cohort_keys) - pending_keys))
         output = Path(isolated["files"]["output"])
         if not output.is_file():
             raise RuntimeError(f"PROMOTION_CLASSIFICATION_FILE_MISSING: {output}")
@@ -14217,7 +14217,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             target_db.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
                 business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
                 provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            for previous_db, cohort_set in isolated_databases:
+            for previous_db, cohort_set, grounded_keys in isolated_databases:
                 with closing(sqlite3.connect(previous_db.resolve().as_uri()+"?mode=ro",
                                              uri=True)) as source_db:
                     for table, fields, pk in (
@@ -14232,7 +14232,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
                         placeholders = ",".join("?" for _ in fields)
                         for values in source_db.execute(f"SELECT {columns} FROM {table}"):
                             rec = dict(zip(fields, values))
-                            if rec["business_key"] not in cohort_set:
+                            if rec["business_key"] not in grounded_keys:
                                 continue
                             prior = target_db.execute(
                                 f"SELECT {columns} FROM {table} WHERE {pk}=?",
