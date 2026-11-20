@@ -57,8 +57,8 @@ class OvernightNoEvidenceContinuityTests(unittest.TestCase):
                 "input": str(input_file), "final": str(final_file),
                 "output": str(output_file), "cache": str(cache_file),
             }, "_nightly_output_only": True}
-            with patch.object(pp, "TavilyReadOnlyStore", FakeStore), \\
-                 patch.object(pp, "overnight_examine", return_value=([], {}, 10, 10)), \\
+            with patch.object(pp, "TavilyReadOnlyStore", FakeStore), \
+                 patch.object(pp, "overnight_examine", return_value=([], {}, 10, 10)), \
                  patch.object(pp, "protected_originals", return_value=[]):
                 self.assertTrue(pp.outcome_audit(root, state, isolated))
             quality = json.loads((root / "quality_audit.json").read_text(encoding="utf-8"))
