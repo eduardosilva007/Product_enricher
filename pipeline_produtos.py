@@ -12633,6 +12633,13 @@ class DurableRouter:
         self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
             account TEXT PRIMARY KEY, reason TEXT NOT NULL,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        # A single SKU can have historical reservations on multiple accounts.
+        # The real SKU remains unique in the primary ledger, while distinct
+        # historical account exposures count against their own budgets.
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservation_exposures (
+            business_key TEXT NOT NULL, account TEXT NOT NULL, provider TEXT NOT NULL,
+            reserved_at TEXT NOT NULL,
+            PRIMARY KEY (business_key, account, provider))""")
         self.conn.commit()
         self.slots=slots
 
@@ -12647,16 +12654,36 @@ class DurableRouter:
                 (" AND reserved_at>=?" if slot.budget_since else ""),
                 ((slot.account, slot.budget_since) if slot.budget_since else (slot.account,)),
             ).fetchone()[0]
+            used += self.conn.execute(
+                "SELECT COUNT(*) FROM collection_attempt_reservation_exposures e "
+                "WHERE e.account=?"
+                + (" AND e.reserved_at>=?" if slot.budget_since else "")
+                + " AND NOT EXISTS (SELECT 1 FROM collection_attempt_reservations m "
+                  "WHERE m.business_key=e.business_key AND m.account=e.account "
+                  "AND m.provider=e.provider)",
+                ((slot.account, slot.budget_since) if slot.budget_since else (slot.account,)),
+            ).fetchone()[0]
             if used >= slot.limit:
                 continue
             # A shared billing group requires *the same total cap* configured on each key.
             group_slots = [s for s in self.slots if s.group == slot.group]
             group_limit = group_slots[0].limit
+            group_accounts = [s.account for s in group_slots]
+            placeholders = ",".join("?" for _ in group_slots)
+            period_filter = " AND reserved_at>=?" if slot.budget_since else ""
+            group_parameters = group_accounts + ([slot.budget_since] if slot.budget_since else [])
             group_used = self.conn.execute(
-                "SELECT COUNT(*) FROM collection_attempt_reservations WHERE account IN (" +
-                ",".join("?" for _ in group_slots) + ")" +
-                (" AND reserved_at>=?" if slot.budget_since else ""),
-                [s.account for s in group_slots] + ([slot.budget_since] if slot.budget_since else [])).fetchone()[0]
+                "SELECT COUNT(*) FROM collection_attempt_reservations "
+                "WHERE account IN (" + placeholders + ")" + period_filter,
+                group_parameters).fetchone()[0]
+            group_used += self.conn.execute(
+                "SELECT COUNT(*) FROM collection_attempt_reservation_exposures e "
+                "WHERE e.account IN (" + placeholders + ")"
+                + (" AND e.reserved_at>=?" if slot.budget_since else "")
+                + " AND NOT EXISTS (SELECT 1 FROM collection_attempt_reservations m "
+                  "WHERE m.business_key=e.business_key AND m.account=e.account "
+                  "AND m.provider=e.provider)",
+                group_parameters).fetchone()[0]
             if group_used >= group_limit:
                 continue
             return slot
@@ -12951,38 +12978,32 @@ def gate(cfg,args):
     if not os.getenv(key):raise ValueError(f"JEV credential not configured: {key}")
 
 def import_prior_reservations(destination: Path, history_root: Path = OUT) -> dict:
-    """Seed the NEW isolated SQLite with earlier real reservation attempts.
+    """Reconcile prior paid attempts without rewriting existing reservations.
 
-    Every sampled key from a previously-started pilot must exist in its
-    SQLite ledger, including errors/ambiguous requests. Missing or corrupt
-    history blocks further collection instead of silently resetting quota.
-    Never writes to old ledgers or the production SQLite.
+    Historical snapshots may attribute one SKU to different accounts. Keep the
+    actual SKU reserved ONCE and account for EACH distinct account exposure.
+    Never reissue an attempted SKU and never mint budget by hiding conflicts.
     """
     reports = sorted(history_root.glob("*/run_report.json"))
     expected = set()
-    actual = {}
+    observed = {}  # SKU -> (account, provider) -> most recent historical UTC time
     disabled_accounts = {}
     overlap_keys = set()
-    scanned_runs = 0
+    audited_runs = 0
     LOG.info("OVERNIGHT HISTORY | scanning %d past run reports (read-only)", len(reports))
     for report_path in reports:
         state = json.loads(report_path.read_text(encoding="utf-8"))
         if not state.get("stages", {}).get("collection", {}).get("attempts", 0):
             continue
         cohort = state.get("cohort_keys", [])
-        if len(cohort) != len(set(cohort)) or not cohort:
+        if not cohort or len(cohort) != len(set(cohort)):
             raise RuntimeError(f"Invalid earlier campaign cohort: {report_path}")
-        # Multiple historical pilots can refer to the SAME SKU. Do not
-        # abort simply because cohorts overlap. Accept only identical
-        # account/provider reservations; a conflict still aborts below.
         overlap_keys.update(expected.intersection(cohort))
         expected.update(cohort)
-        scanned_runs += 1
-        if scanned_runs % 10 == 0:
-            LOG.info(
-                "OVERNIGHT HISTORY | audited_runs=%d historical_keys=%d duplicates=%d",
-                scanned_runs, len(expected), len(overlap_keys),
-            )
+        audited_runs += 1
+        if audited_runs % 10 == 0:
+            LOG.info("OVERNIGHT HISTORY | audited_runs=%d historical_keys=%d duplicates=%d",
+                     audited_runs, len(expected), len(overlap_keys))
         config_path = report_path.parent / "isolated_config.json"
         previous_config = json.loads(config_path.read_text(encoding="utf-8"))
         ledger_path = Path(previous_config["files"]["classification_db"])
@@ -12990,66 +13011,97 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
             raise RuntimeError(f"Missing previous reservation ledger: {ledger_path}")
         with closing(sqlite3.connect(ledger_path.resolve().as_uri()+"?mode=ro", uri=True)) as source:
             rows = source.execute(
-                "SELECT business_key, account, provider FROM collection_attempt_reservations"
-            ).fetchall()
+                "SELECT business_key,account,provider,reserved_at "
+                "FROM collection_attempt_reservations").fetchall()
+            has_exposures = source.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='collection_attempt_reservation_exposures'").fetchone()
+            exposures = (source.execute(
+                "SELECT business_key,account,provider,reserved_at "
+                "FROM collection_attempt_reservation_exposures").fetchall()
+                if has_exposures else [])
             has_disabled = source.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='collection_disabled_accounts'"
-            ).fetchone()
+                "AND name='collection_disabled_accounts'").fetchone()
             if has_disabled:
                 for account, reason in source.execute(
-                    "SELECT account, reason FROM collection_disabled_accounts"
-                ):
+                    "SELECT account,reason FROM collection_disabled_accounts"):
                     disabled_accounts[account] = reason
-        reserved_here = {key for key, account, provider in rows}
+        reserved_here = {key for key, _account, _provider, _time in rows}
         if not set(cohort).issubset(reserved_here):
             missing = sorted(set(cohort) - reserved_here)
             raise RuntimeError(
                 f"Unaccounted previous collection attempts: {report_path}; "
-                f"missing_count={len(missing)} first={missing[:5]}"
-            )
-        for key, account, provider in rows:
-            if key in actual and actual[key] != (account, provider):
-                raise RuntimeError(f"Conflicting historical reservation for SKU: {key}")
-            actual[key] = (account, provider)
-    # Existing production snapshot rows are also attempts; avoid silent
-    # account rewrites and count all reservations across previous pilots.
+                f"missing_count={len(missing)} first={missing[:5]}")
+        for key, account, provider, reserved_at in rows + exposures:
+            if not key or not account or not provider or not reserved_at:
+                raise RuntimeError(f"INVALID_HISTORICAL_RESERVATION:{report_path}")
+            pair = (account, provider)
+            pairs = observed.setdefault(key, {})
+            pairs[pair] = max(pairs.get(pair, ""), str(reserved_at))
+    conflicts = set()
+    additional_exposures = 0
     with closing(sqlite3.connect(destination)) as conn:
-        conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
-            business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
-            provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        for key, (account, provider) in actual.items():
-            prior = conn.execute(
-                "SELECT account, provider FROM collection_attempt_reservations WHERE business_key=?",
-                (key,),
-            ).fetchone()
-            if prior and prior != (account, provider):
-                raise RuntimeError(f"Conflicting production/historical reservation: {key}")
-            if not prior:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservations (
+                business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
+                provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS collection_attempt_reservation_exposures (
+                business_key TEXT NOT NULL, account TEXT NOT NULL, provider TEXT NOT NULL,
+                reserved_at TEXT NOT NULL,
+                PRIMARY KEY(business_key,account,provider))""")
+            for key, pairs in observed.items():
+                primary = conn.execute(
+                    "SELECT account,provider FROM collection_attempt_reservations "
+                    "WHERE business_key=?", (key,)).fetchone()
+                if primary is None:
+                    (account, provider), moment = next(iter(sorted(pairs.items())))
+                    conn.execute(
+                        "INSERT INTO collection_attempt_reservations "
+                        "(business_key,account,provider,reserved_at) VALUES (?,?,?,?)",
+                        (key, account, provider, moment))
+                    primary = (account, provider)
+                if len(pairs) > 1 or any(pair != primary for pair in pairs):
+                    conflicts.add(key)
+                for (account, provider), moment in pairs.items():
+                    if (account, provider) == primary:
+                        continue
+                    conn.execute(
+                        "INSERT INTO collection_attempt_reservation_exposures "
+                        "(business_key,account,provider,reserved_at) VALUES (?,?,?,?) "
+                        "ON CONFLICT(business_key,account,provider) DO UPDATE SET "
+                        "reserved_at=MAX(reserved_at,excluded.reserved_at)",
+                        (key,account,provider,moment))
+                    additional_exposures += 1
+            conn.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
+                account TEXT PRIMARY KEY, reason TEXT NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            for account, reason in disabled_accounts.items():
                 conn.execute(
-                    "INSERT INTO collection_attempt_reservations(business_key, account, provider) VALUES (?, ?, ?)",
-                    (key, account, provider),
-                )
-        conn.execute("""CREATE TABLE IF NOT EXISTS collection_disabled_accounts (
-            account TEXT PRIMARY KEY, reason TEXT NOT NULL,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        for account, reason in disabled_accounts.items():
-            conn.execute(
-                "INSERT INTO collection_disabled_accounts(account, reason) VALUES (?, ?) "
-                "ON CONFLICT(account) DO UPDATE SET reason=excluded.reason",
-                (account, reason))
-        conn.commit()
-    LOG.info(
-        "OVERNIGHT HISTORY OK | reports=%d audited_runs=%d unique_keys=%d "
-        "duplicate_keys=%d reservations=%d disabled_accounts=%d",
-        len(reports), scanned_runs, len(expected), len(overlap_keys),
-        len(actual), len(disabled_accounts),
-    )
-    return {"historical_cohort_keys": len(expected),
-            "historical_reservation_keys": len(actual),
-            "historical_overlapping_keys": len(overlap_keys),
-            "historical_runs_scanned": scanned_runs,
-            "historical_disabled_accounts": len(disabled_accounts)}
+                    "INSERT INTO collection_disabled_accounts(account,reason) VALUES (?,?) "
+                    "ON CONFLICT(account) DO UPDATE SET reason=excluded.reason",
+                    (account,reason))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    LOG.warning(
+        "OVERNIGHT HISTORY RECONCILED | reports=%d audited=%d unique_keys=%d "
+        "overlap=%d conflicting_skus=%d additional_account_exposures=%d "
+        "blocked_requeries=YES",
+        len(reports), audited_runs, len(observed), len(overlap_keys),
+        len(conflicts), additional_exposures)
+    return {
+        "historical_cohort_keys": len(expected),
+        "historical_reservation_keys": len(observed),
+        "historical_overlapping_keys": len(overlap_keys),
+        "historical_runs_scanned": audited_runs,
+        "historical_disabled_accounts": len(disabled_accounts),
+        "historical_account_conflicts": len(conflicts),
+        "historical_extra_account_exposures": additional_exposures,
+        "conflict_sku_examples": sorted(conflicts)[:20],
+    }
 
 
 def create_run(cfg,args):
