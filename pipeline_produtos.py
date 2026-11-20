@@ -13970,7 +13970,8 @@ def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, reco
     result = {"cohort": len(pairs), "classification_rows": len(proposals),
               "pending_classification": len(pairs) - len(proposals),
               "search_calls": 0, "llm_calls": 0}
-    for name in ("master", "final"):
+    # Final is the sole canonical product workbook. Master is read-only history.
+    for name in ("final",):
         before, sheetname = _read_business_sheet(Path(originals[name]["path"]))
         book = load_workbook(staged[name])
         if sheetname not in book.sheetnames:
@@ -14102,12 +14103,12 @@ def _night_stage_output_only_canonical(originals, staged, pairs, raw_items, reco
                             f"CENTRALIZE_PROTECTED_CHANGED:{name}:{pos+2}:{field}"
                         )
         if name == "final":
-            # Only the 11 business fields go into the official Final. The
-            # Master and SQLite retain all operational/routing metadata.
-            count = _stage_only_business_columns_in_final(staged[name])
-            if count != len(BASELINE_PUBLIC_COLUMNS):
+            # Preserve every pre-existing column and all audited operational
+            # fields in Final; never destructively collapse it to 11 columns.
+            final_frame, _ = _read_business_sheet(staged[name])
+            if not set(BASELINE_PUBLIC_COLUMNS).issubset(set(final_frame.columns)):
                 raise RuntimeError("CENTRALIZE_FINAL_PUBLIC_SCHEMA_INVALID")
-            result["final_business_columns"] = count
+            result["final_columns"] = len(final_frame.columns)
             result["sku_lookup_index"] = _write_final_sku_index_to_stage(
                 staged[name])
         result[name] = counts
@@ -14131,6 +14132,8 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
     if state.get("promotion", {}).get("status") in {"PROMOTING", "RECOVERY_REQUIRED"}:
         raise RuntimeError("PROMOTION_RECOVERY_REQUIRED: inspect immutable backup before trying again")
     output_only = bool(state.get("night_output_only", False))
+    if not output_only:
+        raise RuntimeError("FINAL_ONLY_PROMOTION_REQUIRED: legacy master-writing promotion is disabled")
     if state.get("status") != "COMPLETE" or not state.get("batches"):
         raise RuntimeError("PROMOTION_BLOCKED: requires COMPLETE audited campaign")
     if state.get("active_run") or state.get("pending_run_creation"):
@@ -14445,14 +14448,15 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
         atomic_json(manifest_path, state)
         replaced = []
         try:
-            for k in ("cache", "master", "final", "classification_db"):
+            # Technical cache/checkpoint persistence is retained; the only
+            # official product workbook modified is Base Final.
+            for k in ("cache", "final", "classification_db"):
                 os.replace(staged[k], canonical[k])
                 replaced.append(k)
             if output_only:
-                # POST-WRITE AUDIT: 50 exact identities in BOTH official Excel
-                # files and useful RAW in the ONE canonical cache. On failure,
-                # restore immutable source backups in the except block below.
-                for name in ("master", "final"):
+                # POST-WRITE AUDIT: exact identities in Final, usable RAW in
+                # cache, and byte-identical untouched legacy Master.
+                for name in ("final",):
                     current, _ = _read_business_sheet(canonical[name])
                     bc = find_col(current, ["Marca", "Fabricante", "Brand", "Manufacturer"])
                     mc = find_col(current, ["Modelo", "Model", "SKU", "Part Number"])
@@ -14463,6 +14467,8 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
                         raise RuntimeError(
                             f"CENTRALIZE_POSTWRITE_EXCEL_MISSING:{name}:{len(missing_exact)}"
                         )
+                if digest(canonical["master"]) != originals["master"]["sha256"]:
+                    raise RuntimeError("CENTRALIZE_MASTER_MODIFIED")
                 with closing(TavilyReadOnlyStore(canonical["cache"])) as verified:
                     for brand, model, _ in raw_items:
                         if verified.get(brand, model).state not in {"RAW_OK", "RAW_OK_MERGED"}:
@@ -14487,7 +14493,7 @@ def overnight_promote_campaign(campaign_dir: Path, cfg: Dict[str, Any], rules: R
             "post_commit_integrity": "PASS" if output_only else "NOT_RUN_LEGACY",
         }
         atomic_json(manifest_path, state)
-        LOG.info("OVERNIGHT PROMOTED TO CANONICAL CACHE+MASTER+FINAL | cohort=%d | results=%d",
+        LOG.info("OVERNIGHT PROMOTED TO FINAL+TECHNICAL_CACHE+CHECKPOINTS | cohort=%d | results=%d",
                  len(keys), len(records))
         return state["promotion"]
     except BaseException:
