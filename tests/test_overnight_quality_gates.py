@@ -63,7 +63,10 @@ class OvernightQualityGatesTests(unittest.TestCase):
 
     def test_audit_checks_all_raw_and_output_integrity(self):
         src = function_source("outcome_audit")
-        self.assertIn('useful_raw==len(cohort)', src)
+        self.assertIn('pending_raw_keys', src)
+        self.assertIn('accounted_cohort_count', src)
+        self.assertNotIn('useful_raw==len(cohort)', src)
+        self.assertIn('not result_errors', src)
         self.assertIn('not result_errors', src)
         self.assertIn('FALSE_AUTO_ELIGIBLE', src)
         self.assertIn('RESULT_COHORT_MISMATCH', src)
