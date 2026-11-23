@@ -174,7 +174,7 @@ class RawEmptyNightTests(unittest.TestCase):
                 pilot.import_prior_reservations(target,base/"history")
             self.assertFalse(target.exists())
 
-    def test_master_promote_complete_campaign_to_canonical_cache_and_final(self):
+    def test_legacy_master_promotion_is_blocked_and_leaves_canonical_files_untouched(self):
         import pipeline_produtos as master
         import pandas as pd
         from unittest.mock import patch
@@ -300,66 +300,18 @@ class RawEmptyNightTests(unittest.TestCase):
             canonical_hashes={name:master.digest(path) for name,path in (
                 ("cache",official_cache),("master",consolidated),
                 ("final",final),("classification_db",official_db))}
-            # The samefile Windows 8.3 fix must NEVER disable SHA-256:
-            # a mismatched source hash remains a hard block before promotion.
-            corrupted={key:dict(value) for key,value in originals.items()}
-            corrupted["cache"]["sha256"]="0"*64
-            (backup_dir/"source_manifest.json").write_text(
-                json.dumps(corrupted),encoding="utf-8"
-            )
-            with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
-                with self.assertRaisesRegex(
-                    RuntimeError,"PROMOTION_SOURCE_CHANGED_SINCE_FAILED_STAGE: cache"
-                ):
-                    master.overnight_promote_campaign(campaign,cfg,rules,dry_run=True)
-            (backup_dir/"source_manifest.json").write_text(
-                json.dumps(originals),encoding="utf-8"
-            )
-            with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
-                dry=master.overnight_promote_campaign(campaign,cfg,rules,dry_run=True)
-            self.assertEqual(dry["status"],"DRY_RUN_PASS")
-            self.assertTrue(dry["canonical_files_unchanged"])
-            self.assertFalse(json.loads((campaign/"campaign.json").read_text(
-                encoding="utf-8")).get("promotion"))
+            # Final-only architecture: the legacy promotion that rewrote Master /
+            # cache / SQLite is disabled fail-closed, even for a dry run and even
+            # with a valid manifest. Nothing canonical may change.
+            for kwargs in ({"dry_run":True},{}):
+                with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
+                    with self.assertRaisesRegex(RuntimeError,"FINAL_ONLY_PROMOTION_REQUIRED"):
+                        master.overnight_promote_campaign(campaign,cfg,rules,**kwargs)
             for name,path in (("cache",official_cache),("master",consolidated),
                               ("final",final),("classification_db",official_db)):
                 self.assertEqual(master.digest(path),canonical_hashes[name])
-            with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
-                promoted=master.overnight_promote_campaign(campaign,cfg,rules)
-            self.assertEqual(promoted["status"],"COMMITTED")
-            self.assertEqual(promoted["cohort_count"],1)
-            result=pd.read_excel(final,dtype=object,keep_default_na=False)
-            idx=result.set_index("Modelo")
-            self.assertEqual(idx.loc["123456","FAMILY"],"ENGINE")
-            self.assertEqual(idx.loc["123456","Category General"],"OTHERS")
-            self.assertEqual(idx.loc["LOCKED","Revisão B.I"],"OK")
-            self.assertEqual(idx.loc["LOCKED","FAMILY"],"TRACTORS")
-            self.assertEqual(result.loc[
-                result["Marca"]=="ANNOVI REVERBERI","Revisão"].iloc[0],
-                "AUTO_APROVADO")
-            self.assertEqual(result.loc[
-                result["Marca"]=="Annovi-Reverberi","Revisão"].iloc[0],
-                "MANUAL")
-            self.assertEqual(result.loc[
-                result["Marca"]=="Bosch","Revisão"].iloc[0],
-                "VALIDADO_MANUAL")
-            store=master.TavilyReadOnlyStore(official_cache)
-            try:
-                self.assertEqual(store.get("CNH","123456").state,"RAW_OK")
-            finally:
-                store.close()
-            with closing(sqlite3.connect(official_db)) as conn, conn:
-                migrated=conn.execute(
-                    "SELECT result_json FROM classification_results WHERE checkpoint_id=?",
-                    ("check-123456",)).fetchone()
-                reservation=conn.execute(
-                    "SELECT provider FROM collection_attempt_reservations WHERE business_key=?",
-                    ("cnh|123456",)).fetchone()
-                self.assertIsNotNone(migrated)
-                self.assertEqual(reservation[0],"tavily")
-            with patch.object(master,"OUT",controlled),patch.object(master,"ROOT",root):
-                again=master.overnight_promote_campaign(campaign,cfg,rules)
-            self.assertEqual(again["status"],"COMMITTED")
+            self.assertFalse(json.loads((campaign/"campaign.json").read_text(
+                encoding="utf-8")).get("promotion"))
 
     def test_master_cli_supports_overnight_campaign_and_explicit_total_budget(self):
         import pipeline_produtos as master
@@ -486,7 +438,7 @@ class RawEmptyNightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             target=Path(folder)/"controlled_night"
             args=SimpleNamespace(
-                execute_live=True, campaign_total=50,
+                execute_live=True, campaign_review_before_promotion=True, campaign_total=50,
                 campaign_jev_budget=60, campaign_token_budget=3000,
                 campaign_resume_dir="",resume_dir="",search_budget=20,
                 llm_budget=20,token_budget=1000,timeout_minutes=120,
@@ -506,7 +458,7 @@ class RawEmptyNightTests(unittest.TestCase):
                 (run/"quality_audit.json").write_text(
                     json.dumps({"status":"PASS","protected_changes_total":0,
                                 "original_source_modified":[],
-                                "useful_raw_count":len(keys)}),encoding="utf-8")
+                                "useful_raw_count":len(keys),"accounted_cohort_count":len(keys)}),encoding="utf-8")
                 seen.append((local_args.search_budget,local_args.llm_budget,
                              local_args.token_budget))
                 return 0
@@ -514,7 +466,7 @@ class RawEmptyNightTests(unittest.TestCase):
                  patch.object(master,"overnight_run_one",side_effect=fake_one):
                 with patch.object(master,"overnight_promote_campaign",return_value={"status":"COMMITTED"}) as promote:
                     rc=master.overnight_campaign(args,{},rules=SimpleNamespace(version="x",hash="h"))
-                    promote.assert_called_once()
+                    promote.assert_not_called()  # never auto-promote; explicit review first
             self.assertEqual(rc,0)
             self.assertEqual(seen,[(20,20,1000),(20,20,1000),(10,20,1000)])
             manifests=list((target/"campaigns").glob("*/campaign.json"))
@@ -533,7 +485,7 @@ class RawEmptyNightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             target=Path(folder)/"controlled_night"
             args=SimpleNamespace(
-                execute_live=True,campaign_total=10,campaign_jev_budget=30,
+                execute_live=True, campaign_review_before_promotion=True,campaign_total=10,campaign_jev_budget=30,
                 campaign_token_budget=60000,campaign_resume_dir="",
                 campaign_pause_after_sublots=1,resume_dir="",
                 search_budget=5,llm_budget=15,token_budget=30000,
@@ -550,7 +502,7 @@ class RawEmptyNightTests(unittest.TestCase):
                     "cohort_keys":keys,"cohort_count":5}),encoding="utf-8")
                 (run/"quality_audit.json").write_text(json.dumps({
                     "status":"PASS","protected_changes_total":0,
-                    "original_source_modified":[],"useful_raw_count":5}),encoding="utf-8")
+                    "original_source_modified":[],"useful_raw_count":5,"accounted_cohort_count":5}),encoding="utf-8")
                 processed.append((keys,local_args.resume_dir))
                 return 0
             with patch.object(master,"OUT",target),patch.object(master,"gate"),\
@@ -579,7 +531,7 @@ class RawEmptyNightTests(unittest.TestCase):
                                       for k in batch["cohort_keys"]}),10)
                 self.assertTrue(all(not resumed for _,resumed in processed))
                 self.assertEqual(len(processed),2)
-                promote.assert_called_once()
+                promote.assert_not_called()  # never auto-promote; explicit review first
 
     def test_master_resumption_after_jev_started_never_retries_http(self):
         import pipeline_produtos as master
@@ -627,7 +579,7 @@ class RawEmptyNightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             target=Path(folder)/"controlled_night"
             args=SimpleNamespace(
-                execute_live=True,campaign_total=20,campaign_jev_budget=40,
+                execute_live=True, campaign_review_before_promotion=True,campaign_total=20,campaign_jev_budget=40,
                 campaign_token_budget=2000,campaign_resume_dir="",resume_dir="",
                 search_budget=20,llm_budget=20,token_budget=1000,
                 timeout_minutes=120,allow_prior_serper_quota_error=True)
@@ -646,7 +598,7 @@ class RawEmptyNightTests(unittest.TestCase):
                 run=Path(local.resume_dir)
                 (run/"quality_audit.json").write_text(json.dumps({
                     "status":"PASS","protected_changes_total":0,
-                    "original_source_modified":[],"useful_raw_count":20
+                    "original_source_modified":[],"useful_raw_count":20,"accounted_cohort_count":20
                 }),encoding="utf-8")
                 return 0
             with patch.object(master,"OUT",target),patch.object(master,"gate"),\
@@ -680,7 +632,7 @@ class RawEmptyNightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)/"controlled_night"
             args=SimpleNamespace(
-                execute_live=True,campaign_total=20,campaign_jev_budget=40,
+                execute_live=True, campaign_review_before_promotion=True,campaign_total=20,campaign_jev_budget=40,
                 campaign_token_budget=2000,campaign_resume_dir="",resume_dir="",
                 search_budget=20,llm_budget=20,token_budget=1000,
                 timeout_minutes=120,allow_prior_serper_quota_error=True)

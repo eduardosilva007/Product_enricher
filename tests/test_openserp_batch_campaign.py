@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pipeline_produtos as pp
 
 
+@unittest.skip("OPENSERP_DISCONTINUED_20261120: provider descartado pelo usuario; contrato atual coberto por test_tavily_only_policy.py")
 class OpenSERPBatchCampaignTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -52,7 +52,7 @@ class NightOutputOnlyModeTests(unittest.TestCase):
             night_output_only=True, campaign_review_before_promotion=False,
         )
         with patch.object(core, "gate") as allowed:
-            with self.assertRaisesRegex(ValueError, "NIGHT_OUTPUT_ONLY_REQUIRES_REVIEW"):
+            with self.assertRaisesRegex(ValueError, "OVERNIGHT_REVIEW_GATE_REQUIRED"):
                 core.overnight_campaign(args, {}, rules=None)
         allowed.assert_not_called()
 
@@ -114,7 +114,8 @@ class NightOutputOnlyModeTests(unittest.TestCase):
         self.assertIn('"night_output_only"', campaign_source)
         self.assertIn('"review_before_promotion"', campaign_source)
         self.assertIn('Resume must preserve night-output-only mode', campaign_source)
-        self.assertIn('not state.get("review_before_promotion", False)', campaign_source)
+        # Resume must keep the exact review-gate setting of the saved campaign.
+        self.assertIn('Resume must preserve review-before-promotion flag', campaign_source)
 
 
 class NightSelectionRegressionTests(unittest.TestCase):
@@ -423,7 +424,7 @@ class ArchivedLauncherTests(unittest.TestCase):
                       patch.object(core, "validate_release_contract", return_value=[]),
                       patch.object(core, "configured_slots", return_value=[object()]),
                       patch.object(core, "overnight_audit", return_value=fake_audit),
-                      patch.object(core, "prior_attempts_in_database", return_value=set()),
+                      patch.object(core, "prior_attempts_for_selection", return_value=set()),
                       patch.object(core, "import_prior_reservations", return_value={}),
                       patch.object(core, "main", return_value=0) as runtime):
                     sys.argv = ["launcher", "--repo", str(repo), "--target", "20",

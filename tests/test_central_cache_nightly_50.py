@@ -57,32 +57,29 @@ class CentralCacheProjectionTests(unittest.TestCase):
                 SimpleNamespace(version="test", hash="hash"))
             self.assertEqual((result["cohort"], result["classification_rows"],
                               result["pending_classification"]), (50, 24, 26))
-            for name in ("master", "final"):
-                before, _ = core._read_business_sheet(Path(originals[name]["path"]))
-                after, _ = core._read_business_sheet(staged[name])
-                self.assertEqual(len(after), 51)  # 3 original + 48 new
-                self.assertEqual(after.iloc[0]["Revisão B.I"], "OK")
-                self.assertEqual(after.iloc[0]["FAMILY"], "DRILLERS")
-                self.assertEqual(after.iloc[1]["FAMILY"], "ENGINE")
-                classified = after.loc[(after["Marca"] == "BRAND")
-                                       & (after["Modelo"] == "M000")].iloc[0]
-                self.assertEqual(classified["O que é (Tipo)"], "DRILL")
-                if name == "master":
-                    self.assertEqual(classified["Review Required"], "SIM")
-                    self.assertEqual(classified["Auto Eligible"], "NÃO")
-                else:
-                    self.assertEqual(list(after.columns), core.BASELINE_PUBLIC_COLUMNS)
-                    self.assertEqual(classified["Revisão"], "PROVÁVEL")
-                self.assertTrue(pd.isna(classified["Revisão B.I"]))
-                pending = after.loc[(after["Marca"] == "BRAND")
-                                    & (after["Modelo"] == "M047")].iloc[0]
-                if name == "master":
-                    self.assertEqual(pending["Status Classificação"], "PENDENTE_CLASSIFICACAO")
-                    self.assertEqual(pending["Raw State"], "RAW_OK")
-                else:
-                    self.assertEqual(pending["Revisão"], "REVISAR")
-                self.assertTrue(pd.isna(pending["Category General"]))
-                self.assertTrue(pd.isna(pending["Revisão B.I"]))
+            # Final is the ONLY canonical workbook; Consolidado stays byte-identical.
+            self.assertEqual(core.file_hash(staged["master"]), core.file_hash(Path(originals["master"]["path"])))
+            after, _ = core._read_business_sheet(staged["final"])
+            self.assertEqual(len(after), 51)  # 3 original + 48 new
+            self.assertEqual(after.iloc[0]["Revisão B.I"], "OK")
+            self.assertEqual(after.iloc[0]["FAMILY"], "DRILLERS")
+            self.assertEqual(after.iloc[1]["FAMILY"], "ENGINE")
+            self.assertTrue(set(core.BASELINE_PUBLIC_COLUMNS).issubset(after.columns))
+            classified = after.loc[(after["Marca"] == "BRAND")
+                                   & (after["Modelo"] == "M000")].iloc[0]
+            self.assertEqual(classified["O que é (Tipo)"], "DRILL")
+            # Operational fields live in Final; nothing is auto-approved.
+            self.assertEqual(classified["Review Required"], "SIM")
+            self.assertEqual(classified["Auto Eligible"], "NÃO")
+            self.assertEqual(classified["Revisão"], "PROVÁVEL")
+            self.assertTrue(pd.isna(classified["Revisão B.I"]))
+            pending = after.loc[(after["Marca"] == "BRAND")
+                                & (after["Modelo"] == "M047")].iloc[0]
+            self.assertEqual(pending["Status Classificação"], "PENDENTE_CLASSIFICACAO")
+            self.assertEqual(pending["Raw State"], "RAW_OK")
+            self.assertEqual(pending["Revisão"], "REVISAR")
+            self.assertTrue(pd.isna(pending["Category General"]))
+            self.assertTrue(pd.isna(pending["Revisão B.I"]))
 
     def test_normalized_alias_collision_blocks_before_persist(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,22 +125,20 @@ class CentralCacheProjectionTests(unittest.TestCase):
             core._night_stage_output_only_canonical(
                 originals, staged, pairs, raw, [],
                 SimpleNamespace(version="v", hash="h"))
-            for name in ("master", "final"):
-                after, _ = core._read_business_sheet(staged[name])
-                self.assertTrue(pd.isna(after.iloc[2]["O que é (Tipo)"]))
-                self.assertTrue(pd.isna(after.iloc[2]["Category General"]))
-                self.assertTrue(pd.isna(after.iloc[2]["FAMILY"]))
-                self.assertEqual(after.iloc[0]["Revisão B.I"], "OK")
-                self.assertEqual(after.iloc[1]["FAMILY"], "ENGINE")
-                if name == "master":
-                    self.assertEqual(after.iloc[2]["Review Required"], "SIM")
-                else:
-                    self.assertEqual(list(after.columns), core.BASELINE_PUBLIC_COLUMNS)
-                    self.assertEqual(after.iloc[2]["Revisão"], "REVISAR")
+            self.assertEqual(core.file_hash(staged["master"]), core.file_hash(Path(originals["master"]["path"])))
+            after, _ = core._read_business_sheet(staged["final"])
+            self.assertTrue(pd.isna(after.iloc[2]["O que é (Tipo)"]))
+            self.assertTrue(pd.isna(after.iloc[2]["Category General"]))
+            self.assertTrue(pd.isna(after.iloc[2]["FAMILY"]))
+            self.assertEqual(after.iloc[0]["Revisão B.I"], "OK")
+            self.assertEqual(after.iloc[1]["FAMILY"], "ENGINE")
+            self.assertEqual(after.iloc[2]["Review Required"], "SIM")
+            self.assertEqual(after.iloc[2]["Revisão"], "REVISAR")
 
 
-    def test_stage_removes_diagnostics_only_in_final(self):
-        from openpyxl import load_workbook
+    def test_stage_preserves_all_final_columns_and_leaves_master_untouched(self):
+        """Final-only architecture: Final is never collapsed to the 11 public
+        columns (operational/audit fields are kept) and Consolidado is unchanged."""
         with tempfile.TemporaryDirectory() as tmp:
             originals, staged = self.make_baselines(tmp)
             pairs = {"fixtec|fcd12l06ul": ("FIXTEC", "FCD12L06UL")}
@@ -151,13 +146,15 @@ class CentralCacheProjectionTests(unittest.TestCase):
             core._night_stage_output_only_canonical(
                 originals, staged, pairs, raw, [],
                 SimpleNamespace(version="v", hash="h"))
+            before_final, _ = core._read_business_sheet(Path(originals["final"]["path"]))
             after_final, _ = core._read_business_sheet(staged["final"])
-            after_master, _ = core._read_business_sheet(staged["master"])
-            self.assertEqual(list(after_final.columns), core.BASELINE_PUBLIC_COLUMNS)
-            self.assertIn("Raw State", after_master.columns)
-            self.assertIn("Review Required", after_master.columns)
-            self.assertNotIn("Raw State", after_final.columns)
+            self.assertTrue(set(before_final.columns).issubset(after_final.columns))
+            self.assertTrue(set(core.BASELINE_PUBLIC_COLUMNS).issubset(after_final.columns))
+            for column in ("Raw State", "Review Required", "Status Classificação"):
+                self.assertIn(column, after_final.columns)
             self.assertEqual(after_final.iloc[0]["Revisão B.I"], "OK")
+            self.assertEqual(core.file_hash(staged["master"]),
+                             core.file_hash(Path(originals["master"]["path"])))
 
     def test_cleanup_menu_instructions_and_guard(self):
         import inspect

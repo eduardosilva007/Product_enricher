@@ -87,6 +87,7 @@ class CampaignSafetyTests(unittest.TestCase):
                 campaign.execute_pipeline(Path(d), 1, 15, 30000, False, False)
                 self.assertEqual(run.call_count, 1)
 
+    @unittest.skip("OPENSERP_DISCONTINUED_20261120: provider descartado pelo usuario; contrato atual coberto por test_tavily_only_policy.py")
     def test_pipeline_native_openserp_is_wired_to_existing_collector(self):
         import ast
         source = Path(__file__).resolve().parents[1] / "pipeline_produtos.py"
@@ -137,6 +138,7 @@ class CampaignSafetyTests(unittest.TestCase):
         self.assertEqual(seen[0].get_header("Authorization"), "Bearer very_secret")
         self.assertIsNone(seen[1].get_header("Authorization"))
 
+    @unittest.skip("OPENSERP_DISCONTINUED_20261120: provider descartado pelo usuario; contrato atual coberto por test_tavily_only_policy.py")
     def test_pipeline_skips_pre_sync_only_for_openserp_auto_collect(self):
         source = (Path(__file__).resolve().parents[1] / "pipeline_produtos.py").read_text(encoding="utf-8-sig")
         self.assertIn("openserp_collect_auto = (", source)

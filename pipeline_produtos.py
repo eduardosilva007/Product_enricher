@@ -493,9 +493,10 @@ def load_env_file(path: Path) -> Dict[str, Any]:
 # -----------------------------------------------------------------------------
 class OperationalPause(RuntimeError):
     """Pausa segura da execução por quota, autenticação ou indisponibilidade."""
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, retry_after: Optional[float] = None):
         super().__init__(message)
         self.code = code
+        self.retry_after = retry_after
 
 
 class RateLimiter:
@@ -2089,8 +2090,18 @@ def _provider_post_once(
         raise OperationalPause("SERPER_LIMIT", "SERPER HTTP 400: insufficient credits")
     if status in {401, 403}:
         raise OperationalPause(f"{provider.upper()}_AUTH", f"{provider.upper()} HTTP {status}: autenticação/permissão")
-    if status in {429, 432, 433}:
-        raise OperationalPause(f"{provider.upper()}_LIMIT", f"{provider.upper()} HTTP {status}: limite/rate/quota")
+    if status == 429:
+        # Rate limit (too many requests per minute), NOT exhausted quota. It must
+        # pause the run but never disable the account. Name must not end with _LIMIT.
+        try:
+            retry_after = float(response.headers.get("Retry-After"))
+        except (TypeError, ValueError, AttributeError):
+            retry_after = None
+        raise OperationalPause(f"{provider.upper()}_RATE_LIMITED",
+                               f"{provider.upper()} HTTP 429: rate limit (Retry-After={retry_after})",
+                               retry_after=retry_after)
+    if status in {432, 433}:
+        raise OperationalPause(f"{provider.upper()}_LIMIT", f"{provider.upper()} HTTP {status}: limite/quota do plano")
     if 300 <= status < 400:
         raise RuntimeError(f"{provider.upper()} redirect bloqueado pela política de 1 request: HTTP {status}")
     raise RuntimeError(f"{provider.upper()} HTTP {status}: {msg}")
@@ -3561,6 +3572,74 @@ def _enforce_central_search_paths(args: argparse.Namespace, cfg: Dict[str, Any],
         _provider_credentials("openserp", cfg)
 
 
+def confirmed_serper_quota_keys(db_path: Path) -> set:
+    """Read-only: SKUs whose LATEST decisive event is an explicit Serper
+    "not enough credits" response (no search executed, no evidence, no credit).
+    Ambiguous outcomes (timeouts, other errors) and later successes are excluded."""
+    db_path = Path(db_path)
+    if not db_path.is_file():
+        return set()
+    try:
+        with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"collection_attempt_reservations", "events"} <= tables:
+                return set()
+            serper = {k for (k,) in conn.execute(
+                "SELECT business_key FROM collection_attempt_reservations WHERE provider='serper'")}
+            latest = {}
+            for key, event_type, detail in conn.execute(
+                """SELECT business_key,event_type,detail FROM events
+                   WHERE event_type='SERPER_LIMIT'
+                      OR event_type='SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA'
+                      OR event_type LIKE 'SEARCH_%_SAVED'
+                      OR event_type LIKE 'SEARCH_%_ERROR_NO_RETRY'
+                   ORDER BY id"""):
+                if key not in serper:
+                    continue
+                confirmed = event_type == "SERPER_LIMIT"
+                if event_type.startswith("SEARCH_") and event_type.endswith("_ERROR_NO_RETRY"):
+                    message = safe(detail).casefold()
+                    confirmed = "serper" in message and (
+                        "not enough credits" in message or "insufficient credits" in message
+                        or "insufficient balance" in message)
+                latest[key] = confirmed
+            return {k for k, ok in latest.items() if ok}
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"SERPER_QUOTA_LEDGER_UNREADABLE: {db_path}") from exc
+
+
+def release_confirmed_serper_quota_reservations(db_path: Path, keys) -> int:
+    """Delete ONLY the Serper reservations of `keys` that are confirmed quota
+    failures, writing one audit event each. Meant for the ISOLATED run ledger
+    (never the production one) so the Tavily worker may attempt them once."""
+    wanted = set(keys) & confirmed_serper_quota_keys(db_path)
+    if not wanted:
+        return 0
+    released = 0
+    with closing(sqlite3.connect(db_path, timeout=30)) as conn:
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for key in sorted(wanted):
+                row = conn.execute(
+                    "SELECT account FROM collection_attempt_reservations "
+                    "WHERE business_key=? AND provider='serper'", (key,)).fetchone()
+                if not row:
+                    continue
+                conn.execute(
+                    "INSERT INTO events(run_id,business_key,created_at,event_type,detail) VALUES(?,?,?,?,?)",
+                    ("QUOTA_RECOVERY", key, now_iso(), "SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA",
+                     f"prior_account={row[0]}; released_for_tavily_pool=1"))
+                released += conn.execute(
+                    "DELETE FROM collection_attempt_reservations WHERE business_key=? AND provider='serper'",
+                    (key,)).rowcount
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    return released
+
+
 def recover_confirmed_serper_quota_reservations(
     db_path: Path, plan: PreCollectionPlan, max_releases: int = 0,
     allowed_keys: Optional[set] = None,
@@ -3857,6 +3936,11 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     completed = True
     total_requests = 0
     experimental_targets = []
+    # Circuit breaker: consecutive failures mean the provider/network is down.
+    # Stop BEFORE reserving the next SKU so an outage cannot tombstone a batch.
+    breaker_limit = int((_collection_runtime_cfg(cfg).get("circuit_breaker", {}) or {})
+                        .get("max_consecutive_provider_failures", 3) or 3)
+    consecutive_failures = 0
     try:
         for idx, (brand, model, prior_state) in enumerate(candidates, 1):
             key = business_key(brand, model)
@@ -3957,6 +4041,7 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                     })
                 for q in coll.get("query_audit", []) or []:
                     query_rows.append({"Marca": brand, "Modelo": model, **q})
+                consecutive_failures = 0
                 db.event(
                     run_id, key, f"SEARCH_{COLLECTION_LABEL}_SAVED",
                     f"provider={provider}; state={state}; raw={raw_n}; curated={len(curated)}; requests={req_count}; credits={reported_credits}",
@@ -3983,6 +4068,12 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                     "Estado Anterior": prior_state, "Collection State": exc.code,
                     "Provider Requests": 1, "Data": now_iso(),
                 })
+                if exc.code.endswith("_RATE_LIMITED"):
+                    # Account stays enabled; the SKU attempt stays auditable (no auto retry).
+                    LOG.error("%s | conta preservada (rate limit != cota); pausa. Aguarde Retry-After=%s e retome manualmente.",
+                              exc, exc.retry_after)
+                    completed = False
+                    break
                 if router and active_slot and (exc.code.endswith("_LIMIT") or exc.code.endswith("_AUTH") or exc.code.endswith("_SCHEMA")):
                     router.disable(active_slot.account, exc.code)
                     if tavily_pool:
@@ -4008,6 +4099,14 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
                     "Provider Requests": 1, "Reason": safe(exc), "Data": now_iso(),
                 })
                 LOG.error("Falha coleta R9.6 SEM RETRY | %s %s | provider=%s | %s", brand, model, provider, exc)
+                consecutive_failures += 1
+                if consecutive_failures >= breaker_limit:
+                    db.event(run_id, key, "PROVIDER_CIRCUIT_OPEN",
+                             f"{consecutive_failures} falhas consecutivas; lote interrompido sem reservar os SKUs restantes")
+                    LOG.critical("CIRCUIT BREAKER | %d falhas consecutivas do provedor; lote interrompido. "
+                                 "SKUs restantes NAO foram reservados.", consecutive_failures)
+                    completed = False
+                    break
             if idx % 25 == 0:
                 _export_collection_quality_report(product_rows, source_rows, query_rows, report_path)
         _export_collection_quality_report(product_rows, source_rows, query_rows, report_path)
@@ -12823,6 +12922,18 @@ def prior_attempts_in_database(path: Path) -> set:
         ) from exc
 
 
+def prior_attempts_for_selection(path: Path, allow_serper_quota_error: bool = False) -> set:
+    """Search reservations that must hide a SKU from the selector.
+
+    With the explicit Serper-quota authorization, SKUs whose Search NEVER ran
+    (confirmed "not enough credits") are not "attempted": hiding them is what kept
+    the RAW_EMPTY backlog unreachable. Ambiguous failures stay blocked."""
+    prior = prior_attempts_in_database(path)
+    if allow_serper_quota_error:
+        prior -= confirmed_serper_quota_keys(Path(path))
+    return prior
+
+
 def select_overnight_eligible(audit, prior_attempts, *,
                               include_raw_missing=False,
                               allow_serper_quota_error=False,
@@ -13029,9 +13140,24 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
         if not ledger_path.is_file():
             raise RuntimeError(f"Missing previous reservation ledger: {ledger_path}")
         with closing(sqlite3.connect(ledger_path.resolve().as_uri()+"?mode=ro", uri=True)) as source:
-            rows = source.execute(
-                "SELECT business_key,account,provider,reserved_at "
-                "FROM collection_attempt_reservations").fetchall()
+            # Legacy ledgers may predate the reserved_at column. Never invent
+            # consumption: the SKU stays reserved (no retry), and its time is
+            # taken from the run's own report (created_at, else file mtime) so
+            # period budgets stay conservative and auditable.
+            ledger_columns = {r[1] for r in source.execute(
+                "PRAGMA table_info(collection_attempt_reservations)")}
+            if "reserved_at" in ledger_columns:
+                rows = source.execute(
+                    "SELECT business_key,account,provider,reserved_at "
+                    "FROM collection_attempt_reservations").fetchall()
+            else:
+                fallback_at = safe(state.get("created_at")) or datetime.fromtimestamp(
+                    report_path.stat().st_mtime, timezone.utc).isoformat()
+                LOG.warning("OVERNIGHT HISTORY | ledger without reserved_at; using run time %s | %s",
+                            fallback_at, ledger_path)
+                rows = [(k, a, p_, fallback_at) for k, a, p_ in source.execute(
+                    "SELECT business_key,account,provider "
+                    "FROM collection_attempt_reservations")]
             has_exposures = source.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
                 "AND name='collection_attempt_reservation_exposures'").fetchone()
@@ -13139,7 +13265,8 @@ def create_run(cfg,args):
                     prior_attempts.update(history.get("cohort_keys",[]))
             except (OSError,ValueError,TypeError):
                 raise RuntimeError(f"Unreadable previous campaign report: {prior_report}")
-    prior_attempts.update(prior_attempts_in_database(sources["classification_db"]))
+    prior_attempts.update(prior_attempts_for_selection(
+        sources["classification_db"], bool(args.allow_prior_serper_quota_error)))
     eligible, selection_stats=select_overnight_eligible(
         result, prior_attempts,
         include_raw_missing=bool(getattr(args,"night_include_raw_missing",False)),
@@ -13178,6 +13305,12 @@ def create_run(cfg,args):
     prior_reservation_stats = import_prior_reservations(
         Path(files["classification_db"]), OUT
     )
+    if args.allow_prior_serper_quota_error:
+        # Only in the isolated snapshot (production ledger is untouched): SKUs
+        # whose Serper Search never executed may be attempted ONCE by Tavily.
+        prior_reservation_stats["serper_quota_reservations_released"] = (
+            release_confirmed_serper_quota_reservations(
+                Path(files["classification_db"]), {r["business_key"] for r in eligible}))
     # A subset input is the strongest protection against accidental RAW_MISSING
     # collection. No 18K files are ever used as collection input in this campaign.
     import pandas as pd
@@ -14731,7 +14864,8 @@ def overnight_campaign(args, cfg, rules=None):
             raise ValueError("Resuming a live campaign requires --execute-live")
         paths = source_paths(cfg)
         report = overnight_audit(paths["input"], paths["cache"], paths["master"], paths["final"])
-        prior = prior_attempts_in_database(paths["classification_db"])
+        prior = prior_attempts_for_selection(
+            paths["classification_db"], bool(args.allow_prior_serper_quota_error))
         if OUT.is_dir():
             for old_report in OUT.glob("*/run_report.json"):
                 state_old = json.loads(old_report.read_text(encoding="utf-8"))
