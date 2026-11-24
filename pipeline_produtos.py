@@ -3640,6 +3640,61 @@ def release_confirmed_serper_quota_reservations(db_path: Path, keys) -> int:
     return released
 
 
+def failed_attempt_keys(db_path: Path) -> set:
+    """Read-only: reserved SKUs with NO saved-evidence event (failed/credit/unknown).
+
+    Only meaningful together with the selector, which already requires the SKU
+    to have no RAW evidence in the cache."""
+    db_path = Path(db_path)
+    if not db_path.is_file():
+        return set()
+    try:
+        with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "collection_attempt_reservations" not in tables:
+                return set()
+            reserved = {k for (k,) in conn.execute(
+                "SELECT business_key FROM collection_attempt_reservations")}
+            saved = set()
+            if "events" in tables:
+                saved = {k for (k,) in conn.execute(
+                    "SELECT DISTINCT business_key FROM events WHERE event_type LIKE 'SEARCH_%_SAVED'")}
+            return reserved - saved
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"FAILED_ATTEMPT_LEDGER_UNREADABLE: {db_path}") from exc
+
+
+def release_failed_attempt_reservations(db_path: Path, keys) -> int:
+    """Delete reservations of `keys` that never produced saved evidence, with one
+    audit event each. ISOLATED run ledger only; requires explicit authorization."""
+    wanted = set(keys) & failed_attempt_keys(db_path)
+    if not wanted:
+        return 0
+    released = 0
+    with closing(sqlite3.connect(db_path, timeout=30)) as conn:
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for key in sorted(wanted):
+                row = conn.execute(
+                    "SELECT account,provider FROM collection_attempt_reservations "
+                    "WHERE business_key=?", (key,)).fetchone()
+                if not row:
+                    continue
+                conn.execute(
+                    "INSERT INTO events(run_id,business_key,created_at,event_type,detail) VALUES(?,?,?,?,?)",
+                    ("FAILED_ATTEMPT_RECOVERY", key, now_iso(), "SEARCH_RESERVATION_RECOVERED_FAILED_ATTEMPT",
+                     f"prior_account={row[0]}; prior_provider={row[1]}; released_for_tavily_pool=1"))
+                released += conn.execute(
+                    "DELETE FROM collection_attempt_reservations WHERE business_key=?",
+                    (key,)).rowcount
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    return released
+
+
 def recover_confirmed_serper_quota_reservations(
     db_path: Path, plan: PreCollectionPlan, max_releases: int = 0,
     allowed_keys: Optional[set] = None,
@@ -8755,6 +8810,15 @@ def input_cache_readiness(cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _central_field_action(actual: str, wanted: str) -> str:
+    """'same' | 'conflict' | 'fix'. UNKNOWN in the workbook is the pipeline's own
+    placeholder, equivalent to blank; any other differing value is a conflict."""
+    actual = safe(actual)
+    if not actual or actual.upper() == "UNKNOWN":
+        return "fix"
+    return "same" if actual == wanted else "conflict"
+
+
 def audit_committed_classifications(cfg: Dict[str, Any], *, commit: bool = False) -> Dict[str, Any]:
     """Audit/recover previously paid nightly proposals in the ONE canonical baseline.
 
@@ -8883,10 +8947,10 @@ def audit_committed_classifications(cfg: Dict[str, Any], *, commit: bool = False
                         wanted = safe(proposal.get(col))
                         if not wanted or wanted.upper() == "UNKNOWN":
                             continue
-                        actual = safe(row.get(col))
-                        if actual and actual != wanted:
-                            problems.append(f"{key}:{name}:{col}:CONFLICT:{actual!r}!={wanted!r}")
-                        elif not actual:
+                        action = _central_field_action(row.get(col), wanted)
+                        if action == "conflict":
+                            problems.append(f"{key}:{name}:{col}:CONFLICT:{safe(row.get(col))!r}!={wanted!r}")
+                        elif action == "fix":
                             fixes[name][(pos, col)] = wanted
 
     result = {
@@ -8936,7 +9000,7 @@ def audit_committed_classifications(cfg: Dict[str, Any], *, commit: bool = False
                     if column not in headers:
                         raise RuntimeError("CENTRAL_AUDIT_REPAIR_COLUMN_MISSING:" + column)
                     cell = sheet.cell(pos + 2, headers[column])
-                    if safe(cell.value):
+                    if safe(cell.value) and safe(cell.value).upper() != "UNKNOWN":
                         raise RuntimeError("CENTRAL_AUDIT_REPAIR_NOT_BLANK")
                     cell.value = _excel_export_safe_value(value)
                 book.save(stage)
@@ -11670,7 +11734,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             f"\nCONFIRMACAO: {quantidade} produtos | "
             f"limites maximos: {quantidade} consultas Tavily, "
             f"{jev_total} chamadas JEV e {token_total} tokens. "
-            "Execucao com checkpoints; resultados isolados ate revisao."
+            "Execucao com checkpoints e gravacao automatica na Base Final ao concluir."
         )
         confirmed = input("Iniciar processamento? Digite EXECUTAR (ENTER cancela): ").strip()
         if confirmed != "EXECUTAR":
@@ -11684,8 +11748,9 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             "--campaign-jev-budget", str(jev_total),
             "--campaign-token-budget", str(token_total),
             "--campaign-review-before-promotion", "--night-output-only",
-            "--night-include-raw-missing",
-        ])
+            "--night-include-raw-missing", "--night-allow-previous-errors",
+            "--allow-prior-serper-quota-error",
+        ], namespace=argparse.Namespace(_from_menu=True))
     if op == "4":
         limite = _menu_limit("Limite de pendências COM CACHE para reprocessar (ENTER = todas): ")
         llm = _menu_llm_provider()
@@ -12472,31 +12537,7 @@ def main() -> int:
             print(json.dumps(result,ensure_ascii=False,indent=2,default=str))
             return 0
     if args.mode == "overnight-centralize":
-        # One VS Code menu operation: dry-run all canonical workbooks/cache,
-        # then explicit GRAVAR. Never calls Search or JEV.
-        with exclusive_campaign_lock():
-            pending = _night_pending_centralization()
-            if not pending:
-                print("CACHE CENTRAL SINCRONIZADO: nenhuma campanha pendente.")
-                return 0
-            print("\nCAMPANHAS COMPLETAS A CENTRALIZAR (SEM SEARCH/JEV):")
-            for index, (folder, data) in enumerate(pending, 1):
-                print(f"{index} - {folder.name} | SKUs={data.get('audited_products')}")
-            choice = input("Numero (ENTER = ultima campanha): ").strip()
-            number = int(choice) if choice else len(pending)
-            if not 1 <= number <= len(pending):
-                raise ValueError("CAMPANHA_FORA_DA_LISTA")
-            folder, _ = pending[number - 1]
-            preview = overnight_promote_campaign(folder, cfg, rules, dry_run=True)
-            print(json.dumps(preview, indent=2, ensure_ascii=False, default=str))
-            if preview.get("status") != "DRY_RUN_PASS":
-                raise RuntimeError("CENTRALIZE_DRY_RUN_FAILED")
-            if input("Confirma gravacao oficial cache+Master+Final? Digite GRAVAR: ").strip() != "GRAVAR":
-                print("NAO_GRAVADO: somente dry-run, zero APIs.")
-                return 0
-            report = overnight_promote_campaign(folder, cfg, rules, dry_run=False)
-            print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
-            return 0
+        return overnight_centralize_interactive(cfg, rules)
     if args.mode == "overnight-promote":
         if bool(args.campaign_resume_dir) == bool(args.legacy_run_dir):
             raise ValueError("Provide exactly one: --campaign-resume-dir OR two --legacy-run-dir")
@@ -12507,8 +12548,16 @@ def main() -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
             return 0
     if args.mode == "overnight":
+        if args.execute_live:
+            prep_rc = _prepare_central_state(
+                cfg, rules, auto_promote=bool(getattr(args, "_from_menu", False)))
+            if prep_rc:
+                return prep_rc
         with exclusive_campaign_lock():
-            return overnight_campaign(args, cfg, rules=rules)
+            rc = overnight_campaign(args, cfg, rules=rules)
+        if rc == 0 and getattr(args, "_from_menu", False):
+            return overnight_promote_pending_auto(cfg, rules)
+        return rc
     if args.mode == "validate":
         validate_all(rules, cfg, args.cache)
         return 0
@@ -12553,7 +12602,11 @@ def main() -> int:
         _enforce_central_search_paths(args, cfg, "tavily")
     if args.mode in {"collect", "full", "classify", "recover", "overnight"}:
         t_integrity = time.perf_counter()
-        central_integrity = audit_committed_classifications(cfg, commit=False)
+        if (os.environ.get("PIPELINE_CENTRAL_GATE_VERIFIED") == "1"
+                and args.mode != "overnight"):
+            central_integrity = {"status": "ALIGNED"}  # verified once by the parent
+        else:
+            central_integrity = audit_committed_classifications(cfg, commit=False)
         if central_integrity["status"] != "ALIGNED":
             LOG.error(
                 "CENTRALIZED_CLASSIFICATIONS_NOT_ALIGNED: %s; "
@@ -12922,7 +12975,8 @@ def prior_attempts_in_database(path: Path) -> set:
         ) from exc
 
 
-def prior_attempts_for_selection(path: Path, allow_serper_quota_error: bool = False) -> set:
+def prior_attempts_for_selection(path: Path, allow_serper_quota_error: bool = False,
+                                 allow_previous_errors: bool = False) -> set:
     """Search reservations that must hide a SKU from the selector.
 
     With the explicit Serper-quota authorization, SKUs whose Search NEVER ran
@@ -12931,6 +12985,8 @@ def prior_attempts_for_selection(path: Path, allow_serper_quota_error: bool = Fa
     prior = prior_attempts_in_database(path)
     if allow_serper_quota_error:
         prior -= confirmed_serper_quota_keys(Path(path))
+    if allow_previous_errors:
+        prior -= failed_attempt_keys(Path(path))
     return prior
 
 
@@ -13266,7 +13322,8 @@ def create_run(cfg,args):
             except (OSError,ValueError,TypeError):
                 raise RuntimeError(f"Unreadable previous campaign report: {prior_report}")
     prior_attempts.update(prior_attempts_for_selection(
-        sources["classification_db"], bool(args.allow_prior_serper_quota_error)))
+        sources["classification_db"], bool(args.allow_prior_serper_quota_error),
+        bool(getattr(args,"night_allow_previous_errors",False))))
     eligible, selection_stats=select_overnight_eligible(
         result, prior_attempts,
         include_raw_missing=bool(getattr(args,"night_include_raw_missing",False)),
@@ -13310,6 +13367,10 @@ def create_run(cfg,args):
         # whose Serper Search never executed may be attempted ONCE by Tavily.
         prior_reservation_stats["serper_quota_reservations_released"] = (
             release_confirmed_serper_quota_reservations(
+                Path(files["classification_db"]), {r["business_key"] for r in eligible}))
+    if getattr(args,"night_allow_previous_errors",False):
+        prior_reservation_stats["failed_attempt_reservations_released"] = (
+            release_failed_attempt_reservations(
                 Path(files["classification_db"]), {r["business_key"] for r in eligible}))
     # A subset input is the strongest protection against accidental RAW_MISSING
     # collection. No 18K files are ever used as collection input in this campaign.
@@ -14849,6 +14910,73 @@ def _night_pending_centralization():
     return pending
 
 
+def _prepare_central_state(cfg, rules, auto_promote: bool) -> int:
+    """Once per campaign, BEFORE any paid call: write pending campaigns (menu),
+    restore blank/UNKNOWN fields from committed ones (backup + verification) and
+    require ALIGNED. Workers then skip their own (2 min) repeat of this audit."""
+    if auto_promote:
+        overnight_promote_pending_auto(cfg, rules)
+    with exclusive_campaign_lock():
+        report = audit_committed_classifications(cfg, commit=False)
+        if report["status"] == "RESTORATION_REQUIRED":
+            report = audit_committed_classifications(cfg, commit=True)
+        if report["status"] not in {"ALIGNED", "RESTORED_AND_AUDITED"}:
+            LOG.error("CENTRALIZED_CLASSIFICATIONS_NOT_ALIGNED: %s; zero chamadas pagas",
+                      json.dumps(report, ensure_ascii=False))
+            return 2
+    os.environ["PIPELINE_CENTRAL_GATE_VERIFIED"] = "1"
+    return 0
+
+
+def overnight_promote_pending_auto(cfg, rules) -> int:
+    """End-to-end step of "Processo completo": write every COMPLETE isolated
+    campaign into the Final workbook. dry-run first; real write only if the
+    dry-run passes (fail-closed, backups made by overnight_promote_campaign).
+    Never calls Search or JEV."""
+    with exclusive_campaign_lock():
+        pending = _night_pending_centralization()
+        if not pending:
+            print("BASE FINAL JA SINCRONIZADA: nenhuma campanha pendente.")
+            return 0
+        for folder, data in pending:
+            print(f"\nGRAVANDO NA BASE FINAL: {folder.name} | SKUs={data.get('audited_products')}")
+            preview = overnight_promote_campaign(folder, cfg, rules, dry_run=True)
+            if preview.get("status") != "DRY_RUN_PASS":
+                raise RuntimeError("CENTRALIZE_DRY_RUN_FAILED: " + folder.name)
+            report = overnight_promote_campaign(folder, cfg, rules, dry_run=False)
+            print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+            if report.get("status") != "COMMITTED":
+                raise RuntimeError("CENTRALIZE_NOT_COMMITTED: " + folder.name)
+        print("\nGRAVACAO NA BASE FINAL CONCLUIDA.")
+        return 0
+
+
+def overnight_centralize_interactive(cfg, rules) -> int:
+    """Recovery (Maintenance): review + write a COMPLETE campaign with GRAVAR."""
+    with exclusive_campaign_lock():
+        pending = _night_pending_centralization()
+        if not pending:
+            print("CACHE CENTRAL SINCRONIZADO: nenhuma campanha pendente.")
+            return 0
+        print("\nCAMPANHAS COMPLETAS A GRAVAR NA BASE FINAL (SEM SEARCH/JEV):")
+        for index, (folder, data) in enumerate(pending, 1):
+            print(f"{index} - {folder.name} | SKUs={data.get('audited_products')}")
+        choice = input("Numero (ENTER = ultima campanha): ").strip()
+        number = int(choice) if choice else len(pending)
+        if not 1 <= number <= len(pending):
+            raise ValueError("CAMPANHA_FORA_DA_LISTA")
+        folder, _ = pending[number - 1]
+        preview = overnight_promote_campaign(folder, cfg, rules, dry_run=True)
+        if preview.get("status") != "DRY_RUN_PASS":
+            raise RuntimeError("CENTRALIZE_DRY_RUN_FAILED")
+        if input("Digite GRAVAR para confirmar: ").strip() != "GRAVAR":
+            print("NAO_GRAVADO.")
+            return 0
+        print(json.dumps(overnight_promote_campaign(folder, cfg, rules, dry_run=False),
+                         indent=2, ensure_ascii=False, default=str))
+        return 0
+
+
 def overnight_campaign(args, cfg, rules=None):
     """One master entrypoint: collect -> classify -> audit in <=20 SKU sublots.
 
@@ -14865,7 +14993,8 @@ def overnight_campaign(args, cfg, rules=None):
         paths = source_paths(cfg)
         report = overnight_audit(paths["input"], paths["cache"], paths["master"], paths["final"])
         prior = prior_attempts_for_selection(
-            paths["classification_db"], bool(args.allow_prior_serper_quota_error))
+            paths["classification_db"], bool(args.allow_prior_serper_quota_error),
+            bool(getattr(args, "night_allow_previous_errors", False)))
         if OUT.is_dir():
             for old_report in OUT.glob("*/run_report.json"):
                 state_old = json.loads(old_report.read_text(encoding="utf-8"))

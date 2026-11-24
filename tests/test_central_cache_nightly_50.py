@@ -178,10 +178,11 @@ class CentralCacheProjectionTests(unittest.TestCase):
         self.assertEqual(parser.parse_args(["--mode", "overnight-centralize"]).mode,
                          "overnight-centralize")
         import inspect
-        source = inspect.getsource(core.main)
+        source = inspect.getsource(core.overnight_centralize_interactive)
         self.assertIn("GRAVAR", source)
         self.assertIn("dry_run=True", source)
-        self.assertIn("CACHE CENTRAL PENDENTE", source)
+        self.assertIn("overnight_centralize_interactive", inspect.getsource(core.main))
+        self.assertIn("CACHE CENTRAL PENDENTE", inspect.getsource(core.main))
 
 
 if __name__ == "__main__":

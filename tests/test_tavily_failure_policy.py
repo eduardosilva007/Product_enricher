@@ -213,5 +213,28 @@ class SerperQuotaReleaseTests(unittest.TestCase):
         self.assertEqual(chosen, [])
 
 
+class FailedAttemptReleaseTests(unittest.TestCase):
+    def test_only_reservations_without_saved_evidence_are_released_with_audit(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d) / "l.sqlite"
+            SerperQuotaReleaseTests()._ledger(db)
+            self.assertEqual(p.failed_attempt_keys(db), {"quota", "timeout", "tav"})
+            self.assertEqual(p.release_failed_attempt_reservations(db, {"timeout", "saved"}), 1)
+            with closing(sqlite3.connect(db)) as cx:
+                left = {r[0] for r in cx.execute("SELECT business_key FROM collection_attempt_reservations")}
+                audit = cx.execute("SELECT business_key FROM events WHERE event_type="
+                                   "'SEARCH_RESERVATION_RECOVERED_FAILED_ATTEMPT'").fetchall()
+            self.assertEqual(left, {"quota", "tav", "saved"})
+            self.assertEqual(audit, [("timeout",)])
+
+    def test_selection_unblocks_failed_only_with_authorization(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d) / "l.sqlite"
+            SerperQuotaReleaseTests()._ledger(db)
+            self.assertEqual(p.prior_attempts_for_selection(db, False, False),
+                             {"quota", "timeout", "tav", "saved"})
+            self.assertEqual(p.prior_attempts_for_selection(db, False, True), {"saved"})
+
+
 if __name__ == "__main__":
     unittest.main()
