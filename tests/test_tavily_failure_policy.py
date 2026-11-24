@@ -236,5 +236,51 @@ class FailedAttemptReleaseTests(unittest.TestCase):
             self.assertEqual(p.prior_attempts_for_selection(db, False, True), {"saved"})
 
 
+class ReleasedButNeverRanTests(unittest.TestCase):
+    """Regression: a run whose collection was blocked BEFORE any HTTP call, after
+    its failed reservations were released, must not poison later runs."""
+
+    def _history(self, root, *, attempted):
+        run = Path(root) / "20261124T122001Z_x"
+        run.mkdir()
+        db = run / "source_classification_db.sqlite"
+        with closing(sqlite3.connect(db)) as cx, cx:
+            cx.executescript("""
+                CREATE TABLE collection_attempt_reservations (
+                    business_key TEXT PRIMARY KEY, account TEXT, provider TEXT,
+                    reserved_at TEXT DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT,
+                    business_key TEXT, created_at TEXT, event_type TEXT, detail TEXT);""")
+            for k in ("a|1", "a|2"):
+                cx.execute("INSERT INTO events(run_id,business_key,created_at,event_type,detail)"
+                           " VALUES('r',?,'t','SEARCH_RESERVATION_RECOVERED_FAILED_ATTEMPT','x')", (k,))
+            if attempted:
+                cx.execute("INSERT INTO collection_attempt_reservations(business_key,account,provider)"
+                           " VALUES('a|2','tavily:1','tavily')")
+        (run / "isolated_config.json").write_text(
+            '{"files": {"classification_db": %s}}' % __import__("json").dumps(str(db)), encoding="utf-8")
+        report = run / "run_report.json"
+        report.write_text('{"cohort_keys": ["a|1","a|2"], "stages": {"collection": {"attempts": 1}}}',
+                          encoding="utf-8")
+        return report
+
+    def test_released_and_never_attempted_is_free_but_attempted_stays_blocked(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = self._history(d, attempted=True)
+            self.assertEqual(p.released_unattempted_keys(report), {"a|1"})
+
+    def test_import_no_longer_raises_for_released_unused_cohort(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as dest:
+            self._history(d, attempted=False)
+            target = Path(dest) / "dest.sqlite"
+            with closing(sqlite3.connect(target)) as cx, cx:
+                cx.executescript("""
+                    CREATE TABLE collection_attempt_reservations (
+                        business_key TEXT PRIMARY KEY, account TEXT NOT NULL,
+                        provider TEXT NOT NULL, reserved_at TEXT DEFAULT CURRENT_TIMESTAMP);""")
+            stats = p.import_prior_reservations(target, Path(d))
+            self.assertEqual(stats["historical_reservation_keys"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

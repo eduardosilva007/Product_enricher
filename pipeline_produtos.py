@@ -13163,6 +13163,30 @@ def gate(cfg,args):
     key=jev.get("api_key_env") or "TYPESAFE_API_KEY"
     if not os.getenv(key):raise ValueError(f"JEV credential not configured: {key}")
 
+def released_unattempted_keys(report_path: Path) -> set:
+    """Keys of a past run whose reservation was deliberately released (audited
+    RECOVERED event) and that never produced a new reservation: the Search never
+    ran, so they are not 'attempted'. Any doubt returns an empty set (fail-closed)."""
+    try:
+        cfg_prev = json.loads((Path(report_path).parent / "isolated_config.json").read_text(encoding="utf-8"))
+        ledger = Path(cfg_prev["files"]["classification_db"])
+        if not ledger.is_file():
+            return set()
+        with closing(sqlite3.connect(ledger.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"collection_attempt_reservations", "events"} <= tables:
+                return set()
+            released = {k for (k,) in conn.execute(
+                "SELECT DISTINCT business_key FROM events WHERE event_type IN "
+                "('SEARCH_RESERVATION_RECOVERED_FAILED_ATTEMPT',"
+                "'SEARCH_RESERVATION_RECOVERED_SERPER_QUOTA')")}
+            reserved = {k for (k,) in conn.execute(
+                "SELECT business_key FROM collection_attempt_reservations")}
+            return released - reserved
+    except (OSError, ValueError, KeyError, sqlite3.Error):
+        return set()
+
+
 def import_prior_reservations(destination: Path, history_root: Path = OUT) -> dict:
     """Reconcile prior paid attempts without rewriting existing reservations.
 
@@ -13229,8 +13253,9 @@ def import_prior_reservations(destination: Path, history_root: Path = OUT) -> di
                     "SELECT account,reason FROM collection_disabled_accounts"):
                     disabled_accounts[account] = reason
         reserved_here = {key for key, _account, _provider, _time in rows}
-        if not set(cohort).issubset(reserved_here):
-            missing = sorted(set(cohort) - reserved_here)
+        never_ran = released_unattempted_keys(report_path)
+        if not (set(cohort) - never_ran).issubset(reserved_here):
+            missing = sorted(set(cohort) - never_ran - reserved_here)
             raise RuntimeError(
                 f"Unaccounted previous collection attempts: {report_path}; "
                 f"missing_count={len(missing)} first={missing[:5]}")
@@ -13318,7 +13343,8 @@ def create_run(cfg,args):
             try:
                 history=json.loads(prior_report.read_text(encoding="utf-8"))
                 if history.get("stages",{}).get("collection",{}).get("attempts",0)>0:
-                    prior_attempts.update(history.get("cohort_keys",[]))
+                    prior_attempts.update(set(history.get("cohort_keys",[]))
+                                          - released_unattempted_keys(prior_report))
             except (OSError,ValueError,TypeError):
                 raise RuntimeError(f"Unreadable previous campaign report: {prior_report}")
     prior_attempts.update(prior_attempts_for_selection(
@@ -14999,7 +15025,8 @@ def overnight_campaign(args, cfg, rules=None):
             for old_report in OUT.glob("*/run_report.json"):
                 state_old = json.loads(old_report.read_text(encoding="utf-8"))
                 if state_old.get("stages", {}).get("collection", {}).get("attempts", 0):
-                    prior.update(state_old.get("cohort_keys", []))
+                    prior.update(set(state_old.get("cohort_keys", []))
+                                 - released_unattempted_keys(old_report))
         eligible, selection = select_overnight_eligible(
             report, prior,
             include_raw_missing=bool(getattr(args, "night_include_raw_missing", False)),
