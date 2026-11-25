@@ -27,13 +27,13 @@ class TavilyOnlyPolicyTests(unittest.TestCase):
                          ("collect", "tavily", True))
         self.assertEqual(args.max_tavily_new, 5)
 
-    def test_tavily_pool_batch_must_be_1_to_100(self):
+    def test_tavily_pool_batch_must_be_1_to_1000(self):
         from types import SimpleNamespace
         cfg = pp.read_json(ROOT / "pipeline_config.json")
         args = pp.build_parser().parse_args(
             ["--mode", "collect", "--search-provider", "tavily", "--tavily-pool",
-             "--max-search-new", "101"])
-        with self.assertRaisesRegex(ValueError, "TAVILY_POOL_REQUIRES_EXPLICIT_BATCH_1_TO_100"):
+             "--max-search-new", "1001"])
+        with self.assertRaisesRegex(ValueError, "TAVILY_POOL_REQUIRES_EXPLICIT_BATCH_1_TO_1000"):
             pp.collect_products(args, cfg, SimpleNamespace())
 
 

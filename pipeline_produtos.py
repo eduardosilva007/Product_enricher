@@ -986,9 +986,14 @@ class TavilyReadOnlyStore:
         uri = f"file:{quote(str(path.resolve()).replace(os.sep, '/'), safe='/:')}?mode=ro"
         self.conn = sqlite3.connect(uri, uri=True)
         self.conn.row_factory = sqlite3.Row
-        qc = self.conn.execute("PRAGMA quick_check").fetchone()
-        if not qc or safe(qc[0]).lower() != "ok":
-            raise RuntimeError(f"SQLite quick_check falhou: {qc[0] if qc else 'sem resposta'}")
+        signature = _file_signature(path)
+        if signature not in _SQLITE_QUICK_CHECK_OK:
+            t0 = time.perf_counter()
+            qc = self.conn.execute("PRAGMA quick_check").fetchone()
+            if not qc or safe(qc[0]).lower() != "ok":
+                raise RuntimeError(f"SQLite quick_check falhou: {qc[0] if qc else 'sem resposta'}")
+            _SQLITE_QUICK_CHECK_OK.add(signature)
+            LOG.info("PERF | quick_check %s=%.1fs", path.name, time.perf_counter() - t0)
         cols = {row[1] for row in self.conn.execute("PRAGMA table_info(tavily_cache)")}
         required = {"cache_key", "brand", "model", "response_json", "created_at"}
         if not required.issubset(cols):
@@ -3797,8 +3802,8 @@ def collect_products(args: argparse.Namespace, cfg: Dict[str, Any], rules: Rules
     tavily_pool = bool(getattr(args, "tavily_pool", False))
     if tavily_pool and (bool(getattr(args, "auto_providers", False)) or provider != "tavily"):
         raise ValueError("TAVILY_POOL_REQUIRES_EXCLUSIVE_TAVILY: use --search-provider tavily sem --auto-providers")
-    if tavily_pool and not 1 <= int(args.max_tavily_new or 0) <= 100:
-        raise ValueError("TAVILY_POOL_REQUIRES_EXPLICIT_BATCH_1_TO_100")
+    if tavily_pool and not 1 <= int(args.max_tavily_new or 0) <= SUBLOT_SEARCH_MAX:
+        raise ValueError(f"TAVILY_POOL_REQUIRES_EXPLICIT_BATCH_1_TO_{SUBLOT_SEARCH_MAX}")
     auto_route = bool(getattr(args, "auto_providers", False) or tavily_pool)
     if auto_route and getattr(args, "mode", "collect") == "full":
         if not 1 <= int(args.max_tavily_new or 0) <= 10:
@@ -7658,10 +7663,43 @@ def _cache_contract_human_or_accepted(row: Any, df: Any) -> bool:
     )
 
 
+def _file_signature(path: Path) -> tuple:
+    """(path, size, mtime_ns) of a file and of its SQLite -wal sidecar, if any.
+    Used only to memoize read-only results inside ONE process."""
+    path = Path(path)
+    st = path.stat()
+    wal = path.with_name(path.name + "-wal")
+    wal_sig = (wal.stat().st_size, wal.stat().st_mtime_ns) if wal.exists() else (0, 0)
+    return (str(path.resolve()), st.st_size, st.st_mtime_ns, wal_sig)
+
+
+SUBLOT_SEARCH_MAX = 1000      # Search requests per sublot (one Tavily account budget)
+MENU_PROMOTION_BLOCK = 2000   # SKUs per campaign block; each block is written to the Final
+_BASELINE_KEYS_MEMO: Dict[tuple, Tuple[set, set, set]] = {}
+_SQLITE_QUICK_CHECK_OK: set = set()
+_OVERNIGHT_AUDIT_MEMO: Dict[tuple, Any] = {}
+
+
 def _accepted_keys_from_baseline_file(
     path: Optional[Path],
 ) -> Tuple[set, set, set]:
-    """Retorna (aceitos, manuais, bi_ok_locked) de um baseline."""
+    """Retorna (aceitos, manuais, bi_ok_locked) de um baseline (memo por processo,
+    invalidado por tamanho/mtime do arquivo)."""
+    if path and Path(path).exists():
+        signature = _file_signature(Path(path))
+        hit = _BASELINE_KEYS_MEMO.get(signature)
+        if hit is None:
+            t0 = time.perf_counter()
+            hit = _accepted_keys_from_baseline_file_uncached(path)
+            LOG.info("PERF | baseline_keys %s=%.1fs", Path(path).name, time.perf_counter() - t0)
+            _BASELINE_KEYS_MEMO[signature] = hit
+        return set(hit[0]), set(hit[1]), set(hit[2])
+    return set(), set(), set()
+
+
+def _accepted_keys_from_baseline_file_uncached(
+    path: Optional[Path],
+) -> Tuple[set, set, set]:
     accepted: set = set()
     manual: set = set()
     bi_locked: set = set()
@@ -11706,6 +11744,14 @@ def interactive_menu(base: Path) -> argparse.Namespace:
         return parser.parse_args(argv)
     if op == "3":
         print("\nPROCESSO COMPLETO: TAVILY -> CURADORIA -> CLASSIFICACAO")
+        interrupted = _night_incomplete_campaigns()
+        if interrupted:
+            folder, data = interrupted[-1]
+            limits = data.get("limits", {})
+            print(f"CAMPANHA INTERROMPIDA: {folder.name} | {data.get('audited_products')}/"
+                  f"{limits.get('target')} SKUs auditados")
+            if input("Retomar esta campanha? (S/N): ").strip().upper() == "S":
+                return _resume_campaign_args(parser, folder, data)
         quantidade = _menu_limit("Total de SKUs da campanha (numero positivo): ")
         if quantidade < 1:
             raise ValueError("FULL_CAMPAIGN_REQUIRES_POSITIVE_TOTAL")
@@ -11727,7 +11773,7 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             )
         # Operational batching and quota caps are internal implementation details.
         # A single explicit confirmation shows the maximum authorized envelope.
-        lote = 10
+        lote = min(SUBLOT_SEARCH_MAX, quantidade)
         jev_total = (quantidade * 3 + 1) // 2
         token_total = quantidade * 3000
         print(
@@ -11743,8 +11789,9 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             "--mode", "overnight", "--execute-live", "--yes",
             "--tavily-pool", "--campaign-total", str(quantidade),
             "--search-budget", str(lote),
-            "--llm-budget", "15",
-            "--token-budget", "30000",
+            "--llm-budget", str(lote * 3 // 2),
+            "--token-budget", str(lote * 3000),
+            "--timeout-minutes", "1440",
             "--campaign-jev-budget", str(jev_total),
             "--campaign-token-budget", str(token_total),
             "--campaign-review-before-promotion", "--night-output-only",
@@ -12553,10 +12600,10 @@ def main() -> int:
                 cfg, rules, auto_promote=bool(getattr(args, "_from_menu", False)))
             if prep_rc:
                 return prep_rc
+        if getattr(args, "_from_menu", False):
+            return _run_menu_campaign_blocks(args, cfg, rules)
         with exclusive_campaign_lock():
             rc = overnight_campaign(args, cfg, rules=rules)
-        if rc == 0 and getattr(args, "_from_menu", False):
-            return overnight_promote_pending_auto(cfg, rules)
         return rc
     if args.mode == "validate":
         validate_all(rules, cfg, args.cache)
@@ -12590,7 +12637,7 @@ def main() -> int:
         if not args.tavily_pool:
             LOG.error("TAVILY_POOL_REQUIRED: execute --search-provider tavily --tavily-pool --max-search-new N")
             return 2
-        if not 1 <= int(args.max_tavily_new or 0) <= (10 if args.mode == "full" else 100):
+        if not 1 <= int(args.max_tavily_new or 0) <= (10 if args.mode == "full" else SUBLOT_SEARCH_MAX):
             LOG.error("TAVILY_POOL_EXPLICIT_BATCH_REQUIRED")
             return 2
         if args.mode == "full" and int(args.max_items or 0) != int(args.max_tavily_new or 0):
@@ -12891,8 +12938,11 @@ class DurableRouter:
 
 def overnight_audit(input_path,cache_path,master_path,final_path):
     from contextlib import closing
-    protected=load_baseline_inventory(master_path,final_path)["hard_lock"]
-    processed=load_baseline_inventory(master_path,final_path)["processed"]
+    t_audit=time.perf_counter()
+    baseline=load_baseline_inventory(master_path,final_path)
+    protected=baseline["hard_lock"]
+    processed=baseline["processed"]
+    LOG.info("PERF | overnight_audit baseline=%.1fs",time.perf_counter()-t_audit)
     rows=read_input_rows(input_path)
     seen=set();summary=Counter();eligible=[];errors=[];missing_rows=[];examples=[]
     with closing(TavilyReadOnlyStore(cache_path)) as store:
@@ -12940,6 +12990,7 @@ def overnight_audit(input_path,cache_path,master_path,final_path):
                 summary["raw_empty_candidate"]+=1
                 eligible.append(rec)
             if len(examples)<10:examples.append(rec)
+    LOG.info("PERF | overnight_audit total=%.1fs rows=%d",time.perf_counter()-t_audit,len(seen))
     return {"unique_input_keys":len(seen),"summary":dict(sorted(summary.items())),
             "recollectable_without_prior_error":len(eligible),
             "previous_search_errors_requiring_explicit_review":len(errors),
@@ -12947,6 +12998,24 @@ def overnight_audit(input_path,cache_path,master_path,final_path):
             "missing_rows":missing_rows,"examples":examples,
             "interpretation":"RAW_EMPTY does not prove a completed Search, and requerying can incur charges.",
             "search_calls":0,"auto_approval":False}
+
+def overnight_audit_cached(input_path,cache_path,master_path,final_path):
+    """overnight_audit once per process: the four read-only sources do not change
+    between sublots of an output-only campaign. Any change in size/mtime of a source
+    (or of the cache WAL) recomputes."""
+    try:
+        key=tuple(_file_signature(Path(x)) for x in (input_path,cache_path,master_path,final_path))
+    except OSError:
+        return overnight_audit(input_path,cache_path,master_path,final_path)
+    hit=_OVERNIGHT_AUDIT_MEMO.get(key)
+    if hit is None:
+        hit=overnight_audit(input_path,cache_path,master_path,final_path)
+        _OVERNIGHT_AUDIT_MEMO.clear()  # keep one entry: memory stays bounded
+        _OVERNIGHT_AUDIT_MEMO[key]=hit
+    else:
+        LOG.info("PERF | overnight_audit reused from this process (sources unchanged)")
+    return hit
+
 
 def prior_attempts_in_database(path: Path) -> set:
     """Read original SQLite search reservations without creating or editing it.
@@ -13140,10 +13209,10 @@ def source_paths(cfg):
 
 def gate(cfg,args):
     if not args.execute_live:return
-    if not 1<=args.search_budget<=20:raise ValueError("Search budget must be 1..20 in controlled pilot")
-    if not 1<=args.llm_budget<=100:raise ValueError("JEV cap must be 1..100")
-    if not 1<=args.token_budget<=200000:raise ValueError("Token cap must be 1..200000")
-    if not 1<=args.timeout_minutes<=240:raise ValueError("Timeout must be 1..240 minutes")
+    if not 1<=args.search_budget<=SUBLOT_SEARCH_MAX:raise ValueError(f"Search budget must be 1..{SUBLOT_SEARCH_MAX} per sublot")
+    if not 1<=args.llm_budget<=SUBLOT_SEARCH_MAX*2:raise ValueError(f"JEV cap must be 1..{SUBLOT_SEARCH_MAX*2}")
+    if not 1<=args.token_budget<=SUBLOT_SEARCH_MAX*4000:raise ValueError(f"Token cap must be 1..{SUBLOT_SEARCH_MAX*4000}")
+    if not 1<=args.timeout_minutes<=1440:raise ValueError("Timeout must be 1..1440 minutes")
     if cfg.get("recovery",{}).get("hard_lock_review_bi_value")!="OK":
         raise ValueError("Missing BI hard lock")
     if not cfg.get("identity",{}).get("auto_approval_requires_strong_identity"):
@@ -13334,7 +13403,7 @@ def create_run(cfg,args):
     sources=source_paths(cfg)
     for key in ("input","cache","master","final"):
         if not sources[key].is_file():raise FileNotFoundError(f"Missing input: {key}: {sources[key]}")
-    result=overnight_audit(sources["input"],sources["cache"],sources["master"],sources["final"])
+    result=overnight_audit_cached(sources["input"],sources["cache"],sources["master"],sources["final"])
     # New rounds must not repeatedly spend on the same frozen SKU from a prior
     # pilot. Resume that run instead; do not silently re-authorize Search.
     prior_attempts=set()
@@ -14954,6 +15023,73 @@ def _prepare_central_state(cfg, rules, auto_promote: bool) -> int:
     return 0
 
 
+def _night_incomplete_campaigns():
+    """Output-only campaigns that stopped cleanly between/inside sublots (RUNNING,
+    READY, PAUSED). BLOCKED/PARTIAL/NO_ELIGIBLE need human review and are NOT listed."""
+    found = []
+    for manifest in sorted((OUT / "campaigns").glob("*/campaign.json")):
+        state = read_json(manifest)
+        if (state.get("status") in {"RUNNING", "READY", "PAUSED_FOR_RESUME_TEST"}
+                and state.get("night_output_only")
+                and state.get("tavily_pool")
+                and (state.get("promotion") or {}).get("status") != "COMMITTED"):
+            found.append((manifest.parent, state))
+    return found
+
+
+def _resume_campaign_args(parser, folder, state):
+    """Same campaign, same authorizations: overnight_campaign verifies they match."""
+    limits = state["limits"]
+    per = int(limits["search_per_sublot"])
+    argv = ["--mode", "overnight", "--execute-live", "--yes", "--tavily-pool",
+            "--campaign-resume-dir", str(folder),
+            "--campaign-total", str(limits["target"]),
+            "--search-budget", str(per),
+            "--llm-budget", str(per * 3 // 2),
+            "--token-budget", str(per * 3000),
+            "--timeout-minutes", "1440",
+            "--campaign-jev-budget", str(limits["jev_limit"]),
+            "--campaign-token-budget", str(limits["token_limit"]),
+            "--campaign-review-before-promotion", "--night-output-only"]
+    if state.get("night_include_raw_missing"):
+        argv.append("--night-include-raw-missing")
+    if state.get("night_allow_previous_errors"):
+        argv.append("--night-allow-previous-errors")
+    if state.get("serper_rescue"):
+        argv.append("--allow-prior-serper-quota-error")
+    return parser.parse_args(argv, namespace=argparse.Namespace(_from_menu=True))
+
+
+def _run_menu_campaign_blocks(args, cfg, rules) -> int:
+    """Menu campaign = blocks of MENU_PROMOTION_BLOCK SKUs. Each block is collected,
+    classified, audited and WRITTEN to the Final before the next starts, so a stop
+    never loses more than the block in progress. A resumed campaign runs alone."""
+    import copy
+    if args.campaign_resume_dir:
+        with exclusive_campaign_lock():
+            rc = overnight_campaign(args, cfg, rules=rules)
+        return rc if rc else overnight_promote_pending_auto(cfg, rules)
+    total, done = int(args.campaign_total), 0
+    while done < total:
+        this = min(MENU_PROMOTION_BLOCK, total - done)
+        sub = copy.copy(args)
+        sub.campaign_total = this
+        sub.campaign_jev_budget = (this * 3 + 1) // 2
+        sub.campaign_token_budget = this * 3000
+        print(f"\nBLOCO {done + 1}-{done + this} de {total}")
+        with exclusive_campaign_lock():
+            rc = overnight_campaign(sub, cfg, rules=rules)
+        if rc:
+            print("CAMPANHA INTERROMPIDA. O que ja foi gravado na Base Final permanece. "
+                  "Abra o menu e escolha PROCESSO COMPLETO para retomar.")
+            return rc
+        rc = overnight_promote_pending_auto(cfg, rules)
+        if rc:
+            return rc
+        done += this
+    return 0
+
+
 def overnight_promote_pending_auto(cfg, rules) -> int:
     """End-to-end step of "Processo completo": write every COMPLETE isolated
     campaign into the Final workbook. dry-run first; real write only if the
@@ -15058,8 +15194,8 @@ def overnight_campaign(args, cfg, rules=None):
         raise ValueError("--campaign-total must be positive in live master overnight mode")
     if args.campaign_jev_budget <= 0 or args.campaign_token_budget <= 0:
         raise ValueError("Explicit cumulative JEV call and token budgets required")
-    if not 1 <= args.search_budget <= 20:
-        raise ValueError("Search cap per sublot must be 1..20")
+    if not 1 <= args.search_budget <= SUBLOT_SEARCH_MAX:
+        raise ValueError(f"Search cap per sublot must be 1..{SUBLOT_SEARCH_MAX}")
     if getattr(args, "campaign_pause_after_sublots", 0) < 0:
         raise ValueError("campaign-pause-after-sublots must not be negative")
     if not getattr(args, "campaign_review_before_promotion", False):

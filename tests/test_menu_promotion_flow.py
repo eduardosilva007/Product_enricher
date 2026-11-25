@@ -141,5 +141,123 @@ class CentralStatePreparationTests(unittest.TestCase):
         self.assertEqual((rc, seen, flag), (2, [False], None))
 
 
+class PerformanceMemoTests(unittest.TestCase):
+    def test_overnight_audit_runs_once_per_process_until_a_source_changes(self):
+        import tempfile
+        calls = []
+
+        def fake(*paths):
+            calls.append(1)
+            return {"candidate_rows": [], "error_rows": [], "missing_rows": [], "summary": {}}
+
+        with tempfile.TemporaryDirectory() as d:
+            files = []
+            for name in ("in.xlsx", "cache.sqlite", "master.xlsx", "final.xlsx"):
+                f = Path(d) / name
+                f.write_bytes(b"x")
+                files.append(f)
+            with patch.object(pp, "overnight_audit", side_effect=fake):
+                pp._OVERNIGHT_AUDIT_MEMO.clear()
+                first = pp.overnight_audit_cached(*files)
+                second = pp.overnight_audit_cached(*files)
+                self.assertIs(first, second)
+                self.assertEqual(len(calls), 1)
+                files[2].write_bytes(b"changed-size")  # a source changed
+                pp.overnight_audit_cached(*files)
+                self.assertEqual(len(calls), 2)
+            pp._OVERNIGHT_AUDIT_MEMO.clear()
+
+    def test_baseline_keys_memo_returns_independent_copies(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "b.xlsx"
+            f.write_bytes(b"x")
+            calls = []
+
+            def fake(path):
+                calls.append(1)
+                return {"a"}, set(), set()
+
+            with patch.object(pp, "_accepted_keys_from_baseline_file_uncached", side_effect=fake):
+                first = pp._accepted_keys_from_baseline_file(f)
+                first[0].add("mutated")
+                second = pp._accepted_keys_from_baseline_file(f)
+            self.assertEqual(second[0], {"a"})
+            self.assertEqual(len(calls), 1)
+            pp._BASELINE_KEYS_MEMO.clear()
+
+
+class ScaleBlocksAndResumeTests(unittest.TestCase):
+    def test_sublot_is_one_tavily_account_budget_and_budgets_scale(self):
+        with patch("builtins.input", side_effect=["3", "13010", "1", "EXECUTAR"]), \
+             patch.object(pp, "_night_incomplete_campaigns", return_value=[]):
+            args = pp.interactive_menu(ROOT)
+        self.assertEqual(args.search_budget, 1000)
+        self.assertEqual(args.llm_budget, 1500)
+        self.assertEqual(args.token_budget, 3_000_000)
+        self.assertEqual(args.timeout_minutes, 1440)
+        self.assertEqual(args.campaign_total, 13010)
+
+    def test_blocks_are_written_to_final_before_the_next_block_starts(self):
+        import types
+        order, totals = [], []
+
+        def fake_campaign(sub, cfg, rules=None):
+            order.append("campaign")
+            totals.append((sub.campaign_total, sub.campaign_jev_budget, sub.campaign_token_budget))
+            return 0
+
+        args = types.SimpleNamespace(campaign_total=4500, campaign_resume_dir="",
+                                     campaign_jev_budget=0, campaign_token_budget=0)
+        with patch.object(pp, "exclusive_campaign_lock", contextlib.nullcontext), \
+             patch.object(pp, "overnight_campaign", side_effect=fake_campaign), \
+             patch.object(pp, "overnight_promote_pending_auto",
+                          side_effect=lambda c, r: order.append("promote") or 0):
+            self.assertEqual(pp._run_menu_campaign_blocks(args, {}, object()), 0)
+        self.assertEqual(order, ["campaign", "promote"] * 3)
+        self.assertEqual([t[0] for t in totals], [2000, 2000, 500])
+        self.assertEqual(totals[0][1:], (3000, 6000000))
+
+    def test_failed_block_stops_without_promoting_or_starting_next(self):
+        import types
+        calls = []
+        args = types.SimpleNamespace(campaign_total=4000, campaign_resume_dir="")
+        with patch.object(pp, "exclusive_campaign_lock", contextlib.nullcontext), \
+             patch.object(pp, "overnight_campaign", side_effect=lambda *a, **k: calls.append("c") or 2), \
+             patch.object(pp, "overnight_promote_pending_auto") as promote:
+            self.assertEqual(pp._run_menu_campaign_blocks(args, {}, object()), 2)
+        self.assertEqual(calls, ["c"])
+        promote.assert_not_called()
+
+    def test_menu_offers_resume_of_interrupted_campaign_with_same_authorizations(self):
+        state = {"audited_products": 1000,
+                 "limits": {"target": 2000, "search_per_sublot": 1000,
+                            "jev_limit": 3000, "token_limit": 6000000},
+                 "night_include_raw_missing": True, "night_allow_previous_errors": True,
+                 "serper_rescue": True}
+        with patch.object(pp, "_night_incomplete_campaigns",
+                          return_value=[(Path("C:/x/campaigns/abc"), state)]), \
+             patch("builtins.input", side_effect=["3", "S"]):
+            args = pp.interactive_menu(ROOT)
+        self.assertTrue(args._from_menu)
+        self.assertTrue(args.campaign_resume_dir.endswith("abc"))
+        self.assertEqual((args.campaign_total, args.search_budget,
+                          args.campaign_jev_budget, args.campaign_token_budget),
+                         (2000, 1000, 3000, 6000000))
+        self.assertTrue(args.night_allow_previous_errors and args.night_include_raw_missing
+                        and args.allow_prior_serper_quota_error)
+
+    def test_only_cleanly_interrupted_campaigns_are_listed(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for name, status in (("a", "RUNNING"), ("b", "BLOCKED"), ("c", "COMPLETE")):
+                (root / "campaigns" / name).mkdir(parents=True)
+                (root / "campaigns" / name / "campaign.json").write_text(json.dumps(
+                    {"status": status, "night_output_only": True, "tavily_pool": True}), encoding="utf-8")
+            with patch.object(pp, "OUT", root):
+                self.assertEqual([f.name for f, _ in pp._night_incomplete_campaigns()], ["a"])
+
+
 if __name__ == "__main__":
     unittest.main()
