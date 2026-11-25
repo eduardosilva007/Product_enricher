@@ -10752,7 +10752,7 @@ def run_pipeline(
             raise RuntimeError("OUTPUT_ONLY_ISOLATED_PATH_CONTRACT_FAILED")
         original_state = json.loads((isolated_run / "run_report.json").read_text(encoding="utf-8"))
         if (original_state.get("mode") != "ISOLATED_RAW_EMPTY_CONTROLLED"
-                or not 1 <= original_state.get("cohort_count", 0) <= 20):
+                or not 1 <= original_state.get("cohort_count", 0) <= SUBLOT_SEARCH_MAX):
             raise RuntimeError("OUTPUT_ONLY_INVALID_COHORT_STATE")
 
     baseline_pre_stats: Dict[str, int] = {}
@@ -13729,6 +13729,24 @@ def exclusive_campaign_lock():
             try:yield
             finally:fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
 
+def _classification_failed_before_llm(run: Path, stage: dict) -> bool:
+    """True only when the classification worker died before ANY JEV traffic: failed
+    once (exit 1) and its log never reached the LLM budget/pre-flight lines. Then no
+    JEV call or token can have been spent, so re-running that stage is safe."""
+    try:
+        if (stage.get("status") != "FAIL" or stage.get("attempts") != 1
+                or stage.get("exit_code") != 1 or not stage.get("log")):
+            return False
+        log = Path(run) / safe(stage["log"])
+        if not log.is_file():
+            return False
+        text = log.read_text(encoding="utf-8", errors="replace")
+        return ("Traceback" in text and "LLM BUDGET" not in text
+                and "LLM PRE-FLIGHT" not in text and "PROGRESSO" not in text)
+    except (OSError, ValueError):
+        return False
+
+
 def overnight_run_one(args, cfg, on_run_created=None):
     # Master parser provides args; no shadow CLI.
     if not args.execute_live:
@@ -13796,6 +13814,17 @@ def overnight_run_one(args, cfg, on_run_created=None):
         # failure remains in recovery metadata. Salvage the durable partial
         # workbook ONLY after independent audit; never invoke JEV again.
         previous_classification = stages.get("classification", {})
+        if (args.resume_dir and _classification_failed_before_llm(run, previous_classification)):
+            old_log = run / safe(previous_classification["log"])
+            kept = run / "classification_01.failed_before_llm.log"
+            shutil.move(str(old_log), str(kept))
+            stages["classification_failed_before_llm"] = dict(previous_classification,
+                                                              preserved_log=kept.name)
+            stages["classification"] = {"attempts": 0}
+            atomic_json(run / "run_report.json", state)
+            LOG.warning("CLASSIFICATION RE-RUN | previous failure happened before any JEV call "
+                        "(log preserved: %s); collection is NOT repeated", kept.name)
+            previous_classification = stages["classification"]
         if (args.resume_dir and isolated.get("_nightly_output_only")
                 and previous_classification.get("status") == "FAIL"
                 and previous_classification.get("attempts") == 1
@@ -15035,7 +15064,15 @@ def _night_incomplete_campaigns():
     found = []
     for manifest in sorted((OUT / "campaigns").glob("*/campaign.json")):
         state = read_json(manifest)
-        if (state.get("status") in {"RUNNING", "READY", "PAUSED_FOR_RESUME_TEST"}
+        status_ok = state.get("status") in {"RUNNING", "READY", "PAUSED_FOR_RESUME_TEST"}
+        if (not status_ok and state.get("status") == "BLOCKED" and state.get("active_run")):
+            active = Path(state["active_run"])
+            try:
+                status_ok = _classification_failed_before_llm(
+                    active, (read_json(active / "run_report.json").get("stages") or {}).get("classification", {}))
+            except (OSError, ValueError):
+                status_ok = False
+        if (status_ok
                 and state.get("night_output_only")
                 and state.get("tavily_pool")
                 and (state.get("promotion") or {}).get("status") != "COMMITTED"):
