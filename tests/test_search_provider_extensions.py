@@ -13,6 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProviderExtensionTests(unittest.TestCase):
+
+    def setUp(self):
+        # Never depend on campaigns that exist on the machine running the tests.
+        import pipeline_produtos as _pp
+        from unittest.mock import patch as _patch
+        _p = _patch.object(_pp, "_night_incomplete_campaigns", return_value=[])
+        _p.start()
+        self.addCleanup(_p.stop)
     def test_scraperapi_raw_shape_and_goto_block(self):
         sample = {
             "organic_results": [
@@ -53,39 +61,30 @@ class ProviderExtensionTests(unittest.TestCase):
             normalize_openserp({"status": "FAILED", "organic": []})
 
     def test_no_new_automatic_router_or_extra_search(self):
-        source = (ROOT / "pipeline_produtos.py").read_text(encoding="utf-8-sig")
-        ast.parse(source)
-        self.assertIn('ALLOWED_SEARCH_PROVIDERS = {"tavily", "serper", "brightdata", "scraperapi", "openserp"}', source)
-        self.assertIn('if provider == "scraperapi":', source)
-        self.assertIn('"4": "scraperapi"', source)
-        self.assertIn('"5": "openserp"', source)
-        self.assertIn('if provider == "openserp":', source)
-        self.assertIn('for provider, prefix in (("tavily","TAVILY"),("brightdata","BRIGHTDATA"),("serper","SERPER")):', source)
-        self.assertIn('EXPERIMENTAL_PROVIDER_MANUAL_ONLY', source)
-        self.assertIn('_experimental_collected_targets', source)
-        self.assertIn('run_pipeline(args, cfg, rules, explicit_targets=targets)', source)
+        import pipeline_produtos as pp
+        self.assertEqual(pp.ALLOWED_SEARCH_PROVIDERS, {"tavily", "serper", "brightdata", "scraperapi"})
+        self.assertEqual(pp.MAX_COLLECTION_REQUESTS_PER_PRODUCT, 1)
+        # Auto-router slots are limited to the three account-based providers.
+        import os
+        from unittest.mock import patch
+        env = {"SCRAPERAPI_API_KEY_1": "x", "SCRAPERAPI_LIMIT_1": "5"}
+        with patch.dict(os.environ, env):
+            self.assertFalse([s for s in pp.configured_slots() if s.provider == "scraperapi"])
 
-    def test_menu_full_auto_routes_to_existing_account_router(self):
+    def test_menu_full_routes_to_tavily_pool(self):
         from unittest.mock import patch
         from pipeline_produtos import interactive_menu
-        responses = iter(("3", "6", "3", "3", "1", "N"))
+        responses = iter(("3", "3", "1"))  # processo completo, 3 SKUs, JEV
         with patch("builtins.input", side_effect=lambda *_: next(responses)):
             args = interactive_menu(ROOT)
         self.assertEqual(args.mode, "full")
-        self.assertTrue(args.auto_providers)
+        self.assertEqual(args.search_provider, "tavily")
+        self.assertTrue(args.tavily_pool)
         self.assertEqual(args.max_tavily_new, 3)
         self.assertEqual(args.max_items, 3)
         self.assertEqual(args.llm_provider, "jev")
         self.assertEqual(args.max_api_calls, 15)
         self.assertEqual(args.max_tokens, 30000)
-
-    def test_menu_openserp_is_explicitly_staged_no_live_search(self):
-        from unittest.mock import patch
-        from pipeline_produtos import interactive_menu
-        responses = iter(("3", "5"))
-        with patch("builtins.input", side_effect=lambda *_: next(responses)):
-            with self.assertRaisesRegex(RuntimeError, "OPENSERP_GITHUB_ACTIONS_ONLY"):
-                interactive_menu(ROOT)
 
     def test_simplified_menu_routes_maintenance(self):
         from unittest.mock import patch
@@ -187,7 +186,7 @@ class ProviderExtensionTests(unittest.TestCase):
             marker = Path(folder) / "staging.json"
             marker.write_text("{}", encoding="utf-8")
             cfg["_openserp_artifact_path"] = str(marker)
-            for provider in ("openserp", "scraperapi"):
+            for provider in ("scraperapi",):  # openserp discontinued
                 args = build_parser().parse_args([
                     "--mode", "full", "--search-provider", provider,
                     "--max-search-new", "3", "--max-items", "3",
@@ -304,12 +303,21 @@ class ProviderExtensionTests(unittest.TestCase):
             self.assertEqual(plan.candidates[0].model_original, "SKU100")
 
     def test_auto_route_full_cohort_is_input_scoped(self):
-        source = (ROOT / "pipeline_produtos.py").read_text(encoding="utf-8-sig")
-        self.assertIn("AUTO_ROUTE_PILOT_SEARCH_CAP_REQUIRED",source)
-        self.assertIn("AUTO_ROUTE_PILOT_CLASSIFICATION_CAP_REQUIRED",source)
-        self.assertIn('if (auto_route or provider in {"openserp", "scraperapi"}) and curated:', source)
-        self.assertIn('if args.auto_providers or provider in {"openserp", "scraperapi"}:',source)
-        self.assertIn('run_pipeline(args, cfg, rules, explicit_targets=targets)',source)
+        """Pilot FULL route is capped BEFORE any I/O or paid call."""
+        from types import SimpleNamespace
+        from pipeline_produtos import build_parser, collect_products, read_json
+        cfg = read_json(ROOT / "pipeline_config.json")
+        base = ["--mode", "full", "--search-provider", "tavily", "--tavily-pool",
+                "--max-items", "11", "--max-api-calls", "15", "--max-tokens", "30000"]
+        args = build_parser().parse_args(base + ["--max-search-new", "11"])
+        with self.assertRaisesRegex(ValueError, "AUTO_ROUTE_PILOT_SEARCH_CAP_REQUIRED"):
+            collect_products(args, cfg, SimpleNamespace())
+        args = build_parser().parse_args(
+            ["--mode", "full", "--search-provider", "tavily", "--tavily-pool",
+             "--max-search-new", "5", "--max-items", "5", "--max-api-calls", "101",
+             "--max-tokens", "30000"])
+        with self.assertRaisesRegex(ValueError, "AUTO_ROUTE_PILOT_CLASSIFICATION_CAP_REQUIRED"):
+            collect_products(args, cfg, SimpleNamespace())
 
     def test_serper_quota_recovery_preserves_unknown_and_audit(self):
         import sqlite3

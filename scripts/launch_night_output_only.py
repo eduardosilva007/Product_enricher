@@ -143,7 +143,8 @@ def main() -> int:
     # The canonical classification SQLite can contain Search reservations
     # not represented by any controlled-night run_report. The real collector
     # refuses those too: preflight MUST exclude the same SKUs.
-    prior_attempts.update(core.prior_attempts_in_database(sources["classification_db"]))
+    prior_attempts.update(core.prior_attempts_for_selection(
+        sources["classification_db"], bool(args.allow_serper_quota_errors)))
     available, selection = core.select_overnight_eligible(
         audit, prior_attempts,
         include_raw_missing=args.include_raw_missing,

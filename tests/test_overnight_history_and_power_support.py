@@ -63,13 +63,32 @@ class HistoricalReservationTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM collection_attempt_reservations"
                 ).fetchone()[0], 2)
 
-    def test_conflicting_account_provider_still_blocks(self):
+    def test_conflicting_account_provider_is_charged_not_hidden(self):
+        """A SKU attempted on two accounts stays reserved ONCE (never re-queried)
+        and BOTH account exposures are charged. Superseded the old hard failure;
+        see test_overnight_history_conflict_budget for the budget side."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             history_run(root, "first", ["A|123"], [("A|123", "tavily:1", "tavily")])
             history_run(root, "second", ["A|123"], [("A|123", "brightdata:1", "brightdata")])
-            with self.assertRaisesRegex(RuntimeError, "Conflicting historical reservation"):
-                import_prior_reservations(root / "new.sqlite", root)
+            stats = import_prior_reservations(root / "new.sqlite", root)
+            self.assertEqual(stats["historical_account_conflicts"], 1)
+            self.assertEqual(stats["historical_extra_account_exposures"], 1)
+            with closing(sqlite3.connect(root / "new.sqlite")) as db:
+                self.assertEqual(db.execute(
+                    "SELECT COUNT(*) FROM collection_attempt_reservations").fetchone()[0], 1)
+                self.assertEqual(db.execute(
+                    "SELECT COUNT(*) FROM collection_attempt_reservation_exposures").fetchone()[0], 1)
+
+    def test_ledger_without_reserved_at_still_blocks_requery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            history_run(root, "legacy", ["A|123"], [("A|123", "tavily:1", "tavily")])
+            import_prior_reservations(root / "new.sqlite", root)
+            with closing(sqlite3.connect(root / "new.sqlite")) as db:
+                row = db.execute("SELECT account,reserved_at FROM collection_attempt_reservations").fetchone()
+            self.assertEqual(row[0], "tavily:1")
+            self.assertTrue(row[1])
 
     def test_missing_current_run_reservation_never_borrows_previous_run(self):
         with tempfile.TemporaryDirectory() as tmp:

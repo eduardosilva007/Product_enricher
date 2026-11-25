@@ -13,6 +13,14 @@ from pipeline_produtos import DurableRouter, configured_slots, build_parser
 
 
 class TavilyAuthorizedPoolTests(unittest.TestCase):
+
+    def setUp(self):
+        # Never depend on campaigns that exist on the machine running the tests.
+        import pipeline_produtos as _pp
+        from unittest.mock import patch as _patch
+        _p = _patch.object(_pp, "_night_incomplete_campaigns", return_value=[])
+        _p.start()
+        self.addCleanup(_p.stop)
     def test_parser_accepts_explicit_pool_mode(self):
         args = build_parser().parse_args([
             "--mode", "collect", "--search-provider", "tavily",
@@ -70,9 +78,9 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
         self.assertTrue(args.execute_live)
         self.assertTrue(args.tavily_pool)
         self.assertEqual(args.campaign_total, 50)
-        self.assertEqual(args.search_budget, 10)
-        self.assertEqual(args.llm_budget, 15)
-        self.assertEqual(args.token_budget, 30000)
+        self.assertEqual(args.search_budget, 50)
+        self.assertEqual(args.llm_budget, 75)
+        self.assertEqual(args.token_budget, 150000)
         self.assertEqual(args.campaign_jev_budget, 75)
         self.assertEqual(args.campaign_token_budget, 150000)
         self.assertTrue(args.campaign_review_before_promotion)
@@ -99,7 +107,7 @@ class TavilyAuthorizedPoolTests(unittest.TestCase):
         with patch("builtins.input", side_effect=lambda *_: next(responses)):
             args = interactive_menu(Path("."))
         self.assertEqual(args.campaign_total, 500)
-        self.assertEqual(args.search_budget, 10)
+        self.assertEqual(args.search_budget, 500)
         self.assertEqual(args.campaign_jev_budget, 750)
         self.assertEqual(args.campaign_token_budget, 1500000)
         self.assertTrue(args.night_include_raw_missing)
