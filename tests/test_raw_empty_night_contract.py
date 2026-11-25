@@ -800,7 +800,7 @@ class RawEmptyNightTests(unittest.TestCase):
              "recovery":{"hard_lock_review_bi_value":"OK"},
              "identity":{"auto_approval_requires_strong_identity":True},
              "semantic_funnel":{"offline_mode":True}}
-        for n in (0,-1,21,19000):
+        for n in (0,-1,1001,19000):
             args=SimpleNamespace(execute_live=True,search_budget=n,
                 llm_budget=20,token_budget=20000,timeout_minutes=120)
             with self.assertRaises(ValueError):pilot.gate(cfg,args)

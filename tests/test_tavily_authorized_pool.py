@@ -13,6 +13,14 @@ from pipeline_produtos import DurableRouter, configured_slots, build_parser
 
 
 class TavilyAuthorizedPoolTests(unittest.TestCase):
+
+    def setUp(self):
+        # Never depend on campaigns that exist on the machine running the tests.
+        import pipeline_produtos as _pp
+        from unittest.mock import patch as _patch
+        _p = _patch.object(_pp, "_night_incomplete_campaigns", return_value=[])
+        _p.start()
+        self.addCleanup(_p.stop)
     def test_parser_accepts_explicit_pool_mode(self):
         args = build_parser().parse_args([
             "--mode", "collect", "--search-provider", "tavily",

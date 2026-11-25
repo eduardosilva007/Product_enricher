@@ -11750,8 +11750,14 @@ def interactive_menu(base: Path) -> argparse.Namespace:
             limits = data.get("limits", {})
             print(f"CAMPANHA INTERROMPIDA: {folder.name} | {data.get('audited_products')}/"
                   f"{limits.get('target')} SKUs auditados")
-            if input("Retomar esta campanha? (S/N): ").strip().upper() == "S":
+            answer = input("Retomar (S), iniciar nova (N) ou descartar esta campanha (D)? ").strip().upper()
+            if answer == "S":
                 return _resume_campaign_args(parser, folder, data)
+            if answer == "D":
+                data["status"] = "ABANDONED_BY_USER"
+                data["abandoned_at"] = now_iso()
+                atomic_json(folder / "campaign.json", data)
+                print("Campanha descartada (reservas e logs preservados). Seguindo para uma nova.")
         quantidade = _menu_limit("Total de SKUs da campanha (numero positivo): ")
         if quantidade < 1:
             raise ValueError("FULL_CAMPAIGN_REQUIRES_POSITIVE_TOTAL")

@@ -14,6 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class MenuPromotionFlowTests(unittest.TestCase):
+    def setUp(self):
+        # Never depend on campaigns that exist on the machine running the tests.
+        _p = patch.object(pp, "_night_incomplete_campaigns", return_value=[])
+        _p.start()
+        self.addCleanup(_p.stop)
     def test_main_menu_has_no_separate_promotion_step(self):
         with patch("builtins.input", side_effect=["5"]), self.assertRaises(ValueError):
             pp.interactive_menu(ROOT)
@@ -228,6 +233,20 @@ class ScaleBlocksAndResumeTests(unittest.TestCase):
             self.assertEqual(pp._run_menu_campaign_blocks(args, {}, object()), 2)
         self.assertEqual(calls, ["c"])
         promote.assert_not_called()
+
+    def test_discarding_an_old_campaign_marks_it_and_starts_a_new_one(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d) / "old"
+            folder.mkdir()
+            data = {"status": "RUNNING", "limits": {"target": 20}, "audited_products": 0}
+            (folder / "campaign.json").write_text(json.dumps(data), encoding="utf-8")
+            with patch.object(pp, "_night_incomplete_campaigns", return_value=[(folder, data)]), \
+                 patch("builtins.input", side_effect=["3", "D", "20", "1", "EXECUTAR"]):
+                args = pp.interactive_menu(ROOT)
+            self.assertEqual(args.mode, "overnight")
+            self.assertEqual(json.loads((folder / "campaign.json").read_text())["status"],
+                             "ABANDONED_BY_USER")
 
     def test_menu_offers_resume_of_interrupted_campaign_with_same_authorizations(self):
         state = {"audited_products": 1000,
